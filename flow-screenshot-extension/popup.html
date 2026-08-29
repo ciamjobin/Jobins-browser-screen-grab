@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <h1>Flow Screenshot Recorder</h1>
+
+    <p id="status" class="status idle">Idle</p>
+
+    <div class="settings">
+      <label class="field">
+        <span>Capture source</span>
+        <select id="captureMode">
+          <option value="tab">Tab viewport only</option>
+          <option value="api">API + Screenshot</option>
+          <option value="screen">Screen / window (DevTools + taskbar)</option>
+        </select>
+      </label>
+
+      <p class="note" id="shortcutHint" hidden>
+        Press <strong>Alt+Shift+S</strong> while a DevTools Headers / Payload / Response panel is open to
+        capture it.
+      </p>
+
+      <label class="check"><input type="checkbox" id="captureOnClick" /> Capture on every button click</label>
+      <label class="check"><input type="checkbox" id="stampTimestamp" /> Stamp clock + time zone on each shot</label>
+      <label class="check"><input type="checkbox" id="savePng" /> Save individual PNG files</label>
+      <label class="check"><input type="checkbox" id="savePdf" /> Save PDF on stop (page title as heading)</label>
+    </div>
+
+    <div class="actions" id="mainActions">
+      <button id="toggle" class="primary">Start recording</button>
+      <button id="captureNow" disabled>Capture now</button>
+    </div>
+
+    <div class="confirm" id="confirm" hidden>
+      <p>Keep the files captured in this session?</p>
+      <div class="actions">
+        <button id="keepYes" class="primary">Yes, keep</button>
+        <button id="keepNo" class="danger">No, delete all</button>
+      </div>
+    </div>
+
+    <h2>Captures</h2>
+    <ul id="captureList" class="captures">
+      <li class="empty">No captures yet.</li>
+    </ul>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

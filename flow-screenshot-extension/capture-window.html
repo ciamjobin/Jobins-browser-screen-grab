@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Share your screen</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="capture-window">
+    <h1>Share your screen to start recording</h1>
+    <p id="hint">
+      Pick <strong>Entire Screen</strong> to include the Windows taskbar and an undocked DevTools window.
+      Pick the <strong>Chrome window</strong> if DevTools is docked.
+    </p>
+    <p id="state" class="status idle">Waiting for you to share&hellip;</p>
+    <div class="actions">
+      <button id="share" class="primary">Choose what to share</button>
+    </div>
+    <p class="note">Keep this small window open for the whole recording. It holds the screen stream.</p>
+
+    <video id="preview" muted autoplay playsinline></video>
+    <script src="capture-window.js"></script>
+  </body>
+</html>
