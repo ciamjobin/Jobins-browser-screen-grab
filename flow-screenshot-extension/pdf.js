@@ -48,17 +48,32 @@ function layoutImage(width, height, top, bottom) {
 
 const API_FONT = 7.5;
 const API_LINE = 9.5;
-const API_MAX_LINES = 5;
-const API_MAX_ROWS = 4;
+const API_GUTTER = 12;
+const API_ROW_GAP = 5;
+const API_HEADER_HEIGHT = 34;
+const API_MIN_SPLIT_LINES = 4;
+// Cap the table on the screenshot page so the image keeps a usable share; the rest spills over.
+const API_FIRST_PAGE_HEIGHT = PAGE_HEIGHT * 0.4;
 const API_COLUMNS = [
   { title: 'API Name', key: 'name', ratio: 0.24 },
   { title: 'Payload', key: 'payload', ratio: 0.36 },
   { title: 'Response', key: 'response', ratio: 0.4 }
 ];
 
-// Helvetica averages about half the point size per glyph; good enough to wrap into fixed columns.
+function apiColumns() {
+  const usable = PAGE_WIDTH - MARGIN * 2;
+  let x = MARGIN;
+  return API_COLUMNS.map((column) => {
+    const width = usable * column.ratio;
+    const laid = { ...column, x, width, textWidth: width - API_GUTTER };
+    x += width;
+    return laid;
+  });
+}
+
+// Helvetica alphanumerics run about 0.6 em wide; erring high keeps dense payloads inside their column.
 function wrapToWidth(text, width) {
-  const perLine = Math.max(8, Math.floor(width / (API_FONT * 0.5)));
+  const perLine = Math.max(8, Math.floor(width / (API_FONT * 0.6)));
   const lines = [];
   for (const raw of String(text ?? '').split('\n')) {
     if (!raw) {
@@ -70,36 +85,50 @@ function wrapToWidth(text, width) {
   return lines.length ? lines : [''];
 }
 
-function layoutApiTable(rows) {
-  const usable = PAGE_WIDTH - MARGIN * 2;
-  let x = MARGIN;
-  const columns = API_COLUMNS.map((column) => {
-    const laid = { ...column, x, width: usable * column.ratio };
-    x += laid.width;
-    return laid;
-  });
-
-  const visible = rows.slice(0, API_MAX_ROWS);
-  const laidRows = visible.map((row) => {
-    const cells = columns.map((column) => {
-      const lines = wrapToWidth(row[column.key], column.width - 8);
-      return lines.length > API_MAX_LINES ? [...lines.slice(0, API_MAX_LINES - 1), '...'] : lines;
-    });
+function wrapApiRows(rows, columns) {
+  return rows.map((row) => {
+    const cells = columns.map((column) => wrapToWidth(row[column.key], column.textWidth));
     return { cells, lineCount: Math.max(...cells.map((lines) => lines.length)) };
   });
-
-  const overflow = rows.length - visible.length;
-  const height =
-    16 + 12 + laidRows.reduce((total, row) => total + row.lineCount * API_LINE + 5, 0) + (overflow ? 11 : 0);
-
-  return { columns, rows: laidRows, overflow, height };
 }
 
-function apiTableOps(table, bottom) {
+/** Fills one page with as many wrapped rows as fit, splitting a tall row across pages rather than dropping it. */
+function takeApiRows(wrapped, maxHeight) {
+  const taken = [];
+  let used = API_HEADER_HEIGHT;
+  let index = 0;
+
+  while (index < wrapped.length) {
+    const row = wrapped[index];
+    const rowHeight = row.lineCount * API_LINE + API_ROW_GAP;
+    if (used + rowHeight <= maxHeight) {
+      taken.push(row);
+      used += rowHeight;
+      index += 1;
+      continue;
+    }
+
+    const availableLines = Math.floor((maxHeight - used - API_ROW_GAP) / API_LINE);
+    if (availableLines >= API_MIN_SPLIT_LINES) {
+      taken.push({ cells: row.cells.map((lines) => lines.slice(0, availableLines)), lineCount: availableLines });
+      used += availableLines * API_LINE + API_ROW_GAP;
+      const rest = {
+        cells: row.cells.map((lines) => lines.slice(availableLines)),
+        lineCount: row.lineCount - availableLines
+      };
+      return { taken, remaining: [rest, ...wrapped.slice(index + 1)], height: used };
+    }
+    break;
+  }
+
+  return { taken, remaining: wrapped.slice(index), height: used };
+}
+
+function apiTableOps(table, bottom, heading) {
   const ops = [];
   let y = bottom + table.height - 10;
 
-  ops.push(`BT /F1 9 Tf 0 0 0 rg 1 0 0 1 ${MARGIN} ${y.toFixed(2)} Tm ${pdfText('API calls in this step', 40)} Tj ET`);
+  ops.push(`BT /F1 9 Tf 0 0 0 rg 1 0 0 1 ${MARGIN} ${y.toFixed(2)} Tm ${pdfText(heading, 60)} Tj ET`);
   y -= 13;
 
   for (const column of table.columns) {
@@ -121,14 +150,7 @@ function apiTableOps(table, bottom) {
         );
       });
     });
-    y -= row.lineCount * API_LINE + 5;
-  }
-
-  if (table.overflow) {
-    ops.push(
-      `BT /F2 ${API_FONT} Tf 0.4 0.4 0.4 rg 1 0 0 1 ${MARGIN} ${y.toFixed(2)} Tm ` +
-        `${pdfText(`+ ${table.overflow} more call(s) in this step`, 60)} Tj ET`
-    );
+    y -= row.lineCount * API_LINE + API_ROW_GAP;
   }
 
   ops.push('0 0 0 rg');
@@ -144,14 +166,22 @@ function underline(text, y) {
   return `0.5 w ${MARGIN} ${y.toFixed(2)} m ${(MARGIN + width).toFixed(2)} ${y.toFixed(2)} l S`;
 }
 
-function contentStream(page) {
+function contentStream(page, table, drawImage) {
   const titleY = PAGE_HEIGHT - MARGIN - TITLE_SIZE;
+
+  if (!drawImage) {
+    const title = `${page.title || 'Untitled page'} | API calls (continued)`;
+    return [
+      `BT /F1 ${TITLE_SIZE} Tf 0 0 0 rg 1 0 0 1 ${MARGIN} ${titleY} Tm ${pdfText(title, 110)} Tj ET`,
+      table ? apiTableOps(table, titleY - 10 - table.height, 'API calls (continued)') : ''
+    ].join('\n');
+  }
+
   const urlHeadingY = titleY - 18;
   const urlY = urlHeadingY - 11;
   const timeHeadingY = urlY - 15;
   const timeY = timeHeadingY - 11;
 
-  const table = page.apiRows?.length ? layoutApiTable(page.apiRows) : null;
   const imageBottom = MARGIN + (table ? table.height + 10 : 0);
   const box = layoutImage(page.width, page.height, timeY - 12, imageBottom);
 
@@ -169,7 +199,7 @@ function contentStream(page) {
 
     '0 0 0 rg',
     `q ${box.width} 0 0 ${box.height} ${box.x} ${box.y} cm /Im0 Do Q`,
-    table ? apiTableOps(table, MARGIN) : ''
+    table ? apiTableOps(table, MARGIN, 'API calls in this step') : ''
   ].join('\n');
 }
 
@@ -178,49 +208,76 @@ function contentStream(page) {
  * @returns {Uint8Array} the complete PDF document
  */
 export function buildPdf(pages) {
-  const pageObj = (index) => 5 + index * 3;
-  const contentObj = (index) => pageObj(index) + 1;
-  const imageObj = (index) => pageObj(index) + 2;
+  const columns = apiColumns();
+  // Continuation sheets run from just under the title down to the bottom margin.
+  const contPageHeight = PAGE_HEIGHT - MARGIN * 2 - TITLE_SIZE - 10;
 
-  const objects = [
-    encodeLatin1('<< /Type /Catalog /Pages 2 0 R >>'),
-    encodeLatin1(
-      `<< /Type /Pages /Kids [${pages.map((_, i) => `${pageObj(i)} 0 R`).join(' ')}] /Count ${pages.length} >>`
-    ),
-    encodeLatin1('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>'),
-    encodeLatin1('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>')
-  ];
+  // Every screenshot yields one sheet plus however many continuation sheets its API rows need.
+  const sheets = [];
+  const imageNums = [];
+  let next = 5;
+
+  pages.forEach(() => imageNums.push(next++));
 
   pages.forEach((page, index) => {
-    const stream = encodeLatin1(contentStream(page));
+    let remaining = page.apiRows?.length ? wrapApiRows(page.apiRows, columns) : [];
+    let drawImage = true;
 
-    objects.push(
-      encodeLatin1(
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}] ` +
-          `/Resources << /XObject << /Im0 ${imageObj(index)} 0 R >> /Font << /F1 3 0 R /F2 4 0 R >> >> ` +
-          `/Contents ${contentObj(index)} 0 R >>`
-      )
-    );
+    do {
+      const budget = drawImage ? API_FIRST_PAGE_HEIGHT : contPageHeight;
+      const slice = remaining.length ? takeApiRows(remaining, budget) : { taken: [], remaining: [], height: 0 };
+      const table = slice.taken.length ? { columns, rows: slice.taken, height: slice.height } : null;
 
-    objects.push(
-      concat([
-        encodeLatin1(`<< /Length ${stream.length} >>\nstream\n`),
-        stream,
-        encodeLatin1('\nendstream')
-      ])
-    );
+      sheets.push({
+        page,
+        table,
+        drawImage,
+        imageNum: imageNums[index],
+        pageNum: next++,
+        contentNum: next++
+      });
 
-    objects.push(
-      concat([
-        encodeLatin1(
-          `<< /Type /XObject /Subtype /Image /Width ${page.width} /Height ${page.height} ` +
-            `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${page.jpeg.length} >>\nstream\n`
-        ),
-        page.jpeg,
-        encodeLatin1('\nendstream')
-      ])
-    );
+      // A continuation sheet that fits nothing would loop forever; drop the leftovers instead.
+      remaining = table || drawImage ? slice.remaining : [];
+      drawImage = false;
+    } while (remaining.length);
   });
+
+  const objects = new Array(next - 1);
+  objects[0] = encodeLatin1('<< /Type /Catalog /Pages 2 0 R >>');
+  objects[1] = encodeLatin1(
+    `<< /Type /Pages /Kids [${sheets.map((sheet) => `${sheet.pageNum} 0 R`).join(' ')}] /Count ${sheets.length} >>`
+  );
+  objects[2] = encodeLatin1('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+  objects[3] = encodeLatin1('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+
+  pages.forEach((page, index) => {
+    objects[imageNums[index] - 1] = concat([
+      encodeLatin1(
+        `<< /Type /XObject /Subtype /Image /Width ${page.width} /Height ${page.height} ` +
+          `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${page.jpeg.length} >>\nstream\n`
+      ),
+      page.jpeg,
+      encodeLatin1('\nendstream')
+    ]);
+  });
+
+  for (const sheet of sheets) {
+    const stream = encodeLatin1(contentStream(sheet.page, sheet.table, sheet.drawImage));
+    const xobject = sheet.drawImage ? `/XObject << /Im0 ${sheet.imageNum} 0 R >> ` : '';
+
+    objects[sheet.pageNum - 1] = encodeLatin1(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}] ` +
+        `/Resources << ${xobject}/Font << /F1 3 0 R /F2 4 0 R >> >> ` +
+        `/Contents ${sheet.contentNum} 0 R >>`
+    );
+
+    objects[sheet.contentNum - 1] = concat([
+      encodeLatin1(`<< /Length ${stream.length} >>\nstream\n`),
+      stream,
+      encodeLatin1('\nendstream')
+    ]);
+  }
 
   const chunks = [encodeLatin1('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n')];
   let offset = chunks[0].length;
