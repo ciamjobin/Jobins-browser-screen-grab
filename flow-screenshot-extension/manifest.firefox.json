@@ -3,21 +3,25 @@
   "name": "Flow Screenshot Recorder",
   "version": "2.7.0",
   "description": "Records a flow as timestamped, watermarked screenshots with an API Name/Origin/Payload/Response table under each step, and exports a titled PDF.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "flow-screenshot-recorder@jobin.local",
+      "strict_min_version": "128.0"
+    }
+  },
   "permissions": [
     "tabs",
     "downloads",
-    "downloads.ui",
     "storage",
     "unlimitedStorage",
     "webNavigation",
-    "scripting",
-    "offscreen"
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "background.js",
+    "scripts": ["background.js"],
     "type": "module"
   },
   "content_scripts": [

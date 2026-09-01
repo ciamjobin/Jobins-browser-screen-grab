@@ -102,7 +102,22 @@ async function updateBadge(state) {
 
 /* ---------------------------------------------------------------- offscreen */
 
+// Chromium runs the background as a DOM-less service worker and needs an offscreen document for
+// canvas work. Firefox runs it as an event page that already has a DOM, so it renders in place.
+const HAS_OFFSCREEN = typeof chrome.offscreen !== 'undefined';
+let imageWorker = null;
+
+async function localImageWorker() {
+  imageWorker ??= await import('./image-worker.js');
+  return imageWorker;
+}
+
 async function ensureOffscreen() {
+  if (!HAS_OFFSCREEN) {
+    await localImageWorker();
+    return;
+  }
+
   if (!(await chrome.offscreen.hasDocument())) {
     try {
       await chrome.offscreen.createDocument({
@@ -128,6 +143,7 @@ async function ensureOffscreen() {
 }
 
 async function closeOffscreen() {
+  if (!HAS_OFFSCREEN) return;
   if (await chrome.offscreen.hasDocument()) {
     await chrome.offscreen.closeDocument();
   }
@@ -135,6 +151,11 @@ async function closeOffscreen() {
 
 async function askOffscreen(type, payload = {}) {
   try {
+    if (!HAS_OFFSCREEN) {
+      const worker = await localImageWorker();
+      return await worker.handlers[type]({ type, ...payload });
+    }
+
     const response = await chrome.runtime.sendMessage({ target: 'offscreen', type, ...payload });
     return response ?? { error: `No response from offscreen worker for ${type}.` };
   } catch (error) {
