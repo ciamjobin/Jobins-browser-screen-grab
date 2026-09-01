@@ -52,9 +52,10 @@ const TABLE_TITLE_HEIGHT = 34;
 const TABLE_HEADER_HEIGHT = 30;
 
 const TABLE_COLUMNS = [
-  { title: 'API Name', key: 'name', ratio: 0.24 },
-  { title: 'Payload', key: 'payload', ratio: 0.36 },
-  { title: 'Response', key: 'response', ratio: 0.4 }
+  { title: 'API Name', key: 'name', ratio: 0.2 },
+  { title: 'Origin / Source', key: 'origin', ratio: 0.22 },
+  { title: 'Payload', key: 'payload', ratio: 0.28 },
+  { title: 'Response', key: 'response', ratio: 0.3 }
 ];
 
 function layoutApiTable(rows, width) {
@@ -113,6 +114,7 @@ function drawApiTable(ctx, table, top, width) {
   y += TABLE_HEADER_HEIGHT;
 
   ctx.font = `${TABLE_FONT}px Consolas, "Courier New", monospace`;
+  const bodyTop = y;
   for (const row of table.rows) {
     ctx.strokeStyle = '#cbd2d9';
     ctx.beginPath();
@@ -120,7 +122,7 @@ function drawApiTable(ctx, table, top, width) {
     ctx.lineTo(width, y + 0.5);
     ctx.stroke();
 
-    // A red rail marks failed calls without needing a fourth column.
+    // A red rail marks failed calls without needing an extra column.
     ctx.fillStyle = row.outcome === 'success' ? '#2e7d32' : '#c62828';
     ctx.fillRect(0, y, 4, row.height);
 
@@ -134,6 +136,16 @@ function drawApiTable(ctx, table, top, width) {
 
     y += row.height;
   }
+
+  ctx.strokeStyle = '#cbd2d9';
+  ctx.beginPath();
+  ctx.moveTo(0, y + 0.5);
+  ctx.lineTo(width, y + 0.5);
+  for (const column of table.columns) {
+    ctx.moveTo(Math.round(column.x) + 0.5, bodyTop - TABLE_HEADER_HEIGHT);
+    ctx.lineTo(Math.round(column.x) + 0.5, y);
+  }
+  ctx.stroke();
 }
 
 async function processCapture({ dataUrl, stampText, watermarkText, wantPng, wantJpeg, apiRows }) {

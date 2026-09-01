@@ -55,9 +55,10 @@ const API_MIN_SPLIT_LINES = 4;
 // Cap the table on the screenshot page so the image keeps a usable share; the rest spills over.
 const API_FIRST_PAGE_HEIGHT = PAGE_HEIGHT * 0.4;
 const API_COLUMNS = [
-  { title: 'API Name', key: 'name', ratio: 0.24 },
-  { title: 'Payload', key: 'payload', ratio: 0.36 },
-  { title: 'Response', key: 'response', ratio: 0.4 }
+  { title: 'API Name', key: 'name', ratio: 0.2 },
+  { title: 'Origin / Source', key: 'origin', ratio: 0.22 },
+  { title: 'Payload', key: 'payload', ratio: 0.28 },
+  { title: 'Response', key: 'response', ratio: 0.3 }
 ];
 
 function apiColumns() {
@@ -126,34 +127,50 @@ function takeApiRows(wrapped, maxHeight) {
 
 function apiTableOps(table, bottom, heading) {
   const ops = [];
+  const right = PAGE_WIDTH - MARGIN;
+  const cellPad = 3;
   let y = bottom + table.height - 10;
 
   ops.push(`BT /F1 9 Tf 0 0 0 rg 1 0 0 1 ${MARGIN} ${y.toFixed(2)} Tm ${pdfText(heading, 60)} Tj ET`);
-  y -= 13;
+  y -= 8;
 
+  const gridTop = y;
+  const headerBaseline = y - API_LINE + 2.5;
   for (const column of table.columns) {
     ops.push(
-      `BT /F1 ${API_FONT} Tf 1 0 0 1 ${column.x.toFixed(2)} ${y.toFixed(2)} Tm ${pdfText(column.title, 20)} Tj ET`
+      `BT /F1 ${API_FONT} Tf 1 0 0 1 ${(column.x + cellPad).toFixed(2)} ${headerBaseline.toFixed(2)} Tm ` +
+        `${pdfText(column.title, 24)} Tj ET`
     );
   }
-  const rule = (y - 3).toFixed(2);
-  ops.push(`0.4 w ${MARGIN} ${rule} m ${(PAGE_WIDTH - MARGIN).toFixed(2)} ${rule} l S`);
-  y -= 11;
+  y -= API_LINE + 3;
 
+  const rules = [y];
   for (const row of table.rows) {
     row.cells.forEach((lines, index) => {
       const column = table.columns[index];
       lines.forEach((line, lineIndex) => {
+        const baseline = y - (lineIndex + 1) * API_LINE + 2.5;
         ops.push(
-          `BT /F2 ${API_FONT} Tf 0.15 0.2 0.3 rg 1 0 0 1 ${column.x.toFixed(2)} ` +
-            `${(y - lineIndex * API_LINE).toFixed(2)} Tm ${pdfText(line, 400)} Tj ET`
+          `BT /F2 ${API_FONT} Tf 0.15 0.2 0.3 rg 1 0 0 1 ${(column.x + cellPad).toFixed(2)} ` +
+            `${baseline.toFixed(2)} Tm ${pdfText(line, 400)} Tj ET`
         );
       });
     });
     y -= row.lineCount * API_LINE + API_ROW_GAP;
+    rules.push(y);
   }
 
-  ops.push('0 0 0 rg');
+  ops.push('0.55 0.6 0.65 RG 0.4 w');
+  ops.push(`${MARGIN} ${gridTop.toFixed(2)} m ${right.toFixed(2)} ${gridTop.toFixed(2)} l S`);
+  for (const rule of rules) {
+    ops.push(`${MARGIN} ${rule.toFixed(2)} m ${right.toFixed(2)} ${rule.toFixed(2)} l S`);
+  }
+  for (const column of table.columns) {
+    ops.push(`${column.x.toFixed(2)} ${gridTop.toFixed(2)} m ${column.x.toFixed(2)} ${y.toFixed(2)} l S`);
+  }
+  ops.push(`${right.toFixed(2)} ${gridTop.toFixed(2)} m ${right.toFixed(2)} ${y.toFixed(2)} l S`);
+
+  ops.push('0 0 0 RG 0 0 0 rg');
   return ops.join('\n');
 }
 

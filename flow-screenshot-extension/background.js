@@ -322,11 +322,45 @@ function shortUrl(url) {
   }
 }
 
+function headerValue(headers, name) {
+  const match = new RegExp(`^${name}\\s*:\\s*(.+)$`, 'im').exec(String(headers || ''));
+  return match ? match[1].trim() : '';
+}
+
+// Where the call came from (request Origin/Referer) and what served it (response headers).
+function originDetails(url, requestHeaders, responseHeaders) {
+  let host = '';
+  let origin = '';
+  try {
+    const parsed = new URL(url);
+    host = parsed.host;
+    origin = parsed.origin;
+  } catch {
+    /* Leave the fields blank and fall back to the header values below. */
+  }
+
+  const lines = [
+    `Origin: ${headerValue(requestHeaders, 'origin') || origin || '(none)'}`,
+    `Referer: ${headerValue(requestHeaders, 'referer') || '(none)'}`,
+    `Host: ${host || '(unknown)'}`
+  ];
+
+  const server = headerValue(responseHeaders, 'server');
+  const contentType = headerValue(responseHeaders, 'content-type');
+  const via = headerValue(responseHeaders, 'via');
+  if (server) lines.push(`Server: ${server}`);
+  if (contentType) lines.push(`Content-Type: ${contentType}`);
+  if (via) lines.push(`Via: ${via}`);
+
+  return lines.join('\n');
+}
+
 // Calls are buffered and attached to the next screenshot rather than becoming pages of their own.
-async function queueApiCall({ outcome, url, method, status, payload, body }) {
+async function queueApiCall({ outcome, url, method, status, requestHeaders, responseHeaders, payload, body }) {
   apiQueue.push({
     outcome,
     name: `${method} ${shortUrl(url)}\n[${status || 'failed'}]`,
+    origin: originDetails(url, requestHeaders, responseHeaders),
     payload: payload || '(no request body)',
     response: body || '(empty response)'
   });
