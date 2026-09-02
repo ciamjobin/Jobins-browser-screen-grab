@@ -89,7 +89,7 @@ function wrapToWidth(text, width) {
 function wrapApiRows(rows, columns) {
   return rows.map((row) => {
     const cells = columns.map((column) => wrapToWidth(row[column.key], column.textWidth));
-    return { cells, lineCount: Math.max(...cells.map((lines) => lines.length)) };
+    return { cells, outcome: row.outcome, lineCount: Math.max(...cells.map((lines) => lines.length)) };
   });
 }
 
@@ -111,10 +111,15 @@ function takeApiRows(wrapped, maxHeight) {
 
     const availableLines = Math.floor((maxHeight - used - API_ROW_GAP) / API_LINE);
     if (availableLines >= API_MIN_SPLIT_LINES) {
-      taken.push({ cells: row.cells.map((lines) => lines.slice(0, availableLines)), lineCount: availableLines });
+      taken.push({
+        cells: row.cells.map((lines) => lines.slice(0, availableLines)),
+        outcome: row.outcome,
+        lineCount: availableLines
+      });
       used += availableLines * API_LINE + API_ROW_GAP;
       const rest = {
         cells: row.cells.map((lines) => lines.slice(availableLines)),
+        outcome: row.outcome,
         lineCount: row.lineCount - availableLines
       };
       return { taken, remaining: [rest, ...wrapped.slice(index + 1)], height: used };
@@ -146,6 +151,14 @@ function apiTableOps(table, bottom, heading) {
 
   const rules = [y];
   for (const row of table.rows) {
+    const rowHeight = row.lineCount * API_LINE + API_ROW_GAP;
+    if (row.outcome !== 'success') {
+      ops.push('1 0.96 0.45 rg');
+      for (const column of table.columns.filter((item) => item.key === 'name' || item.key === 'response')) {
+        ops.push(`${column.x.toFixed(2)} ${(y - rowHeight).toFixed(2)} ${column.width.toFixed(2)} ${rowHeight.toFixed(2)} re f`);
+      }
+    }
+
     row.cells.forEach((lines, index) => {
       const column = table.columns[index];
       lines.forEach((line, lineIndex) => {
@@ -156,7 +169,7 @@ function apiTableOps(table, bottom, heading) {
         );
       });
     });
-    y -= row.lineCount * API_LINE + API_ROW_GAP;
+    y -= rowHeight;
     rules.push(y);
   }
 
@@ -187,10 +200,13 @@ function contentStream(page, table, drawImage) {
   const titleY = PAGE_HEIGHT - MARGIN - TITLE_SIZE;
 
   if (!drawImage) {
-    const title = `${page.title || 'Untitled page'} | API calls (continued)`;
+    const title = page.apiRows?.length && table?.firstPage
+      ? page.title || 'Untitled page'
+      : `${page.title || 'Untitled page'} | API calls (continued)`;
+    const heading = table?.firstPage ? 'API calls in this step' : 'API calls (continued)';
     return [
       `BT /F1 ${TITLE_SIZE} Tf 0 0 0 rg 1 0 0 1 ${MARGIN} ${titleY} Tm ${pdfText(title, 110)} Tj ET`,
-      table ? apiTableOps(table, titleY - 10 - table.height, 'API calls (continued)') : ''
+      table ? apiTableOps(table, titleY - 10 - table.height, heading) : ''
     ].join('\n');
   }
 
@@ -238,12 +254,13 @@ export function buildPdf(pages) {
 
   pages.forEach((page, index) => {
     let remaining = page.apiRows?.length ? wrapApiRows(page.apiRows, columns) : [];
-    let drawImage = true;
+    let drawImage = !remaining.length;
+    let firstApiPage = Boolean(remaining.length);
 
     do {
       const budget = drawImage ? API_FIRST_PAGE_HEIGHT : contPageHeight;
       const slice = remaining.length ? takeApiRows(remaining, budget) : { taken: [], remaining: [], height: 0 };
-      const table = slice.taken.length ? { columns, rows: slice.taken, height: slice.height } : null;
+      const table = slice.taken.length ? { columns, rows: slice.taken, height: slice.height, firstPage: firstApiPage } : null;
 
       sheets.push({
         page,
@@ -257,6 +274,7 @@ export function buildPdf(pages) {
       // A continuation sheet that fits nothing would loop forever; drop the leftovers instead.
       remaining = table || drawImage ? slice.remaining : [];
       drawImage = false;
+      firstApiPage = false;
     } while (remaining.length);
   });
 

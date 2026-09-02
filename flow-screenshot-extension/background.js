@@ -1,10 +1,11 @@
 const STATE_KEY = 'flowRecorderState';
 const FRAMES_KEY = 'flowRecorderFrames';
 const OFFSCREEN_PATH = 'offscreen.html';
-const WATERMARK = "Captured by Jobin's screen grabber";
+const WATERMARK = "Captured by Jobin's Screenshots";
 
 // captureVisibleTab is rate limited; serialize captures and pace them.
 let captureChain = Promise.resolve();
+let lastRawCaptureHash = '';
 
 // Held in memory rather than storage: concurrent API events would race a read-modify-write.
 let apiQueue = [];
@@ -131,6 +132,19 @@ registerWebRequestHeaderCapture();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hashText(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return String(hash >>> 0);
+}
+
+function shouldKeepDuplicate(reason, apiRows) {
+  return reason === 'start' || reason === 'field-edited' || reason === 'final-api-calls' || apiRows.length > 0;
 }
 
 // The download bubble overlays the page and would otherwise land in screen captures.
@@ -326,6 +340,10 @@ async function persistCapture({ rawDataUrl, title, url, reason, label }) {
   const apiRows = apiQueue;
   apiQueue = [];
 
+  const rawHash = hashText(rawDataUrl);
+  if (!shouldKeepDuplicate(reason, apiRows) && rawHash === lastRawCaptureHash) return null;
+  lastRawCaptureHash = rawHash;
+
   await ensureOffscreen();
   const processed = await askOffscreen('OFFSCREEN_PROCESS', {
     dataUrl: rawDataUrl,
@@ -495,6 +513,7 @@ async function startRecording(tab, settings) {
   await setState({ lastError: null });
   await setDownloadUi(false);
   apiQueue = [];
+  lastRawCaptureHash = '';
 
   const merged = { ...defaultState.settings, ...(await getState()).settings, ...settings };
   merged.captureApi = merged.captureMode === 'api';
@@ -607,6 +626,7 @@ async function stopRecording(keepFiles = true) {
   await chrome.storage.local.remove(FRAMES_KEY);
   await setDownloadUi(true);
   apiQueue = [];
+  lastRawCaptureHash = '';
 
   const next = await setState({
     recording: false,

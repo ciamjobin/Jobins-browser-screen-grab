@@ -30,17 +30,17 @@ function drawWatermark(canvas, text) {
   const ctx = canvas.getContext('2d');
   const fontSize = Math.max(12, Math.round(canvas.width / 110));
   const marginX = Math.round(fontSize * 1.2);
-  const marginY = Math.round(fontSize * 0.35);
+  const marginY = Math.max(1, Math.round(fontSize * 0.12));
 
   ctx.font = `700 ${fontSize}px "Segoe UI", Arial, sans-serif`;
   ctx.textBaseline = 'bottom';
   ctx.textAlign = 'right';
 
-  // White halo first so the blue stays readable on dark backgrounds.
+  // White halo first so the dark red stays readable on dark backgrounds.
   ctx.lineWidth = Math.max(2, fontSize / 4);
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
   ctx.strokeText(text, canvas.width - marginX, canvas.height - marginY);
-  ctx.fillStyle = '#1565c0';
+  ctx.fillStyle = '#8b0000';
   ctx.fillText(text, canvas.width - marginX, canvas.height - marginY);
 
   ctx.textAlign = 'left';
@@ -117,6 +117,14 @@ function drawApiTable(ctx, table, top, width) {
   ctx.font = `${TABLE_FONT}px Consolas, "Courier New", monospace`;
   const bodyTop = y;
   for (const row of table.rows) {
+    if (row.outcome !== 'success') {
+      ctx.fillStyle = '#fff59d';
+      for (const index of [0, 3]) {
+        const column = table.columns[index];
+        ctx.fillRect(column.x, y, column.width, row.height);
+      }
+    }
+
     ctx.strokeStyle = '#cbd2d9';
     ctx.beginPath();
     ctx.moveTo(0, y + 0.5);
