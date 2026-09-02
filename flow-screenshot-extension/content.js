@@ -29,6 +29,8 @@ const LIST_SELECTOR = [
 // The list whose opened state was already captured; further poking or scrolling inside adds nothing.
 let capturedList = null;
 let lastSent = { key: '', at: 0 };
+let editTimer = 0;
+let selectionTimer = 0;
 
 function describe(element) {
   const candidates = [
@@ -56,6 +58,36 @@ function requestCapture(reason, label) {
   chrome.runtime.sendMessage({ type: 'CLICK_CAPTURE', reason, label }).catch(() => {
     /* Background may be asleep or recording stopped; nothing to do. */
   });
+}
+
+function describeEditedField(element) {
+  if (element instanceof HTMLInputElement && element.type === 'password') {
+    return `${describe(element)} edited`;
+  }
+  return `${describe(element)} edited`;
+}
+
+function requestEditCapture(element) {
+  clearTimeout(editTimer);
+  editTimer = setTimeout(() => requestCapture('field-edited', describeEditedField(element)), 700);
+}
+
+function selectedTextFromActiveElement() {
+  const active = document.activeElement;
+  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+    const start = active.selectionStart ?? 0;
+    const end = active.selectionEnd ?? 0;
+    return end > start ? active.value.slice(start, end) : '';
+  }
+  return window.getSelection()?.toString() || '';
+}
+
+function requestSelectionCapture() {
+  clearTimeout(selectionTimer);
+  selectionTimer = setTimeout(() => {
+    const text = selectedTextFromActiveElement().trim().replace(/\s+/g, ' ');
+    if (text) requestCapture('text-selected', text.slice(0, 80));
+  }, 500);
 }
 
 // Capture phase so we still see the click even if the handler stops propagation.
@@ -104,6 +136,25 @@ window.addEventListener(
   },
   true
 );
+
+window.addEventListener(
+  'input',
+  (event) => {
+    const element = event.target;
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement ||
+      element?.isContentEditable
+    ) {
+      requestEditCapture(element);
+    }
+  },
+  true
+);
+
+document.addEventListener('selectionchange', requestSelectionCapture, true);
+window.addEventListener('select', requestSelectionCapture, true);
 
 // page-hook.js runs in the MAIN world and can only reach the extension through postMessage.
 window.addEventListener('message', (event) => {

@@ -653,11 +653,13 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   }
 });
 
-// DevTools panel changes are not observable, so the user triggers these captures by hotkey.
+// DevTools panel changes are not observable, so the user triggers those captures by hotkey.
 chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== 'capture-panel') return;
   const state = await getState();
-  if (state.recording) await captureNow('devtools-panel');
+  if (!state.recording) return;
+
+  if (command === 'capture-panel') await captureNow('devtools-panel');
+  if (command === 'capture-manual') await captureNow('manual-hotkey');
 });
 
 // If the sharing window is closed mid-flow, keep recording via tab capture instead of failing.
