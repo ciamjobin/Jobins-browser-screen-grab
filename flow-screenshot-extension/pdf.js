@@ -254,7 +254,7 @@ export function buildPdf(pages) {
 
   pages.forEach((page, index) => {
     let remaining = page.apiRows?.length ? wrapApiRows(page.apiRows, columns) : [];
-    let drawImage = !remaining.length;
+    let drawImage = true;
     let firstApiPage = Boolean(remaining.length);
 
     do {

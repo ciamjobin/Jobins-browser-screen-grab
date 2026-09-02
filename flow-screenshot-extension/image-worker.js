@@ -162,27 +162,36 @@ async function processCapture({ dataUrl, stampText, watermarkText, wantPng, want
   const bitmap = await createImageBitmap(blob);
 
   const table = apiRows?.length ? layoutApiTable(apiRows, bitmap.width) : null;
-  const canvas = document.createElement('canvas');
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height + (table?.height ?? 0);
+  const imageCanvas = document.createElement('canvas');
+  imageCanvas.width = bitmap.width;
+  imageCanvas.height = bitmap.height;
 
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(bitmap, 0, 0);
+  const imageCtx = imageCanvas.getContext('2d');
+  imageCtx.fillStyle = '#ffffff';
+  imageCtx.fillRect(0, 0, imageCanvas.width, imageCanvas.height);
+  imageCtx.drawImage(bitmap, 0, 0);
   bitmap.close();
 
-  if (stampText) drawTimestampBanner(canvas, stampText);
-  if (table) drawApiTable(ctx, table, canvas.height - table.height, canvas.width);
-  if (watermarkText) drawWatermark(canvas, watermarkText);
+  if (stampText) drawTimestampBanner(imageCanvas, stampText);
+  if (watermarkText) drawWatermark(imageCanvas, watermarkText);
+
+  const outputCanvas = document.createElement('canvas');
+  outputCanvas.width = imageCanvas.width;
+  outputCanvas.height = imageCanvas.height + (table?.height ?? 0);
+
+  const ctx = outputCanvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, outputCanvas.width, outputCanvas.height);
+  ctx.drawImage(imageCanvas, 0, 0);
+  if (table) drawApiTable(ctx, table, imageCanvas.height, outputCanvas.width);
 
   return {
-    pngDataUrl: wantPng ? canvas.toDataURL('image/png') : null,
+    pngDataUrl: wantPng ? outputCanvas.toDataURL('image/png') : null,
     jpeg: wantJpeg
       ? {
-          base64: canvas.toDataURL('image/jpeg', 0.82).split(',')[1],
-          width: canvas.width,
-          height: canvas.height
+          base64: imageCanvas.toDataURL('image/jpeg', 0.82).split(',')[1],
+          width: imageCanvas.width,
+          height: imageCanvas.height
         }
       : null
   };
