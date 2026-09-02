@@ -1,7 +1,6 @@
 // Builds one package per browser family from the shared source in flow-screenshot-extension/.
 // Usage: node build.mjs
 import { mkdir, rm, cp, readFile, writeFile, readdir } from 'node:fs/promises';
-import { createWriteStream } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -16,7 +15,9 @@ const TARGETS = {
   firefox: { manifest: 'manifest.firefox.json', drop: ['manifest.firefox.json', 'offscreen.html', 'offscreen.js'] }
 };
 
-const version = JSON.parse(await readFile(path.join(SRC, 'manifest.json'), 'utf8')).version;
+const sourceManifest = JSON.parse(await readFile(path.join(SRC, 'manifest.json'), 'utf8'));
+const version = sourceManifest.version;
+const packageName = sourceManifest.name.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
 
 await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
@@ -37,7 +38,7 @@ for (const [target, config] of Object.entries(TARGETS)) {
     throw new Error(`${config.manifest} is at ${manifest.version}, expected ${version}`);
   }
 
-  const zip = path.resolve(OUT, `Flow-Screenshot-Recorder-${version}-${target}.zip`);
+  const zip = path.resolve(OUT, `${packageName}-${version}-${target}.zip`);
   await run('powershell', [
     '-NoProfile',
     '-Command',

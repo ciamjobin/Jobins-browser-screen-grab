@@ -15,6 +15,7 @@ console.log('--- Chrome / Edge ---');
 check('service_worker background', !!chromium.background?.service_worker);
 check('offscreen permission present', chromium.permissions.includes('offscreen'));
 check('module type', chromium.background?.type === 'module');
+check('extension renamed', chromium.name === 'JShotz');
 
 console.log('\n--- Firefox ---');
 check('event-page background (no service_worker)', !firefox.background?.service_worker);
@@ -25,6 +26,7 @@ check('strict_min_version >= 128 for world:MAIN',
 const bad = firefox.permissions.filter((p) => CHROMIUM_ONLY_PERMS.has(p));
 check('no Chromium-only permissions', bad.length === 0, bad.join(','));
 check('versions match', chromium.version === firefox.version, `${chromium.version} vs ${firefox.version}`);
+check('names match', chromium.name === firefox.name, `${chromium.name} vs ${firefox.name}`);
 
 // Every file a manifest references must exist in that package.
 for (const [name, manifest] of [['chrome-edge', chromium], ['firefox', firefox]]) {
@@ -32,6 +34,8 @@ for (const [name, manifest] of [['chrome-edge', chromium], ['firefox', firefox]]
     ...(manifest.background?.scripts || []),
     manifest.background?.service_worker,
     manifest.action?.default_popup,
+    ...Object.values(manifest.icons || {}),
+    ...Object.values(manifest.action?.default_icon || {}),
     ...(manifest.content_scripts || []).flatMap((c) => c.js)
   ].filter(Boolean);
 
