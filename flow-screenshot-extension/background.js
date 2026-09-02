@@ -456,19 +456,6 @@ async function startRecording(tab, settings) {
     return await setState({ recording: false, streamActive: false, lastError: error.message });
   }
 
-  // The declared content scripts only load on navigation, so seed the already-open page.
-  for (const files of [['page-hook.js'], ['content.js']]) {
-    await chrome.scripting
-      .executeScript({
-        target: { tabId: tab.id },
-        files,
-        world: files[0] === 'page-hook.js' ? 'MAIN' : 'ISOLATED'
-      })
-      .catch(() => {
-        /* Restricted pages (chrome://, Web Store) cannot be instrumented. */
-      });
-  }
-
   const state = await setState({
     recording: true,
     tabId: tab.id,
@@ -483,6 +470,19 @@ async function startRecording(tab, settings) {
     lastError: null,
     settings: merged
   });
+
+  // The declared content scripts only load on navigation, so seed the already-open page.
+  for (const files of [['page-hook.js'], ['content.js']]) {
+    await chrome.scripting
+      .executeScript({
+        target: { tabId: tab.id },
+        files,
+        world: files[0] === 'page-hook.js' ? 'MAIN' : 'ISOLATED'
+      })
+      .catch(() => {
+        /* Restricted pages (chrome://, Web Store) cannot be instrumented. */
+      });
+  }
 
   await updateBadge(state);
   await captureNow('start');
@@ -680,6 +680,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'API_CAPTURE': {
         const state = await getState();
         if (state.recording && state.settings.captureApi && sender.tab?.id === state.tabId) {
+          if (!state.apiHookReady) await setState({ apiHookReady: true });
           await queueApiCall(message.detail);
         }
         sendResponse({ ok: true });

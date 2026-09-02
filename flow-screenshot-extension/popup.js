@@ -81,9 +81,7 @@ function render(state) {
     statusEl.textContent = problem;
     statusEl.className = 'status error';
   } else if (recording) {
-    const api = settings.captureApi
-      ? ` \u00b7 ${state.apiHookReady ? `${state.apiSeen} API call(s)` : 'API hook not on page - reload it'}`
-      : '';
+    const api = settings.captureApi ? ` \u00b7 ${state.apiSeen} API call(s)` : '';
     statusEl.textContent = `Recording \u00b7 ${state.sequence} screenshot(s)${api}`;
     statusEl.className = 'status recording';
   } else {
