@@ -56,7 +56,7 @@ const API_MIN_SPLIT_LINES = 4;
 const API_FIRST_PAGE_HEIGHT = PAGE_HEIGHT * 0.4;
 const API_COLUMNS = [
   { title: 'API Name', key: 'name', ratio: 0.2 },
-  { title: 'Origin / Source', key: 'origin', ratio: 0.22 },
+  { title: 'Origin and Referer', key: 'origin', ratio: 0.22 },
   { title: 'Payload', key: 'payload', ratio: 0.28 },
   { title: 'Response', key: 'response', ratio: 0.3 }
 ];

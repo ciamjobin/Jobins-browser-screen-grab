@@ -348,38 +348,13 @@ function headerValue(headers, name) {
   return match ? match[1].trim() : '';
 }
 
-// Browser-added headers are often hidden from page JavaScript; include reliable page metadata too.
-function originDetails({ url, pageUrl, pageOrigin, pageReferrer, targetOrigin, targetHost, requestHeaders, responseHeaders }) {
-  let host = '';
-  let origin = '';
-  try {
-    const parsed = new URL(url);
-    host = parsed.host;
-    origin = parsed.origin;
-  } catch {
-    /* Leave the fields blank and fall back to the header values below. */
-  }
-
+// Browser-added Origin/Referer headers are often hidden from page JavaScript; use page metadata as fallback.
+function originDetails({ url, pageUrl, pageOrigin, requestHeaders }) {
   const lines = [
-    `Source page: ${pageUrl || '(unknown)'}`,
-    `Source origin: ${pageOrigin || headerValue(requestHeaders, 'origin') || '(unknown)'}`,
-    `Page referrer: ${pageReferrer || '(none)'}`,
-    `Target origin: ${targetOrigin || origin || '(unknown)'}`,
-    `Target host: ${targetHost || host || '(unknown)'}`
+    `Request URL: ${url || '(unknown)'}`,
+    `Origin: ${headerValue(requestHeaders, 'origin') || pageOrigin || '(unknown)'}`,
+    `Referer: ${headerValue(requestHeaders, 'referer') || pageUrl || '(none)'}`
   ];
-
-  const requestOrigin = headerValue(requestHeaders, 'origin');
-  const requestReferer = headerValue(requestHeaders, 'referer');
-  const allowOrigin = headerValue(responseHeaders, 'access-control-allow-origin');
-  const server = headerValue(responseHeaders, 'server');
-  const contentType = headerValue(responseHeaders, 'content-type');
-  const via = headerValue(responseHeaders, 'via');
-  if (requestOrigin) lines.push(`Request Origin: ${requestOrigin}`);
-  if (requestReferer) lines.push(`Request Referer: ${requestReferer}`);
-  if (allowOrigin) lines.push(`Allow-Origin: ${allowOrigin}`);
-  if (server) lines.push(`Server: ${server}`);
-  if (contentType) lines.push(`Content-Type: ${contentType}`);
-  if (via) lines.push(`Via: ${via}`);
 
   return lines.join('\n');
 }
@@ -407,11 +382,7 @@ async function queueApiCall({
       url,
       pageUrl,
       pageOrigin,
-      pageReferrer,
-      targetOrigin,
-      targetHost,
-      requestHeaders,
-      responseHeaders
+      requestHeaders
     }),
     payload: payload || '(no request body)',
     response: body || '(empty response)'
