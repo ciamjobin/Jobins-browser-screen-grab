@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Flow Screenshot Recorder",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "description": "Records a flow as timestamped, watermarked screenshots with an API Name/Origin/Payload/Response table under each step, and exports a titled PDF.",
   "browser_specific_settings": {
     "gecko": {

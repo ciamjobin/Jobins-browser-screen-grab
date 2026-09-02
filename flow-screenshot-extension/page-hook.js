@@ -36,7 +36,27 @@
   function post(detail) {
     const url = absoluteUrl(detail.url);
     if (!/^https?:/i.test(url)) return;
-    window.postMessage({ source: 'flow-recorder-api', detail: { ...detail, url } }, '*');
+    let target;
+    try {
+      target = new URL(url);
+    } catch {
+      target = null;
+    }
+    window.postMessage(
+      {
+        source: 'flow-recorder-api',
+        detail: {
+          ...detail,
+          url,
+          pageUrl: location.href,
+          pageOrigin: location.origin,
+          pageReferrer: document.referrer || '',
+          targetOrigin: target?.origin || '',
+          targetHost: target?.host || ''
+        }
+      },
+      '*'
+    );
   }
 
   const originalFetch = window.fetch;
