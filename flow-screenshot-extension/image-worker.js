@@ -1,7 +1,7 @@
 // Pure canvas work, shared by the Chromium offscreen document and the Firefox background page.
 // Must not touch any extension API so both hosts can load it.
 
-function drawTimestampBanner(canvas, text) {
+function drawTimestampBanner(canvas, text, offsetY = 0) {
   const ctx = canvas.getContext('2d');
   const fontSize = Math.max(13, Math.round(canvas.width / 95));
   const padX = Math.round(fontSize * 0.7);
@@ -14,7 +14,7 @@ function drawTimestampBanner(canvas, text) {
   const boxWidth = textWidth + padX * 2;
   const boxHeight = fontSize + padY * 2;
   const x = Math.round(fontSize * 0.6);
-  const y = Math.round(fontSize * 0.6);
+  const y = offsetY + Math.round(fontSize * 0.6);
 
   ctx.fillStyle = 'rgba(0, 0, 0, 0.78)';
   ctx.fillRect(x, y, boxWidth, boxHeight);
@@ -24,6 +24,46 @@ function drawTimestampBanner(canvas, text) {
 
   ctx.fillStyle = '#ffffff';
   ctx.fillText(text, x + padX, y + padY);
+}
+
+function drawCapturedTitleBar(canvas, title, url) {
+  const ctx = canvas.getContext('2d');
+  const height = titleBarHeight(canvas.width);
+  const pad = Math.max(14, Math.round(canvas.width / 95));
+  const titleSize = Math.max(14, Math.round(canvas.width / 95));
+  const urlSize = Math.max(10, Math.round(canvas.width / 135));
+
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, canvas.width, height);
+  ctx.fillStyle = '#e5e7eb';
+  ctx.fillRect(0, height - 1, canvas.width, 1);
+  ctx.fillStyle = '#8b0000';
+  ctx.fillRect(0, 0, canvas.width, 4);
+
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.font = `700 ${titleSize}px "Segoe UI", Arial, sans-serif`;
+  ctx.fillStyle = '#111827';
+  ctx.fillText(clipText(ctx, title || 'Untitled page', canvas.width - pad * 2), pad, 10);
+
+  ctx.font = `${urlSize}px "Segoe UI", Arial, sans-serif`;
+  ctx.fillStyle = '#4b5563';
+  ctx.fillText(clipText(ctx, url || '', canvas.width - pad * 2), pad, 12 + titleSize + 4);
+}
+
+function titleBarHeight(width) {
+  return Math.max(48, Math.round(width / 24));
+}
+
+function clipText(ctx, text, maxWidth) {
+  const value = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (ctx.measureText(value).width <= maxWidth) return value;
+
+  let clipped = value;
+  while (clipped.length > 1 && ctx.measureText(`${clipped}...`).width > maxWidth) {
+    clipped = clipped.slice(0, -1);
+  }
+  return `${clipped}...`;
 }
 
 function drawWatermark(canvas, text) {
@@ -157,22 +197,24 @@ function drawApiTable(ctx, table, top, width) {
   ctx.stroke();
 }
 
-async function processCapture({ dataUrl, stampText, watermarkText, wantPng, wantJpeg, apiRows }) {
+async function processCapture({ dataUrl, stampText, watermarkText, wantPng, wantJpeg, apiRows, titleBar }) {
   const blob = await (await fetch(dataUrl)).blob();
   const bitmap = await createImageBitmap(blob);
+  const titleHeight = titleBar ? titleBarHeight(bitmap.width) : 0;
 
   const table = apiRows?.length ? layoutApiTable(apiRows, bitmap.width) : null;
   const imageCanvas = document.createElement('canvas');
   imageCanvas.width = bitmap.width;
-  imageCanvas.height = bitmap.height;
+  imageCanvas.height = bitmap.height + titleHeight;
 
   const imageCtx = imageCanvas.getContext('2d');
   imageCtx.fillStyle = '#ffffff';
   imageCtx.fillRect(0, 0, imageCanvas.width, imageCanvas.height);
-  imageCtx.drawImage(bitmap, 0, 0);
+  if (titleBar) drawCapturedTitleBar(imageCanvas, titleBar.title, titleBar.url);
+  imageCtx.drawImage(bitmap, 0, titleHeight);
   bitmap.close();
 
-  if (stampText) drawTimestampBanner(imageCanvas, stampText);
+  if (stampText) drawTimestampBanner(imageCanvas, stampText, titleHeight);
   if (watermarkText) drawWatermark(imageCanvas, watermarkText);
 
   const outputCanvas = document.createElement('canvas');

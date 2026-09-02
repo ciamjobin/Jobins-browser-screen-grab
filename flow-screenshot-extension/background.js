@@ -6,6 +6,7 @@ const WATERMARK = "Captured by Jobin's Screenshots";
 // captureVisibleTab is rate limited; serialize captures and pace them.
 let captureChain = Promise.resolve();
 let lastRawCaptureHash = '';
+let lastTabTitle = '';
 
 // Held in memory rather than storage: concurrent API events would race a read-modify-write.
 let apiQueue = [];
@@ -144,7 +145,13 @@ function hashText(value) {
 }
 
 function shouldKeepDuplicate(reason, apiRows) {
-  return reason === 'start' || reason === 'field-edited' || reason === 'final-api-calls' || apiRows.length > 0;
+  return (
+    reason === 'start' ||
+    reason === 'field-edited' ||
+    reason === 'title-change' ||
+    reason === 'final-api-calls' ||
+    apiRows.length > 0
+  );
 }
 
 // The download bubble overlays the page and would otherwise land in screen captures.
@@ -349,6 +356,7 @@ async function persistCapture({ rawDataUrl, title, url, reason, label }) {
     dataUrl: rawDataUrl,
     stampText: settings.stampTimestamp ? stampText(capturedAt) : null,
     watermarkText: WATERMARK,
+    titleBar: { title, url },
     wantPng: settings.savePng,
     wantJpeg: settings.savePdf,
     apiRows
@@ -514,6 +522,7 @@ async function startRecording(tab, settings) {
   await setDownloadUi(false);
   apiQueue = [];
   lastRawCaptureHash = '';
+  lastTabTitle = tab.title || '';
 
   const merged = { ...defaultState.settings, ...(await getState()).settings, ...settings };
   merged.captureApi = merged.captureMode === 'api';
@@ -627,6 +636,7 @@ async function stopRecording(keepFiles = true) {
   await setDownloadUi(true);
   apiQueue = [];
   lastRawCaptureHash = '';
+  lastTabTitle = '';
 
   const next = await setState({
     recording: false,
@@ -665,6 +675,13 @@ chrome.webNavigation.onReferenceFragmentUpdated.addListener(async (details) => {
   if (details.frameId === 0 && (await isRecordedTab(details.tabId))) {
     await captureNow('url-change');
   }
+});
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+  if (!changeInfo.title || !(await isRecordedTab(tabId))) return;
+  if (changeInfo.title === lastTabTitle) return;
+  lastTabTitle = changeInfo.title;
+  await captureNow('title-change', changeInfo.title);
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
