@@ -182,6 +182,20 @@ async function processCapture({ dataUrl, stampText, watermarkText, wantPng, want
 
 function wrapLines(ctx, text, maxWidth) {
   const lines = [];
+  const pushMeasured = (value) => {
+    let current = '';
+    for (const char of value) {
+      const candidate = current + char;
+      if (current && ctx.measureText(candidate).width > maxWidth) {
+        lines.push(current);
+        current = char;
+      } else {
+        current = candidate;
+      }
+    }
+    return current;
+  };
+
   for (const rawLine of String(text ?? '').split('\n')) {
     if (!rawLine) {
       lines.push('');
@@ -192,12 +206,12 @@ function wrapLines(ctx, text, maxWidth) {
       const candidate = current + word;
       if (ctx.measureText(candidate).width > maxWidth && current) {
         lines.push(current.trimEnd());
-        current = word.trimStart();
+        current = pushMeasured(word.trimStart());
       } else {
-        current = candidate;
+        current = ctx.measureText(word).width > maxWidth ? pushMeasured(candidate) : candidate;
       }
     }
-    lines.push(current);
+    if (current || !lines.length) lines.push(current);
   }
   return lines;
 }

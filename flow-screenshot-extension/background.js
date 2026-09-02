@@ -8,6 +8,9 @@ let captureChain = Promise.resolve();
 
 // Held in memory rather than storage: concurrent API events would race a read-modify-write.
 let apiQueue = [];
+let apiHeaderRecords = [];
+
+const API_HEADER_TTL_MS = 120000;
 
 const defaultState = {
   recording: false,
@@ -81,6 +84,50 @@ function stampText(date) {
 
   return `${clock}  ${abbreviation} (${offset})  |  ${zone}`;
 }
+
+function pruneApiHeaderRecords(now = Date.now()) {
+  apiHeaderRecords = apiHeaderRecords.filter((record) => now - record.at < API_HEADER_TTL_MS).slice(-250);
+}
+
+function headerListValue(headers, name) {
+  return headers?.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value || '';
+}
+
+function rememberApiRequestHeaders(details) {
+  if (details.tabId < 0 || !/^https?:/i.test(details.url)) return;
+
+  const record = {
+    tabId: details.tabId,
+    method: String(details.method || 'GET').toUpperCase(),
+    url: details.url,
+    requestUrl: details.url,
+    origin: headerListValue(details.requestHeaders, 'origin'),
+    referer: headerListValue(details.requestHeaders, 'referer'),
+    at: Date.now()
+  };
+
+  apiHeaderRecords.push(record);
+  pruneApiHeaderRecords(record.at);
+}
+
+function registerWebRequestHeaderCapture() {
+  if (!chrome.webRequest?.onBeforeSendHeaders) return;
+  try {
+    chrome.webRequest.onBeforeSendHeaders.addListener(
+      rememberApiRequestHeaders,
+      { urls: ['<all_urls>'] },
+      ['requestHeaders', 'extraHeaders']
+    );
+  } catch {
+    chrome.webRequest.onBeforeSendHeaders.addListener(
+      rememberApiRequestHeaders,
+      { urls: ['<all_urls>'] },
+      ['requestHeaders']
+    );
+  }
+}
+
+registerWebRequestHeaderCapture();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -348,12 +395,23 @@ function headerValue(headers, name) {
   return match ? match[1].trim() : '';
 }
 
+function matchingRequestHeaders({ tabId, url, method }) {
+  pruneApiHeaderRecords();
+  const wantedMethod = String(method || 'GET').toUpperCase();
+  for (let index = apiHeaderRecords.length - 1; index >= 0; index -= 1) {
+    const record = apiHeaderRecords[index];
+    if (record.tabId === tabId && record.method === wantedMethod && record.url === url) return record;
+  }
+  return null;
+}
+
 // Browser-added Origin/Referer headers are often hidden from page JavaScript; use page metadata as fallback.
-function originDetails({ url, pageUrl, pageOrigin, requestHeaders }) {
+function originDetails({ tabId, url, method, pageUrl, pageOrigin, requestHeaders }) {
+  const observed = matchingRequestHeaders({ tabId, url, method });
   const lines = [
-    `Request URL: ${url || '(unknown)'}`,
-    `Origin: ${headerValue(requestHeaders, 'origin') || pageOrigin || '(unknown)'}`,
-    `Referer: ${headerValue(requestHeaders, 'referer') || pageUrl || '(none)'}`
+    `Request URL: ${observed?.requestUrl || url || '(unknown)'}`,
+    `Origin: ${observed?.origin || headerValue(requestHeaders, 'origin') || pageOrigin || '(unknown)'}`,
+    `Referer: ${observed?.referer || headerValue(requestHeaders, 'referer') || pageUrl || '(none)'}`
   ];
 
   return lines.join('\n');
@@ -362,6 +420,7 @@ function originDetails({ url, pageUrl, pageOrigin, requestHeaders }) {
 // Calls are buffered and attached to the next screenshot rather than becoming pages of their own.
 async function queueApiCall({
   outcome,
+  tabId,
   url,
   method,
   status,
@@ -379,7 +438,9 @@ async function queueApiCall({
     outcome,
     name: `${method} ${shortUrl(url)}\n[${status || 'failed'}]`,
     origin: originDetails({
+      tabId,
       url,
+      method,
       pageUrl,
       pageOrigin,
       requestHeaders
@@ -681,7 +742,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const state = await getState();
         if (state.recording && state.settings.captureApi && sender.tab?.id === state.tabId) {
           if (!state.apiHookReady) await setState({ apiHookReady: true });
-          await queueApiCall(message.detail);
+          await queueApiCall({ ...message.detail, tabId: sender.tab.id });
         }
         sendResponse({ ok: true });
         break;
