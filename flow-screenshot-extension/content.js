@@ -90,6 +90,21 @@ function requestSelectionCapture() {
   }, 500);
 }
 
+function isManualShortcut(event) {
+  return event.ctrlKey && event.altKey && !event.shiftKey && event.key?.toLowerCase() === 'q';
+}
+
+window.addEventListener(
+  'keydown',
+  (event) => {
+    if (!isManualShortcut(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    requestCapture('manual-hotkey', 'Ctrl+Alt+Q');
+  },
+  true
+);
+
 // Capture phase so we still see the click even if the handler stops propagation.
 window.addEventListener(
   'click',
