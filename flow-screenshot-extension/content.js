@@ -4,6 +4,12 @@ const INTERACTIVE_SELECTOR = [
   'input[type="submit"]',
   'input[type="button"]',
   'input[type="reset"]',
+  'input[type="checkbox"]',
+  'input[type="radio"]',
+  '[role="checkbox"]',
+  '[role="radio"]',
+  '[role="switch"]',
+  '[role="tab"]',
   'summary',
   '[type="submit"]'
 ].join(',');
@@ -26,11 +32,15 @@ const LIST_SELECTOR = [
   'datalist'
 ].join(',');
 
+const DIALOG_SELECTOR = ['dialog', '[role="dialog"]', '[role="alertdialog"]'].join(',');
+
 // The list whose opened state was already captured; further poking or scrolling inside adds nothing.
 let capturedList = null;
 let lastSent = { key: '', at: 0 };
 let editTimer = 0;
 let selectionTimer = 0;
+let dialogTimer = 0;
+const capturedDialogs = new WeakSet();
 
 function describe(element) {
   const candidates = [
@@ -90,6 +100,32 @@ function requestSelectionCapture() {
   }, 500);
 }
 
+function isVisible(element) {
+  if (element.hasAttribute('hidden') || element.getAttribute('aria-hidden') === 'true') return false;
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
+// A modal can be opened by a control we do not recognise, so watch for the dialog itself appearing.
+function scanForDialogs() {
+  clearTimeout(dialogTimer);
+  dialogTimer = setTimeout(() => {
+    for (const dialog of document.querySelectorAll(DIALOG_SELECTOR)) {
+      if (capturedDialogs.has(dialog) || !isVisible(dialog)) continue;
+      capturedDialogs.add(dialog);
+      requestCapture('dialog-opened', describe(dialog));
+      return;
+    }
+  }, 350);
+}
+
+new MutationObserver(scanForDialogs).observe(document.documentElement, {
+  childList: true,
+  subtree: true,
+  attributes: true,
+  attributeFilter: ['open', 'hidden', 'aria-hidden', 'class', 'style']
+});
+
 function isManualShortcut(event) {
   return event.ctrlKey && event.altKey && !event.shiftKey && event.key?.toLowerCase() === 'q';
 }
@@ -147,6 +183,12 @@ window.addEventListener(
     if (element instanceof HTMLSelectElement) {
       const chosen = element.options[element.selectedIndex]?.text ?? element.value;
       requestCapture('selection', `${describe(element)} = ${chosen}`.slice(0, 80));
+      return;
+    }
+
+    if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) {
+      const state = element.checked ? 'checked' : 'unchecked';
+      requestCapture('toggle', `${describe(element)} = ${state}`.slice(0, 80));
     }
   },
   true

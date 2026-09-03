@@ -144,14 +144,11 @@ function hashText(value) {
   return String(hash >>> 0);
 }
 
+// Only page-driven captures are worth skipping; anything the user did must always be recorded.
+const DEDUPE_REASONS = new Set(['navigation', 'url-change']);
+
 function shouldKeepDuplicate(reason, apiRows) {
-  return (
-    reason === 'start' ||
-    reason === 'field-edited' ||
-    reason === 'title-change' ||
-    reason === 'final-api-calls' ||
-    apiRows.length > 0
-  );
+  return apiRows.length > 0 || !DEDUPE_REASONS.has(reason);
 }
 
 // The download bubble overlays the page and would otherwise land in screen captures.
@@ -325,7 +322,8 @@ async function performCapture(reason, label) {
   }
 
   // Let the page settle (navigation paint, click-driven UI updates) before grabbing the frame.
-  const settle = reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : 450;
+  const settle =
+    reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : reason === 'dialog-opened' ? 550 : 450;
   await delay(state.settings.captureApi ? settle + 500 : settle);
 
   return persistCapture({
