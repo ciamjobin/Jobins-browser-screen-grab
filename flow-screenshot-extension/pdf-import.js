@@ -27,25 +27,30 @@ function safeFilename(value) {
 async function imageToPage(file, index) {
   const bitmap = await createImageBitmap(file);
   const canvas = document.createElement('canvas');
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(bitmap, 0, 0);
-  bitmap.close();
+  try {
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0);
 
-  const relative = file.webkitRelativePath || file.name;
-  const title = relative.split('/').pop().replace(/\.[^.]+$/, '') || `Screenshot ${index + 1}`;
-  return {
-    title,
-    url: relative,
-    time: file.lastModified ? new Date(file.lastModified).toISOString() : '(time not recorded)',
-    width: canvas.width,
-    height: canvas.height,
-    jpeg: base64ToBytes(canvas.toDataURL('image/jpeg', 0.82).split(',')[1]),
-    apiRows: []
-  };
+    const relative = file.webkitRelativePath || file.name;
+    const title = relative.split('/').pop().replace(/\.[^.]+$/, '') || `Screenshot ${index + 1}`;
+    return {
+      title,
+      url: relative,
+      time: file.lastModified ? new Date(file.lastModified).toISOString() : '(time not recorded)',
+      width: canvas.width,
+      height: canvas.height,
+      jpeg: base64ToBytes(canvas.toDataURL('image/jpeg', 0.82).split(',')[1]),
+      apiRows: []
+    };
+  } finally {
+    bitmap.close();
+    canvas.width = 1;
+    canvas.height = 1;
+  }
 }
 
 function base64ToBytes(base64) {

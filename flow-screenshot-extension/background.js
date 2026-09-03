@@ -1,5 +1,6 @@
 const STATE_KEY = 'flowRecorderState';
 const FRAMES_KEY = 'flowRecorderFrames';
+const FRAME_PREFIX = `${FRAMES_KEY}:`;
 const OFFSCREEN_PATH = 'offscreen.html';
 const WATERMARK = "Captured by Jobin's Screenshots";
 
@@ -305,10 +306,24 @@ async function grabPngDataUrl(state, tab) {
 }
 
 async function storeFrame(frame) {
-  const stored = await chrome.storage.local.get(FRAMES_KEY);
-  const frames = stored[FRAMES_KEY] || [];
-  frames.push(frame);
-  await chrome.storage.local.set({ [FRAMES_KEY]: frames });
+  await chrome.storage.local.set({ [`${FRAME_PREFIX}${frame.sequence}`]: frame });
+}
+
+async function clearStoredFrames() {
+  const stored = await chrome.storage.local.get(null);
+  const keys = Object.keys(stored).filter((key) => key === FRAMES_KEY || key.startsWith(FRAME_PREFIX));
+  if (keys.length) await chrome.storage.local.remove(keys);
+}
+
+async function cleanupCaptureResources() {
+  await closeScreenWindow().catch(() => {});
+  await closeOffscreen().catch(() => {});
+  await clearStoredFrames().catch(() => {});
+  await setDownloadUi(true).catch(() => {});
+  apiQueue = [];
+  apiHeaderRecords = [];
+  lastRawCaptureHash = '';
+  lastTabTitle = '';
 }
 
 async function performCapture(reason, label) {
@@ -359,6 +374,7 @@ async function persistCapture({ rawDataUrl, title, url, reason, label }) {
     wantJpeg: settings.savePdf,
     apiRows
   });
+  rawDataUrl = null;
   if (processed?.error) throw new Error(processed.error);
 
   const pngDataUrl = processed.pngDataUrl || rawDataUrl;
@@ -376,6 +392,7 @@ async function persistCapture({ rawDataUrl, title, url, reason, label }) {
 
   if (settings.savePdf && jpeg) {
     await storeFrame({
+      sequence,
       title,
       url,
       time: `${stampText(capturedAt)}  |  ${reason}${label ? ` "${label}"` : ''}`,
@@ -515,7 +532,7 @@ async function exportPdfInWindow(filename) {
 }
 
 async function startRecording(tab, settings) {
-  await chrome.storage.local.remove(FRAMES_KEY);
+  await clearStoredFrames();
   await setState({ lastError: null });
   await setDownloadUi(false);
   apiQueue = [];
@@ -633,15 +650,7 @@ async function stopRecording(keepFiles = true, requestedPdfFilename) {
     }
   }
 
-  if (state.streamActive) {
-    await closeScreenWindow();
-  }
-  await closeOffscreen();
-  await chrome.storage.local.remove(FRAMES_KEY);
-  await setDownloadUi(true);
-  apiQueue = [];
-  lastRawCaptureHash = '';
-  lastTabTitle = '';
+  await cleanupCaptureResources();
 
   const next = await setState({
     recording: false,
@@ -751,6 +760,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           sendResponse(await stopRecording(message.keepFiles !== false, message.pdfFilename));
         } catch (error) {
+          await cleanupCaptureResources();
           sendResponse(await setState({ recording: false, lastError: error.message }));
         }
         break;

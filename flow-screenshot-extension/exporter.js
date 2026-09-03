@@ -1,6 +1,7 @@
 import { buildPdf } from './pdf.js';
 
 const FRAMES_KEY = 'flowRecorderFrames';
+const FRAME_PREFIX = `${FRAMES_KEY}:`;
 const stateEl = document.getElementById('state');
 
 function base64ToBytes(base64) {
@@ -46,8 +47,12 @@ async function run() {
   const filename = new URLSearchParams(location.search).get('filename');
 
   try {
-    const stored = await chrome.storage.local.get(FRAMES_KEY);
-    const frames = stored[FRAMES_KEY] || [];
+    const stored = await chrome.storage.local.get(null);
+    const frames = Object.entries(stored)
+      .filter(([key]) => key.startsWith(FRAME_PREFIX))
+      .map(([, frame]) => frame)
+      .sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
+    if (!frames.length && Array.isArray(stored[FRAMES_KEY])) frames.push(...stored[FRAMES_KEY]);
     if (!frames.length) throw new Error('No frames were captured, so no PDF was written.');
 
     stateEl.textContent = `Assembling ${frames.length} page(s)\u2026`;

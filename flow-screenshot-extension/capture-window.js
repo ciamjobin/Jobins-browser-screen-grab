@@ -58,8 +58,13 @@ function captureFrame() {
   const canvas = document.createElement('canvas');
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
-  canvas.getContext('2d').drawImage(video, 0, 0);
-  return { dataUrl: canvas.toDataURL('image/png') };
+  try {
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    return { dataUrl: canvas.toDataURL('image/png') };
+  } finally {
+    canvas.width = 1;
+    canvas.height = 1;
+  }
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

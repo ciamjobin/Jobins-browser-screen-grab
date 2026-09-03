@@ -198,45 +198,59 @@ function drawApiTable(ctx, table, top, width) {
 }
 
 async function processCapture({ dataUrl, stampText, watermarkText, wantPng, wantJpeg, apiRows, titleBar }) {
-  const blob = await (await fetch(dataUrl)).blob();
-  const bitmap = await createImageBitmap(blob);
-  const titleHeight = titleBar ? titleBarHeight(bitmap.width) : 0;
+  let bitmap;
+  let imageCanvas;
+  let outputCanvas;
+  try {
+    const blob = await (await fetch(dataUrl)).blob();
+    bitmap = await createImageBitmap(blob);
+    const titleHeight = titleBar ? titleBarHeight(bitmap.width) : 0;
 
-  const table = apiRows?.length ? layoutApiTable(apiRows, bitmap.width) : null;
-  const imageCanvas = document.createElement('canvas');
-  imageCanvas.width = bitmap.width;
-  imageCanvas.height = bitmap.height + titleHeight;
+    const table = apiRows?.length ? layoutApiTable(apiRows, bitmap.width) : null;
+    imageCanvas = document.createElement('canvas');
+    imageCanvas.width = bitmap.width;
+    imageCanvas.height = bitmap.height + titleHeight;
 
-  const imageCtx = imageCanvas.getContext('2d');
-  imageCtx.fillStyle = '#ffffff';
-  imageCtx.fillRect(0, 0, imageCanvas.width, imageCanvas.height);
-  if (titleBar) drawCapturedTitleBar(imageCanvas, titleBar.title, titleBar.url);
-  imageCtx.drawImage(bitmap, 0, titleHeight);
-  bitmap.close();
+    const imageCtx = imageCanvas.getContext('2d');
+    imageCtx.fillStyle = '#ffffff';
+    imageCtx.fillRect(0, 0, imageCanvas.width, imageCanvas.height);
+    if (titleBar) drawCapturedTitleBar(imageCanvas, titleBar.title, titleBar.url);
+    imageCtx.drawImage(bitmap, 0, titleHeight);
 
-  if (stampText) drawTimestampBanner(imageCanvas, stampText, titleHeight);
-  if (watermarkText) drawWatermark(imageCanvas, watermarkText);
+    if (stampText) drawTimestampBanner(imageCanvas, stampText, titleHeight);
+    if (watermarkText) drawWatermark(imageCanvas, watermarkText);
 
-  const outputCanvas = document.createElement('canvas');
-  outputCanvas.width = imageCanvas.width;
-  outputCanvas.height = imageCanvas.height + (table?.height ?? 0);
+    outputCanvas = document.createElement('canvas');
+    outputCanvas.width = imageCanvas.width;
+    outputCanvas.height = imageCanvas.height + (table?.height ?? 0);
 
-  const ctx = outputCanvas.getContext('2d');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, outputCanvas.width, outputCanvas.height);
-  ctx.drawImage(imageCanvas, 0, 0);
-  if (table) drawApiTable(ctx, table, imageCanvas.height, outputCanvas.width);
+    const ctx = outputCanvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, outputCanvas.width, outputCanvas.height);
+    ctx.drawImage(imageCanvas, 0, 0);
+    if (table) drawApiTable(ctx, table, imageCanvas.height, outputCanvas.width);
 
-  return {
-    pngDataUrl: wantPng ? outputCanvas.toDataURL('image/png') : null,
-    jpeg: wantJpeg
-      ? {
-          base64: imageCanvas.toDataURL('image/jpeg', 0.82).split(',')[1],
-          width: imageCanvas.width,
-          height: imageCanvas.height
-        }
-      : null
-  };
+    return {
+      pngDataUrl: wantPng ? outputCanvas.toDataURL('image/png') : null,
+      jpeg: wantJpeg
+        ? {
+            base64: imageCanvas.toDataURL('image/jpeg', 0.82).split(',')[1],
+            width: imageCanvas.width,
+            height: imageCanvas.height
+          }
+        : null
+    };
+  } finally {
+    bitmap?.close();
+    if (imageCanvas) {
+      imageCanvas.width = 1;
+      imageCanvas.height = 1;
+    }
+    if (outputCanvas) {
+      outputCanvas.width = 1;
+      outputCanvas.height = 1;
+    }
+  }
 }
 
 function wrapLines(ctx, text, maxWidth) {
