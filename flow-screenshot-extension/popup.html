@@ -48,6 +48,29 @@
       </div>
     </div>
 
+    <div class="confirm" id="filenamePrompt" hidden>
+      <label class="field">
+        <span>PDF file name</span>
+        <input id="pdfFilename" type="text" autocomplete="off" />
+      </label>
+      <div class="actions">
+        <button id="saveWithName" class="primary">Save PDF</button>
+        <button id="filenameCancel">Cancel</button>
+      </div>
+    </div>
+
+    <div class="confirm" id="deleteConfirm" hidden>
+      <p>Cancel PDF creation and delete the captured files?</p>
+      <div class="actions">
+        <button id="deleteConfirmYes" class="danger">Yes, delete</button>
+        <button id="deleteConfirmNo">No, go back</button>
+      </div>
+    </div>
+
+    <div class="actions later-pdf">
+      <button id="createPdfLater">Create PDF from saved screenshots</button>
+    </div>
+
     <h2>Captures</h2>
     <ul id="captureList" class="captures">
       <li class="empty">No captures yet.</li>

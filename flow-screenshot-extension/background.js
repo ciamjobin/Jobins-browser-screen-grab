@@ -585,7 +585,12 @@ async function deleteSessionDownloads(ids) {
   }
 }
 
-async function stopRecording(keepFiles = true) {
+function pdfFilename(value, sessionId) {
+  const base = String(value || `${sessionId}.pdf`).replace(/\.pdf$/i, '');
+  return `${sanitize(base, 120)}.pdf`;
+}
+
+async function stopRecording(keepFiles = true, requestedPdfFilename) {
   // Anything still queued would be lost, so give it a final frame to sit under.
   if (keepFiles && apiQueue.length) {
     await captureNow('final-api-calls');
@@ -618,7 +623,9 @@ async function stopRecording(keepFiles = true) {
     }
 
     if (state.settings.savePdf && state.captures.length) {
-      const result = await exportPdfInWindow(`flow-captures/${state.sessionId}/${state.sessionId}.pdf`);
+      const result = await exportPdfInWindow(
+        `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, state.sessionId)}`
+      );
       if (result.error) {
         lastError = `PDF export failed: ${result.error}`;
         console.error(lastError);
@@ -742,7 +749,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'STOP':
         try {
-          sendResponse(await stopRecording(message.keepFiles !== false));
+          sendResponse(await stopRecording(message.keepFiles !== false, message.pdfFilename));
         } catch (error) {
           sendResponse(await setState({ recording: false, lastError: error.message }));
         }

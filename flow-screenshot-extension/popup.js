@@ -5,6 +5,9 @@ const captureListEl = document.getElementById('captureList');
 const settingsEl = document.querySelector('.settings');
 const mainActionsEl = document.getElementById('mainActions');
 const confirmEl = document.getElementById('confirm');
+const filenamePromptEl = document.getElementById('filenamePrompt');
+const deleteConfirmEl = document.getElementById('deleteConfirm');
+const pdfFilenameEl = document.getElementById('pdfFilename');
 const shortcutHintEl = document.getElementById('shortcutHint');
 
 let awaitingChoice = false;
@@ -108,23 +111,54 @@ toggleEl.addEventListener('click', async () => {
     awaitingChoice = true;
     mainActionsEl.hidden = true;
     confirmEl.hidden = false;
+    filenamePromptEl.hidden = true;
+    deleteConfirmEl.hidden = true;
     return;
   }
   render(await send('START', { settings: readSettings() }));
 });
 
-async function finishRecording(keepFiles) {
+async function finishRecording(keepFiles, pdfFilename) {
   confirmEl.hidden = true;
+  filenamePromptEl.hidden = true;
+  deleteConfirmEl.hidden = true;
   mainActionsEl.hidden = false;
   awaitingChoice = false;
   toggleEl.disabled = true;
   statusEl.textContent = keepFiles ? 'Finishing up \u2014 writing files\u2026' : 'Deleting captured files\u2026';
-  render(await send('STOP', { keepFiles }));
+  render(await send('STOP', { keepFiles, pdfFilename }));
   toggleEl.disabled = false;
 }
 
-document.getElementById('keepYes').addEventListener('click', () => finishRecording(true));
-document.getElementById('keepNo').addEventListener('click', () => finishRecording(false));
+document.getElementById('keepYes').addEventListener('click', async () => {
+  const state = await send('GET_STATE');
+  pdfFilenameEl.value = `${state.sessionId || 'JShotz-session'}.pdf`;
+  confirmEl.hidden = true;
+  filenamePromptEl.hidden = false;
+  pdfFilenameEl.focus();
+  pdfFilenameEl.select();
+});
+
+document.getElementById('keepNo').addEventListener('click', () => {
+  confirmEl.hidden = true;
+  deleteConfirmEl.hidden = false;
+});
+document.getElementById('filenameCancel').addEventListener('click', () => {
+  filenamePromptEl.hidden = true;
+  confirmEl.hidden = false;
+});
+document.getElementById('saveWithName').addEventListener('click', () => {
+  finishRecording(true, pdfFilenameEl.value);
+});
+document.getElementById('deleteConfirmYes').addEventListener('click', () => finishRecording(false));
+document.getElementById('deleteConfirmNo').addEventListener('click', () => {
+  deleteConfirmEl.hidden = true;
+  confirmEl.hidden = false;
+});
+
+document.getElementById('createPdfLater').addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('pdf-import.html') });
+});
 
 captureNowEl.addEventListener('click', async () => {
   render(await send('CAPTURE_NOW'));

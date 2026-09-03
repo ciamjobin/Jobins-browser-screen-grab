@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Create PDF - JShotz</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="pdf-import">
+    <h1>JShotz PDF builder</h1>
+    <p class="note">Select the folder containing the saved screenshots.</p>
+
+    <label class="field">
+      <span>Screenshot folder</span>
+      <input id="imageFolder" type="file" accept="image/png,image/jpeg" webkitdirectory multiple />
+    </label>
+
+    <label class="field">
+      <span>PDF file name</span>
+      <input id="pdfFilename" type="text" value="JShotz-screenshots.pdf" autocomplete="off" />
+    </label>
+
+    <p id="fileSummary" class="status idle">No screenshots selected.</p>
+    <button id="generatePdf" class="primary" disabled>Generate PDF</button>
+  
+    <script type="module" src="pdf-import.js"></script>
+  </body>
+</html>

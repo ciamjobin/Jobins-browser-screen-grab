@@ -34,6 +34,8 @@ for (const [name, manifest] of [['chrome-edge', chromium], ['firefox', firefox]]
     ...(manifest.background?.scripts || []),
     manifest.background?.service_worker,
     manifest.action?.default_popup,
+    'pdf-import.html',
+    'pdf-import.js',
     ...Object.values(manifest.icons || {}),
     ...Object.values(manifest.action?.default_icon || {}),
     ...(manifest.content_scripts || []).flatMap((c) => c.js)
