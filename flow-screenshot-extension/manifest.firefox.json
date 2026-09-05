@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JShotz",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "description": "Records a flow as timestamped, watermarked screenshots with an API Name/Origin/Payload/Response table under each step, and exports a titled PDF.",
   "icons": {
     "16": "icons/icon-16.png",
