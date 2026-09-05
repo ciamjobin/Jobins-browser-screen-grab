@@ -246,6 +246,27 @@ async function probe(url) {
     fs.mkdirSync('tools/probe-shots', { recursive: true });
     fs.writeFileSync(file, png);
     console.log(`  FINAL: ${png.readUInt32BE(16)}x${png.readUInt32BE(20)} px -> ${file}`);
+
+    if (process.env.SLICES) {
+      await client.send('Emulation.setDeviceMetricsOverride', {
+        width: before.innerWidth,
+        height: Math.ceil(bestHeight),
+        deviceScaleFactor: 0,
+        mobile: false
+      });
+      await wait(400);
+      const spots = { top: 0, middle: Math.round(bestHeight / 2), bottom: Math.max(0, bestHeight - 900) };
+      for (const [name, y] of Object.entries(spots)) {
+        const slice = await client.send('Page.captureScreenshot', {
+          format: 'png',
+          captureBeyondViewport: true,
+          clip: { x: 0, y, width: before.innerWidth, height: 900, scale: 0.5 }
+        });
+        fs.writeFileSync(`tools/probe-shots/${new URL(url).hostname}-${name}.png`, Buffer.from(slice.data, 'base64'));
+      }
+      await client.send('Emulation.clearDeviceMetricsOverride');
+      console.log('  slices saved: top / middle / bottom');
+    }
   } finally {
     ws.close();
     await httpJson(`/json/close/${target.id}`).catch(() => {});

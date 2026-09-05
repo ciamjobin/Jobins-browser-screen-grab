@@ -309,9 +309,14 @@ async function grabPngDataUrl(state, tab) {
 /* ----------------------------------------------------------- full page */
 
 const HAS_DEBUGGER = typeof chrome.debugger !== 'undefined';
-const FULL_PAGE_MAX_HEIGHT = 16384;
-const FULL_PAGE_GROW_ROUNDS = 3;
+const FULL_PAGE_MAX_HEIGHT = 20000;
+const FULL_PAGE_GROW_ROUNDS = 4;
 const FULL_PAGE_RELAYOUT_MS = 450;
+const FULL_PAGE_RELAYOUT_MAX_MS = 1400;
+const FULL_PAGE_IMAGE_POLLS = 6;
+const FULL_PAGE_IMAGE_POLL_MS = 250;
+// Chromium refuses a single shot past its texture limit, so step down until one is accepted.
+const FULL_PAGE_RETRY_HEIGHTS = [16384, 12000, 8192];
 let debuggerTabId = null;
 
 if (HAS_DEBUGGER) {
@@ -373,7 +378,23 @@ async function setViewportHeight(tabId, width, height) {
     deviceScaleFactor: 0,
     mobile: false
   });
-  await delay(FULL_PAGE_RELAYOUT_MS);
+  // A tall page has proportionally more to lay out and more lazy content to trigger.
+  await delay(Math.min(FULL_PAGE_RELAYOUT_MS + height / 20, FULL_PAGE_RELAYOUT_MAX_MS));
+}
+
+// Growing the viewport starts every lazy image at once; capturing before they land leaves holes.
+async function waitForImages(tabId) {
+  for (let poll = 0; poll < FULL_PAGE_IMAGE_POLLS; poll += 1) {
+    const [injected] = await chrome.scripting
+      .executeScript({
+        target: { tabId },
+        world: 'ISOLATED',
+        func: () => [...document.images].every((img) => !img.loading || img.complete)
+      })
+      .catch(() => [null]);
+    if (injected?.result !== false) return;
+    await delay(FULL_PAGE_IMAGE_POLL_MS);
+  }
 }
 
 // Captures the whole page without ever moving what the user sees: the renderer is told the viewport
@@ -410,12 +431,21 @@ async function captureFullPagePassive(tabId) {
       height = wanted;
     }
 
-    const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
-      format: 'png',
-      captureBeyondViewport: true,
-      clip: { x: 0, y: 0, width, height: applied, scale: 1 }
-    });
-    return result?.data ? `data:image/png;base64,${result.data}` : null;
+    await waitForImages(tabId);
+
+    for (const attempt of [applied, ...FULL_PAGE_RETRY_HEIGHTS.filter((h) => h < applied)]) {
+      try {
+        const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
+          format: 'png',
+          captureBeyondViewport: true,
+          clip: { x: 0, y: 0, width, height: attempt, scale: 1 }
+        });
+        if (result?.data) return `data:image/png;base64,${result.data}`;
+      } catch (error) {
+        console.warn(`Full-page shot of ${attempt}px refused, trying shorter:`, error.message);
+      }
+    }
+    return null;
   } catch (error) {
     console.warn('Full-page capture failed, using the visible frame:', error.message);
     return null;
