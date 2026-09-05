@@ -418,6 +418,69 @@ async function waitForImages(tabId) {
   }
 }
 
+const BLANK_TAIL_TOLERANCE = 6;
+const BLANK_TAIL_SCAN_CHUNK_ROWS = 256;
+const BLANK_TAIL_MIN_CROP_PX = 24;
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+// The requested height is a DOM measurement and can overshoot what the pane actually renders (e.g.
+// a growth round stopped early because the page refused to expand further), leaving a flat band of
+// background colour under the real content. Scan up from the bottom for where that band starts.
+function measureRenderedContentHeight(bitmap) {
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0);
+
+  const { width, height } = canvas;
+  const sampleStep = Math.max(4, Math.floor(width / 200)) * 4;
+  const reference = ctx.getImageData(width - 1, height - 1, 1, 1).data;
+  const matchesReference = (data, i) =>
+    Math.abs(data[i] - reference[0]) <= BLANK_TAIL_TOLERANCE &&
+    Math.abs(data[i + 1] - reference[1]) <= BLANK_TAIL_TOLERANCE &&
+    Math.abs(data[i + 2] - reference[2]) <= BLANK_TAIL_TOLERANCE;
+
+  for (let bottom = height; bottom > 0; bottom -= BLANK_TAIL_SCAN_CHUNK_ROWS) {
+    const top = Math.max(0, bottom - BLANK_TAIL_SCAN_CHUNK_ROWS);
+    const { data } = ctx.getImageData(0, top, width, bottom - top);
+    for (let row = bottom - top - 1; row >= 0; row -= 1) {
+      const rowStart = row * width * 4;
+      for (let i = rowStart; i < rowStart + width * 4; i += sampleStep) {
+        if (!matchesReference(data, i)) return top + row + 1;
+      }
+    }
+  }
+  return 0;
+}
+
+// Removes any flat trailing band the DOM measurement left under the real content.
+async function trimBlankTail(dataUrl) {
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+    const contentPx = measureRenderedContentHeight(bitmap);
+    if (!contentPx || bitmap.height - contentPx < BLANK_TAIL_MIN_CROP_PX) return dataUrl;
+
+    const cropped = new OffscreenCanvas(bitmap.width, contentPx);
+    cropped.getContext('2d').drawImage(bitmap, 0, 0);
+    const buffer = await (await cropped.convertToBlob({ type: 'image/png' })).arrayBuffer();
+    return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+  } catch (error) {
+    console.warn('Could not trim blank space, using the capture as-is:', error.message);
+    return dataUrl;
+  } finally {
+    bitmap?.close();
+  }
+}
+
 // Captures the whole page without ever moving what the user sees: the renderer is told the viewport
 // is as tall as the content, which makes viewport-sized panes lay out in full, and the shot is taken
 // from that off-screen layout. Returns null whenever this is not possible, so the caller can just
@@ -461,7 +524,7 @@ async function captureFullPagePassive(tabId) {
           captureBeyondViewport: true,
           clip: { x: 0, y: 0, width, height: attempt, scale: 1 }
         });
-        if (result?.data) return `data:image/png;base64,${result.data}`;
+        if (result?.data) return await trimBlankTail(`data:image/png;base64,${result.data}`);
       } catch (error) {
         console.warn(`Full-page shot of ${attempt}px refused, trying shorter:`, error.message);
       }
