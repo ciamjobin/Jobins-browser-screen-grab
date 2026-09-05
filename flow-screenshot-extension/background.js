@@ -560,10 +560,87 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+const BLANK_TOLERANCE = 6;
+const BLANK_SCAN_CHUNK_ROWS = 256;
+
+// CDP happily renders the full height we ask for even when the layout cannot fill it (an app-shell
+// whose inner pane stays viewport-sized, or a document whose scrollHeight is inflated by a spacer),
+// which leaves a tall band of flat colour under the real content. Find where that band starts.
+async function measureContentHeight(canvas, ctx) {
+  const { width, height } = canvas;
+  const sampleStep = Math.max(4, Math.floor(width / 200)) * 4;
+  const reference = ctx.getImageData(width - 1, height - 1, 1, 1).data;
+  const matchesReference = (data, i) =>
+    Math.abs(data[i] - reference[0]) <= BLANK_TOLERANCE &&
+    Math.abs(data[i + 1] - reference[1]) <= BLANK_TOLERANCE &&
+    Math.abs(data[i + 2] - reference[2]) <= BLANK_TOLERANCE;
+
+  for (let bottom = height; bottom > 0; bottom -= BLANK_SCAN_CHUNK_ROWS) {
+    const top = Math.max(0, bottom - BLANK_SCAN_CHUNK_ROWS);
+    const { data } = ctx.getImageData(0, top, width, bottom - top);
+    for (let row = bottom - top - 1; row >= 0; row -= 1) {
+      const rowStart = row * width * 4;
+      for (let i = rowStart; i < rowStart + width * 4; i += sampleStep) {
+        if (!matchesReference(data, i)) return top + row + 1;
+      }
+    }
+  }
+  return 0;
+}
+
+// Returns the headless capture with any flat trailing band removed, or null when the render clearly
+// failed to expand (content no taller than one viewport) so the caller can fall back.
+async function captureFullPageHeadlessTrimmed(tabId, width, height, minContentHeight) {
+  const raw = await captureFullPageHeadless(tabId, width, height);
+  if (!raw) return null;
+
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(await (await fetch(raw)).blob());
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0);
+
+    const contentPx = await measureContentHeight(canvas, ctx);
+    if (!contentPx) return null;
+
+    const cssPerPx = height / bitmap.height;
+    if (contentPx * cssPerPx < minContentHeight) return null;
+    if (contentPx >= bitmap.height) return raw;
+
+    const cropped = new OffscreenCanvas(bitmap.width, contentPx);
+    cropped.getContext('2d').drawImage(canvas, 0, 0);
+    const buffer = await (await cropped.convertToBlob({ type: 'image/png' })).arrayBuffer();
+    return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+  } catch (error) {
+    console.warn('Could not measure headless capture, using it as-is:', error.message);
+    return raw;
+  } finally {
+    bitmap?.close();
+  }
+}
+
+// A composite is sized from measurements that can overshoot what the page actually paints, so cut
+// any flat band left under the content before encoding.
+async function canvasToTrimmedPngDataUrl(canvas, ctx) {
+  let output = canvas;
+  try {
+    const contentHeight = await measureContentHeight(canvas, ctx);
+    if (contentHeight > 0 && contentHeight < canvas.height) {
+      output = new OffscreenCanvas(canvas.width, contentHeight);
+      output.getContext('2d').drawImage(canvas, 0, 0);
+    }
+  } catch (error) {
+    console.warn('Could not measure stitched capture, keeping full height:', error.message);
+  }
+  const buffer = await (await output.convertToBlob({ type: 'image/png' })).arrayBuffer();
+  return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+}
+
 // Runs in the service worker itself: OffscreenCanvas needs no DOM, so no offscreen document is needed.
 async function stitchFullPagePng(frames, width, scrollHeight, dpr) {
   const canvas = new OffscreenCanvas(Math.round(width * dpr), Math.round(scrollHeight * dpr));
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -574,8 +651,7 @@ async function stitchFullPagePng(frames, width, scrollHeight, dpr) {
     bitmap.close();
   }
 
-  const buffer = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
-  return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+  return canvasToTrimmedPngDataUrl(canvas, ctx);
 }
 
 // The chrome around an inner scroll pane (fixed header above it, fixed footer below it) never
@@ -587,7 +663,7 @@ async function stitchScrollerPng(frames, { viewportWidth, viewportHeight, rectTo
   const totalHeight = rectTop + scrollHeight + belowHeight;
 
   const canvas = new OffscreenCanvas(Math.round(viewportWidth * dpr), Math.round(totalHeight * dpr));
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -630,8 +706,7 @@ async function stitchScrollerPng(frames, { viewportWidth, viewportHeight, rectTo
     for (const { bitmap } of bitmaps) bitmap.close();
   }
 
-  const buffer = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
-  return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+  return canvasToTrimmedPngDataUrl(canvas, ctx);
 }
 
 // Scrolls the document/window in viewport-sized steps, capturing a frame at each stop, then
@@ -719,7 +794,7 @@ async function captureFullPageDataUrl(state, tab) {
 
   const { scrollHeight, viewportHeight, viewportWidth, dpr } = metrics;
   if (scrollHeight > viewportHeight + 4) {
-    const headless = await captureFullPageHeadless(tab.id, viewportWidth, scrollHeight);
+    const headless = await captureFullPageHeadlessTrimmed(tab.id, viewportWidth, scrollHeight, viewportHeight + 4);
     if (headless) return headless;
 
     // Headless capture failed. A shared screen/window frame includes static desktop/browser
@@ -747,7 +822,7 @@ async function captureFullPageDataUrl(state, tab) {
   // to show all of its content directly, with no need to scroll it at all.
   const belowHeight = Math.max(0, viewportHeight - (scroller.rectTop + scroller.rectHeight));
   const totalHeight = scroller.rectTop + scroller.scrollHeight + belowHeight;
-  const headlessScroller = await captureFullPageHeadless(tab.id, viewportWidth, totalHeight);
+  const headlessScroller = await captureFullPageHeadlessTrimmed(tab.id, viewportWidth, totalHeight, viewportHeight + 4);
   if (headlessScroller) {
     await clearScrollerMark(tab.id).catch(() => {});
     return headlessScroller;
