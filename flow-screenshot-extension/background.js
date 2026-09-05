@@ -343,19 +343,16 @@ if (HAS_DEBUGGER) {
   });
 }
 
-async function captureFullPageHeadless(tabId) {
-  if (headlessCaptureTabId !== tabId) return null;
+// CDP's own Page.getLayoutMetrics() has been observed reporting a wildly inflated content height
+// on some sites (producing a mostly-blank screenshot with the real content squeezed at the top),
+// so the width/height come from the same DOM measurement already trusted for the scroll fallback.
+async function captureFullPageHeadless(tabId, width, height) {
+  if (headlessCaptureTabId !== tabId || !width || !height) return null;
   try {
-    const metrics = await chrome.debugger.sendCommand({ tabId }, 'Page.getLayoutMetrics');
-    const size = metrics?.cssContentSize || metrics?.contentSize;
-    const width = Math.ceil(size?.width || 0);
-    const height = Math.ceil(size?.height || 0);
-    if (!width || !height) return null;
-
     const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
       format: 'png',
       captureBeyondViewport: true,
-      clip: { x: 0, y: 0, width, height, scale: 1 }
+      clip: { x: 0, y: 0, width: Math.ceil(width), height: Math.ceil(height), scale: 1 }
     });
     return result?.data ? `data:image/png;base64,${result.data}` : null;
   } catch (error) {
@@ -663,13 +660,6 @@ async function captureByScrollerScroll(state, tab, scroller, viewportWidth, view
 async function captureFullPageDataUrl(state, tab) {
   const single = () => grabPngDataUrl(state, tab);
 
-  // 'screen' mode is deliberately capturing the real desktop/window (DevTools, taskbar, etc.), so
-  // a headless page-only screenshot would defeat the point of choosing that mode.
-  if (state.settings.captureMode !== 'screen') {
-    const headless = await captureFullPageHeadless(tab.id);
-    if (headless) return headless;
-  }
-
   let metrics;
   try {
     metrics = await getPageMetrics(tab.id);
@@ -680,6 +670,12 @@ async function captureFullPageDataUrl(state, tab) {
 
   const { scrollHeight, viewportHeight, viewportWidth, dpr } = metrics;
   if (scrollHeight > viewportHeight + 4) {
+    // 'screen' mode is deliberately capturing the real desktop/window (DevTools, taskbar, etc.),
+    // so a headless page-only screenshot would defeat the point of choosing that mode.
+    if (state.settings.captureMode !== 'screen') {
+      const headless = await captureFullPageHeadless(tab.id, viewportWidth, scrollHeight);
+      if (headless) return headless;
+    }
     return captureByWindowScroll(state, tab, metrics, single);
   }
 
