@@ -330,6 +330,7 @@ const FULL_PAGE_IMAGE_POLLS = 6;
 const FULL_PAGE_IMAGE_POLL_MS = 250;
 // Chromium refuses a single shot past its texture limit, so step down until one is accepted.
 const FULL_PAGE_RETRY_HEIGHTS = [16384, 12000, 8192];
+const SCROLLER_SETTLE_POLLS = 10;
 // Growing the viewport visibly reflows the page, so it happens only when the user asks for it.
 const FULL_PAGE_REASONS = new Set(['manual-hotkey', 'manual']);
 let debuggerTabId = null;
@@ -361,46 +362,100 @@ async function detachDebugger() {
   await chrome.debugger.detach({ tabId }).catch(() => {});
 }
 
-// These pages keep the document at viewport height and scroll an inner pane instead, so the height
-// that matters is the tallest of the document and any large scrollable pane.
-async function measurePage(tabId) {
+// Plain document height only: does not look at inner scroll panes, so it never suggests forcing the
+// viewport taller for a page whose real height lives inside a scrollable child instead.
+async function measureDocument(tabId) {
   const [injected] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'ISOLATED',
     func: () => {
       const de = document.documentElement;
       const b = document.body;
-      let needed = Math.max(de.scrollHeight, de.offsetHeight, b?.scrollHeight || 0, b?.offsetHeight || 0);
-
-      for (const el of document.querySelectorAll('body *')) {
-        if (el.scrollHeight <= el.clientHeight + 4) continue;
-        if (!/auto|scroll/.test(getComputedStyle(el).overflowY)) continue;
-        const rect = el.getBoundingClientRect();
-        if (el.clientHeight < innerHeight * 0.3 || rect.width < innerWidth * 0.4) continue;
-        needed = Math.max(needed, Math.round(rect.top + window.scrollY) + el.scrollHeight);
-      }
-
+      const docHeight = Math.max(de.scrollHeight, de.offsetHeight, b?.scrollHeight || 0, b?.offsetHeight || 0);
       return {
         width: innerWidth,
         viewportHeight: innerHeight,
         scrollX: window.scrollX,
         scrollY: window.scrollY,
-        needed: Math.ceil(needed)
+        docHeight: Math.ceil(docHeight)
       };
     }
   });
   return injected?.result || null;
 }
 
-async function setViewportHeight(tabId, width, height) {
-  await chrome.debugger.sendCommand({ tabId }, 'Emulation.setDeviceMetricsOverride', {
-    width,
-    height,
-    deviceScaleFactor: 0,
-    mobile: false
+const SCROLLER_MARK_ATTR = 'data-jshotz-scroll-root';
+
+// App-shell layouts keep the document at viewport height and scroll a large child pane instead; find
+// the biggest such pane so its own content can be scrolled and stitched without moving anything else.
+async function findScroller(tabId) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    args: [SCROLLER_MARK_ATTR],
+    func: (markAttr) => {
+      let best = null;
+      for (const el of document.querySelectorAll('body *')) {
+        if (el.scrollHeight <= el.clientHeight + 4) continue;
+        if (!/auto|scroll/.test(getComputedStyle(el).overflowY)) continue;
+        const rect = el.getBoundingClientRect();
+        if (el.clientHeight < innerHeight * 0.3 || rect.width < innerWidth * 0.4) continue;
+        if (!best || el.clientHeight * rect.width > best.el.clientHeight * best.rect.width) {
+          best = { el, rect };
+        }
+      }
+      if (!best) return null;
+      document.querySelectorAll(`[${markAttr}]`).forEach((el) => el.removeAttribute(markAttr));
+      best.el.setAttribute(markAttr, '1');
+      return {
+        rectTop: Math.round(best.rect.top),
+        rectHeight: best.el.clientHeight,
+        scrollHeight: best.el.scrollHeight,
+        clientHeight: best.el.clientHeight,
+        scrollTop: best.el.scrollTop,
+        dpr: window.devicePixelRatio || 1,
+        viewportHeight: innerHeight,
+        viewportWidth: innerWidth
+      };
+    }
   });
-  // A tall page has proportionally more to lay out and more lazy content to trigger.
-  await delay(Math.min(FULL_PAGE_RELAYOUT_MS + height / 20, FULL_PAGE_RELAYOUT_MAX_MS));
+  return injected?.result || null;
+}
+
+async function clearScrollerMark(tabId) {
+  await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      args: [SCROLLER_MARK_ATTR],
+      func: (markAttr) => document.querySelectorAll(`[${markAttr}]`).forEach((el) => el.removeAttribute(markAttr))
+    })
+    .catch(() => {});
+}
+
+// Scrolls only the marked pane (never the window), and waits for it to actually settle there -
+// smooth-scroll CSS can otherwise leave the read-back scrollTop stale for a few frames.
+async function scrollScrollerTo(tabId, markAttr, top) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    args: [markAttr, top, SCROLLER_SETTLE_POLLS],
+    func: async (attr, targetTop, polls) => {
+      const el = document.querySelector(`[${attr}]`);
+      if (!el) return { ok: false, scrollTop: 0 };
+      const previousBehavior = el.style.scrollBehavior;
+      el.style.scrollBehavior = 'auto';
+      el.scrollTo({ top: targetTop, behavior: 'instant' });
+
+      const settled = (value) => Math.abs(value - targetTop) < 2;
+      for (let attempt = 0; attempt < polls && !settled(el.scrollTop); attempt += 1) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      el.style.scrollBehavior = previousBehavior;
+      return { ok: true, scrollTop: el.scrollTop };
+    }
+  });
+  return injected?.result || { ok: false, scrollTop: top };
 }
 
 // Growing the viewport starts every lazy image at once; capturing before they land leaves holes.
@@ -418,9 +473,10 @@ async function waitForImages(tabId) {
   }
 }
 
-const BLANK_TAIL_TOLERANCE = 6;
+const BLANK_TAIL_TOLERANCE = 10;
+const BLANK_TAIL_ROW_MATCH_RATIO = 0.97;
 const BLANK_TAIL_SCAN_CHUNK_ROWS = 256;
-const BLANK_TAIL_MIN_CROP_PX = 24;
+const BLANK_TAIL_MIN_CROP_PX = 12;
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -432,16 +488,18 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-// The requested height is a DOM measurement and can overshoot what the pane actually renders (e.g.
-// a growth round stopped early because the page refused to expand further), leaving a flat band of
-// background colour under the real content. Scan up from the bottom for where that band starts.
+// The requested height is a DOM measurement and can overshoot what actually renders, leaving a flat
+// band of background colour under the real content. Scan up from the bottom for where it starts,
+// accepting a small fraction of mismatched samples per row so a stray divider line or anti-aliased
+// edge doesn't halt the scan one row too early.
 function measureRenderedContentHeight(bitmap) {
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bitmap, 0, 0);
 
   const { width, height } = canvas;
-  const sampleStep = Math.max(4, Math.floor(width / 200)) * 4;
+  const sampleStep = Math.max(2, Math.floor(width / 300)) * 4;
+  const samplesPerRow = Math.ceil((width * 4) / sampleStep);
   const reference = ctx.getImageData(width - 1, height - 1, 1, 1).data;
   const matchesReference = (data, i) =>
     Math.abs(data[i] - reference[0]) <= BLANK_TAIL_TOLERANCE &&
@@ -453,9 +511,11 @@ function measureRenderedContentHeight(bitmap) {
     const { data } = ctx.getImageData(0, top, width, bottom - top);
     for (let row = bottom - top - 1; row >= 0; row -= 1) {
       const rowStart = row * width * 4;
+      let mismatches = 0;
       for (let i = rowStart; i < rowStart + width * 4; i += sampleStep) {
-        if (!matchesReference(data, i)) return top + row + 1;
+        if (!matchesReference(data, i)) mismatches += 1;
       }
+      if (mismatches > samplesPerRow * (1 - BLANK_TAIL_ROW_MATCH_RATIO)) return top + row + 1;
     }
   }
   return 0;
@@ -481,38 +541,40 @@ async function trimBlankTail(dataUrl) {
   }
 }
 
-// Captures the whole page without ever moving what the user sees: the renderer is told the viewport
-// is as tall as the content, which makes viewport-sized panes lay out in full, and the shot is taken
-// from that off-screen layout. Returns null whenever this is not possible, so the caller can just
-// take the ordinary visible frame - the view is never scrolled as a fallback.
-async function captureFullPagePassive(tabId) {
-  if (!HAS_DEBUGGER) return null;
+async function setViewportHeight(tabId, width, height) {
+  await chrome.debugger.sendCommand({ tabId }, 'Emulation.setDeviceMetricsOverride', {
+    width,
+    height,
+    deviceScaleFactor: 0,
+    mobile: false
+  });
+  // A tall page has proportionally more to lay out and more lazy content to trigger.
+  await delay(Math.min(FULL_PAGE_RELAYOUT_MS + height / 20, FULL_PAGE_RELAYOUT_MAX_MS));
+}
 
-  const metrics = await measurePage(tabId).catch(() => null);
-  if (!metrics?.viewportHeight) return null;
-  if (metrics.needed <= metrics.viewportHeight + 4) return null;
+// A plain document is already laid out at its full scrollable height in the common case, but pages
+// that lazy-load content as it enters the viewport only have real content up to where the user has
+// actually scrolled - growing the viewport (not scrolling it) brings the rest into view so it loads,
+// at the cost of a brief, momentary layout change while the shot is taken.
+async function captureDocumentHeadless(tabId, scrollX, scrollY, width, height) {
   if (!(await attachDebugger(tabId))) return null;
 
-  const width = metrics.width;
-  let height = Math.min(metrics.needed, FULL_PAGE_MAX_HEIGHT);
   let applied = height;
   let previousOverflow = Infinity;
-
   try {
     for (let round = 0; round < FULL_PAGE_GROW_ROUNDS; round += 1) {
-      await setViewportHeight(tabId, width, height);
-      applied = height;
+      await setViewportHeight(tabId, width, applied);
 
-      const grown = await measurePage(tabId).catch(() => null);
+      const grown = await measureDocument(tabId).catch(() => null);
       if (!grown) break;
 
-      const wanted = Math.min(grown.needed, FULL_PAGE_MAX_HEIGHT);
-      const overflow = wanted - height;
+      const wanted = Math.min(grown.docHeight, FULL_PAGE_MAX_HEIGHT);
+      const overflow = wanted - applied;
       // An overflow that stops shrinking means something is sized to the viewport and would grow
       // with it forever, so stop at the last height that made progress.
       if (overflow <= 4 || overflow >= previousOverflow - 4) break;
       previousOverflow = overflow;
-      height = wanted;
+      applied = wanted;
     }
 
     await waitForImages(tabId);
@@ -542,7 +604,7 @@ async function captureFullPagePassive(tabId) {
       .executeScript({
         target: { tabId },
         world: 'ISOLATED',
-        args: [metrics.scrollX, metrics.scrollY],
+        args: [scrollX, scrollY],
         func: (x, y) => window.scrollTo({ left: x, top: y, behavior: 'instant' })
       })
       .catch(() => {});
@@ -550,6 +612,108 @@ async function captureFullPagePassive(tabId) {
     // is what makes the "started debugging this browser" banner disappear right away.
     await detachDebugger();
   }
+}
+
+// For an app-shell pane that only reveals its content while scrolled, scroll just that pane and
+// stitch the results. This never touches the debugger and never resizes the window - only the pane
+// itself visibly moves, exactly as it would if the user scrolled it by hand.
+async function captureScrollerStitch(tabId, scroller) {
+  const { viewportWidth, viewportHeight, rectTop, rectHeight, dpr } = scroller;
+  const step = Math.max(rectHeight - 40, 80);
+  const stops = [];
+  for (let top = 0; top < scroller.scrollHeight - scroller.clientHeight; top += step) stops.push(top);
+  stops.push(scroller.scrollHeight - scroller.clientHeight);
+
+  const frames = [];
+  try {
+    for (const target of stops) {
+      const { scrollTop } = await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, target);
+      await delay(220);
+      const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'png' }).catch(() => null);
+      if (!dataUrl) continue;
+      frames.push({ scrollTop, dataUrl });
+    }
+    if (!frames.length) return null;
+
+    const belowHeight = Math.max(0, viewportHeight - (rectTop + rectHeight));
+    const finalScrollHeight = frames[frames.length - 1].scrollTop + rectHeight;
+    const totalHeight = rectTop + finalScrollHeight + belowHeight;
+
+    const canvas = new OffscreenCanvas(Math.round(viewportWidth * dpr), Math.round(totalHeight * dpr));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const bitmaps = [];
+    try {
+      for (const frame of frames) {
+        bitmaps.push({
+          scrollTop: frame.scrollTop,
+          bitmap: await createImageBitmap(await (await fetch(frame.dataUrl)).blob())
+        });
+      }
+
+      const topHeight = Math.round(rectTop * dpr);
+      const sliceHeight = Math.round(rectHeight * dpr);
+
+      const first = bitmaps[0].bitmap;
+      if (topHeight > 0) ctx.drawImage(first, 0, 0, first.width, topHeight, 0, 0, first.width, topHeight);
+
+      for (const { scrollTop, bitmap } of bitmaps) {
+        const destY = Math.round((rectTop + scrollTop) * dpr);
+        ctx.drawImage(bitmap, 0, topHeight, bitmap.width, sliceHeight, 0, destY, bitmap.width, sliceHeight);
+      }
+
+      const last = bitmaps[bitmaps.length - 1].bitmap;
+      const belowSourceTop = Math.round((rectTop + rectHeight) * dpr);
+      const belowSourceHeight = last.height - belowSourceTop;
+      if (belowSourceHeight > 0) {
+        ctx.drawImage(
+          last,
+          0,
+          belowSourceTop,
+          last.width,
+          belowSourceHeight,
+          0,
+          canvas.height - belowSourceHeight,
+          last.width,
+          belowSourceHeight
+        );
+      }
+    } finally {
+      for (const { bitmap } of bitmaps) bitmap.close();
+    }
+
+    const buffer = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
+    return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+  } finally {
+    await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, scroller.scrollTop);
+    await clearScrollerMark(tabId);
+  }
+}
+
+// Captures the whole page without ever moving what the user sees where that is possible. An
+// app-shell pane is handled by scrolling only that pane - no debugger, no reflow. A plain tall
+// document instead needs a momentary viewport resize so lazy-loaded content actually renders (a
+// resize-only capture leaves anything below the original viewport as unloaded placeholders).
+// Returns null when neither applies, so the caller just takes the ordinary visible frame.
+async function captureFullPagePassive(tabId) {
+  if (!HAS_DEBUGGER) return null;
+
+  const doc = await measureDocument(tabId).catch(() => null);
+  if (!doc?.viewportHeight) return null;
+
+  if (doc.docHeight > doc.viewportHeight + 4) {
+    const height = Math.min(doc.docHeight, FULL_PAGE_MAX_HEIGHT);
+    return captureDocumentHeadless(tabId, doc.scrollX, doc.scrollY, doc.width, height);
+  }
+
+  const scroller = await findScroller(tabId).catch(() => null);
+  if (!scroller || scroller.scrollHeight <= scroller.clientHeight + 4) {
+    await clearScrollerMark(tabId);
+    return null;
+  }
+  return captureScrollerStitch(tabId, scroller);
 }
 
 async function storeFrame(frame) {
