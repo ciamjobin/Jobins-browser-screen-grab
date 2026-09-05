@@ -322,7 +322,12 @@ async function getPageMetrics(tabId) {
       const doc = document.documentElement;
       const body = document.body;
       return {
-        scrollHeight: Math.max(doc.scrollHeight, body ? body.scrollHeight : 0),
+        scrollHeight: Math.max(
+          doc.scrollHeight,
+          doc.offsetHeight,
+          body ? body.scrollHeight : 0,
+          body ? body.offsetHeight : 0
+        ),
         viewportHeight: window.innerHeight,
         viewportWidth: window.innerWidth,
         scrollX: window.scrollX,
@@ -334,13 +339,26 @@ async function getPageMetrics(tabId) {
   return injected?.result || null;
 }
 
+// Waits for the scroll to actually land before returning, since a page's own CSS (e.g.
+// `scroll-behavior: smooth`) can make scrollTo animate instead of jumping immediately -
+// reading scrollY right away would then report the pre-scroll position.
 async function scrollTabTo(tabId, x, y) {
   const [injected] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'ISOLATED',
     args: [x, y],
-    func: (targetX, targetY) => {
-      window.scrollTo(targetX, targetY);
+    func: async (targetX, targetY) => {
+      const root = document.scrollingElement || document.documentElement;
+      const previousBehavior = root.style.scrollBehavior;
+      root.style.scrollBehavior = 'auto';
+      window.scrollTo({ left: targetX, top: targetY, behavior: 'instant' });
+
+      const settled = (value, target) => Math.abs(value - target) < 2;
+      for (let attempt = 0; attempt < 10 && !settled(window.scrollY, targetY); attempt += 1) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      root.style.scrollBehavior = previousBehavior;
+
       return { scrollX: window.scrollX, scrollY: window.scrollY };
     }
   });
