@@ -305,6 +305,122 @@ async function grabPngDataUrl(state, tab) {
   return chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
 }
 
+/* ------------------------------------------------------------- full page */
+
+// captureVisibleTab (and a shared screen/tab frame) only ever shows one viewport's worth of a
+// scrollable page, so a taller page has to be scrolled in slices and the slices stitched together.
+const FULL_PAGE_MAX_SEGMENTS = 12;
+const FULL_PAGE_SETTLE_MS = 220;
+// Chrome throttles captureVisibleTab to a couple of calls per second; stay comfortably under that.
+const FULL_PAGE_CAPTURE_GAP_MS = 550;
+
+async function getPageMetrics(tabId) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    func: () => {
+      const doc = document.documentElement;
+      const body = document.body;
+      return {
+        scrollHeight: Math.max(doc.scrollHeight, body ? body.scrollHeight : 0),
+        viewportHeight: window.innerHeight,
+        viewportWidth: window.innerWidth,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        dpr: window.devicePixelRatio || 1
+      };
+    }
+  });
+  return injected?.result || null;
+}
+
+async function scrollTabTo(tabId, x, y) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    args: [x, y],
+    func: (targetX, targetY) => {
+      window.scrollTo(targetX, targetY);
+      return { scrollX: window.scrollX, scrollY: window.scrollY };
+    }
+  });
+  return injected?.result || { scrollX: x, scrollY: y };
+}
+
+// Chunked so a multi-megabyte screenshot doesn't blow the call-stack limit of String.fromCharCode.
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+// Runs in the service worker itself: OffscreenCanvas needs no DOM, so no offscreen document is needed.
+async function stitchFullPagePng(frames, width, scrollHeight, dpr) {
+  const canvas = new OffscreenCanvas(Math.round(width * dpr), Math.round(scrollHeight * dpr));
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (const frame of frames) {
+    const blob = await (await fetch(frame.dataUrl)).blob();
+    const bitmap = await createImageBitmap(blob);
+    ctx.drawImage(bitmap, 0, Math.round(frame.y * dpr));
+    bitmap.close();
+  }
+
+  const buffer = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
+  return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+}
+
+// Scrolls the recorded tab in viewport-sized steps, capturing a frame at each stop, then stitches
+// the frames into one tall image so the saved screenshot covers the whole scrollable page.
+async function captureFullPageDataUrl(state, tab) {
+  const single = () => grabPngDataUrl(state, tab);
+
+  let metrics;
+  try {
+    metrics = await getPageMetrics(tab.id);
+  } catch {
+    metrics = null; // Restricted pages (chrome://, Web Store) cannot be instrumented.
+  }
+  if (!metrics || !metrics.viewportHeight) return single();
+
+  const { scrollHeight, viewportHeight, viewportWidth, scrollX, scrollY, dpr } = metrics;
+  if (scrollHeight <= viewportHeight + 4) return single();
+
+  const positions = [];
+  let y = 0;
+  while (y < scrollHeight - viewportHeight && positions.length < FULL_PAGE_MAX_SEGMENTS - 1) {
+    positions.push(y);
+    y += viewportHeight;
+  }
+  positions.push(Math.max(0, scrollHeight - viewportHeight));
+
+  const frames = [];
+  try {
+    for (let index = 0; index < positions.length; index += 1) {
+      const actual = await scrollTabTo(tab.id, scrollX, positions[index]).catch(() => null);
+      await delay(index === 0 ? FULL_PAGE_SETTLE_MS : FULL_PAGE_CAPTURE_GAP_MS);
+      frames.push({ y: actual?.scrollY ?? positions[index], dataUrl: await single() });
+    }
+  } finally {
+    await scrollTabTo(tab.id, scrollX, scrollY).catch(() => {});
+  }
+
+  if (frames.length <= 1) return frames[0]?.dataUrl ?? single();
+
+  try {
+    return await stitchFullPagePng(frames, viewportWidth, scrollHeight, dpr);
+  } catch (error) {
+    console.warn('Full-page stitch failed, keeping the last captured frame instead:', error.message);
+    return frames[frames.length - 1].dataUrl;
+  }
+}
+
 async function storeFrame(frame) {
   await chrome.storage.local.set({ [`${FRAME_PREFIX}${frame.sequence}`]: frame });
 }
@@ -341,8 +457,13 @@ async function performCapture(reason, label) {
     reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : reason === 'dialog-opened' ? 550 : 450;
   await delay(state.settings.captureApi ? settle + 500 : settle);
 
+  // 'devtools-panel' is an explicit "capture exactly what's on screen right now" hotkey, so it
+  // must not scroll the page out from under whatever the user is inspecting.
+  const rawDataUrl =
+    reason === 'devtools-panel' ? await grabPngDataUrl(state, tab) : await captureFullPageDataUrl(state, tab);
+
   return persistCapture({
-    rawDataUrl: await grabPngDataUrl(state, tab),
+    rawDataUrl,
     title: tab.title || tab.url || 'Untitled page',
     url: tab.url || '',
     reason,
