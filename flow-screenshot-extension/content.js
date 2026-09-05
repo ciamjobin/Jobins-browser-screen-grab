@@ -185,7 +185,7 @@ window.addEventListener(
 // Most of a screenful of scrolling is one new thing to see, so capture whenever the user has
 // travelled that far and paused, and again when they land at the end. Capture phase because scroll
 // events from inner panes do not bubble.
-const SCROLL_STEP_RATIO = 0.7;
+const SCROLL_STEP_RATIO = 0.6;
 const SCROLL_END_SLACK = 4;
 const SCROLL_MIN_TRAVEL = 40;
 
