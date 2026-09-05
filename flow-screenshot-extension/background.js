@@ -347,7 +347,16 @@ if (HAS_DEBUGGER) {
 // on some sites (producing a mostly-blank screenshot with the real content squeezed at the top),
 // so the width/height come from the same DOM measurement already trusted for the scroll fallback.
 async function captureFullPageHeadless(tabId, width, height) {
-  if (headlessCaptureTabId !== tabId || !width || !height) return null;
+  if (!width || !height) return null;
+
+  // A cross-origin navigation can swap the tab to a new renderer process and silently drop the
+  // debugger session; self-heal here so one lost attach doesn't fall back to visible scrolling
+  // for the rest of the recording.
+  if (headlessCaptureTabId !== tabId) {
+    const attached = await attachHeadlessCapture(tabId);
+    if (!attached) return null;
+  }
+
   try {
     const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
       format: 'png',
@@ -357,6 +366,7 @@ async function captureFullPageHeadless(tabId, width, height) {
     return result?.data ? `data:image/png;base64,${result.data}` : null;
   } catch (error) {
     console.warn('Headless full-page capture failed for this frame, falling back:', error.message);
+    headlessCaptureTabId = null;
     return null;
   }
 }
@@ -692,11 +702,7 @@ async function captureByScrollerScroll(state, tab, scroller, viewportWidth, view
 // whether the page scrolls at the document level or through an inner app-shell content pane.
 async function captureFullPageDataUrl(state, tab) {
   const single = () => grabPngDataUrl(state, tab);
-
-  // A shared screen/window frame includes static desktop/browser chrome that never moves as the
-  // page scrolls; stacking several such frames duplicates that chrome instead of showing more
-  // page content, so 'screen' mode always takes a single frame of whatever is already visible.
-  if (state.settings.captureMode === 'screen') return single();
+  const isScreenMode = state.settings.captureMode === 'screen';
 
   let metrics;
   try {
@@ -710,6 +716,11 @@ async function captureFullPageDataUrl(state, tab) {
   if (scrollHeight > viewportHeight + 4) {
     const headless = await captureFullPageHeadless(tab.id, viewportWidth, scrollHeight);
     if (headless) return headless;
+
+    // Headless capture failed. A shared screen/window frame includes static desktop/browser
+    // chrome that never moves as the page scrolls, so stacking several such frames would
+    // duplicate that chrome instead of showing more page content - take a single frame instead.
+    if (isScreenMode) return single();
 
     await hideScrollbars(tab.id).catch(() => {});
     try {
@@ -726,6 +737,7 @@ async function captureFullPageDataUrl(state, tab) {
     scroller = null; // Restricted pages (chrome://, Web Store) cannot be instrumented.
   }
   if (!scroller?.found || scroller.scrollHeight <= scroller.clientHeight + 4) return single();
+  if (isScreenMode) return single(); // Same chrome-duplication risk as the window-scroll path above.
 
   await hideScrollbars(tab.id).catch(() => {});
   try {
@@ -981,10 +993,9 @@ async function startRecording(tab, settings) {
   merged.captureApi = merged.captureMode === 'api';
   let streamActive = false;
 
-  // Best-effort: a failed attach just means full-page shots fall back to visible scrolling.
-  if (merged.captureMode !== 'screen') {
-    await attachHeadlessCapture(tab.id);
-  }
+  // Best-effort: a failed attach just means full-page shots fall back to visible scrolling
+  // (or, for 'screen' mode, a single frame of whatever the shared surface currently shows).
+  await attachHeadlessCapture(tab.id);
 
   try {
     if (merged.captureMode === 'screen' || merged.savePdf) {

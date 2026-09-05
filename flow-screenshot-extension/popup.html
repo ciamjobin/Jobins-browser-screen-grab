@@ -30,9 +30,11 @@
       </p>
 
       <p class="note">
-        Full-page screenshots on Tab/API mode capture in the background without scrolling your view
-        when possible. Chrome shows a "started debugging this browser" banner while that's active
-        &mdash; that's this feature, and Chrome does not let extensions hide that banner.
+        Full-page screenshots capture in the background without scrolling your view when possible.
+        Chrome shows a "started debugging this browser" banner while that's active &mdash; that's
+        this feature, and Chrome does not let extensions hide that banner. If it isn't available
+        (e.g. DevTools is open on the recorded tab), the view will visibly scroll instead, except in
+        Screen/window mode which always takes a single frame of whatever is already on screen.
       </p>
 
       <label class="check"><input type="checkbox" id="captureOnClick" /> Capture on every button click</label>
