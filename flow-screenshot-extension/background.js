@@ -28,6 +28,7 @@ const defaultState = {
   streamActive: false,
   screenWindowId: null,
   lastError: null,
+  headlessCaptureActive: false,
   settings: {
     // 'tab' = viewport only, 'api' = viewport + API table, 'screen' = desktop stream (DevTools/taskbar)
     captureMode: 'tab',
@@ -339,7 +340,9 @@ if (HAS_DEBUGGER) {
   // DevTools being opened on the tab, or the user dismissing the "being debugged" banner, detaches
   // us from the outside; fall back to the visible scroll+stitch method for the rest of the session.
   chrome.debugger.onDetach.addListener((source) => {
-    if (source.tabId === headlessCaptureTabId) headlessCaptureTabId = null;
+    if (source.tabId !== headlessCaptureTabId) return;
+    headlessCaptureTabId = null;
+    setState({ headlessCaptureActive: false }).catch(() => {});
   });
 }
 
@@ -354,6 +357,7 @@ async function captureFullPageHeadless(tabId, width, height) {
   // for the rest of the recording.
   if (headlessCaptureTabId !== tabId) {
     const attached = await attachHeadlessCapture(tabId);
+    await setState({ headlessCaptureActive: attached });
     if (!attached) return null;
   }
 
@@ -367,6 +371,7 @@ async function captureFullPageHeadless(tabId, width, height) {
   } catch (error) {
     console.warn('Headless full-page capture failed for this frame, falling back:', error.message);
     headlessCaptureTabId = null;
+    await setState({ headlessCaptureActive: false });
     return null;
   }
 }
@@ -737,7 +742,22 @@ async function captureFullPageDataUrl(state, tab) {
     scroller = null; // Restricted pages (chrome://, Web Store) cannot be instrumented.
   }
   if (!scroller?.found || scroller.scrollHeight <= scroller.clientHeight + 4) return single();
-  if (isScreenMode) return single(); // Same chrome-duplication risk as the window-scroll path above.
+
+  // Forcing a taller virtual viewport often lets a `height: 100vh`-style content pane grow enough
+  // to show all of its content directly, with no need to scroll it at all.
+  const belowHeight = Math.max(0, viewportHeight - (scroller.rectTop + scroller.rectHeight));
+  const totalHeight = scroller.rectTop + scroller.scrollHeight + belowHeight;
+  const headlessScroller = await captureFullPageHeadless(tab.id, viewportWidth, totalHeight);
+  if (headlessScroller) {
+    await clearScrollerMark(tab.id).catch(() => {});
+    return headlessScroller;
+  }
+
+  if (isScreenMode) {
+    // Same chrome-duplication risk as the window-scroll path above.
+    await clearScrollerMark(tab.id).catch(() => {});
+    return single();
+  }
 
   await hideScrollbars(tab.id).catch(() => {});
   try {
@@ -765,6 +785,7 @@ async function cleanupCaptureResources() {
   await detachHeadlessCapture().catch(() => {});
   await clearStoredFrames().catch(() => {});
   await setDownloadUi(true).catch(() => {});
+  await setState({ headlessCaptureActive: false }).catch(() => {});
   apiQueue = [];
   apiHeaderRecords = [];
   lastRawCaptureHash = '';
@@ -995,7 +1016,7 @@ async function startRecording(tab, settings) {
 
   // Best-effort: a failed attach just means full-page shots fall back to visible scrolling
   // (or, for 'screen' mode, a single frame of whatever the shared surface currently shows).
-  await attachHeadlessCapture(tab.id);
+  const headlessCaptureActive = await attachHeadlessCapture(tab.id);
 
   try {
     if (merged.captureMode === 'screen' || merged.savePdf) {
@@ -1027,6 +1048,7 @@ async function startRecording(tab, settings) {
     apiHookReady: false,
     streamActive,
     lastError: null,
+    headlessCaptureActive,
     settings: merged
   });
 

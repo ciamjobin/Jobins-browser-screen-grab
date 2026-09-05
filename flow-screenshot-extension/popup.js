@@ -85,7 +85,10 @@ function render(state) {
     statusEl.className = 'status error';
   } else if (recording) {
     const api = settings.captureApi ? ` \u00b7 ${state.apiSeen} API call(s)` : '';
-    statusEl.textContent = `Recording \u00b7 ${state.sequence} screenshot(s)${api}`;
+    const background = state.headlessCaptureActive
+      ? ' \u00b7 background capture: on'
+      : ' \u00b7 background capture: off (view may scroll)';
+    statusEl.textContent = `Recording \u00b7 ${state.sequence} screenshot(s)${api}${background}`;
     statusEl.className = 'status recording';
   } else {
     statusEl.textContent = 'Idle';
