@@ -319,8 +319,8 @@ const FULL_PAGE_IMAGE_POLLS = 6;
 const FULL_PAGE_IMAGE_POLL_MS = 250;
 // Chromium refuses a single shot past its texture limit, so step down until one is accepted.
 const FULL_PAGE_RETRY_HEIGHTS = [16384, 12000, 8192];
-// Growing the viewport visibly reflows the page, so it is worth it only on deliberate steps.
-const FULL_PAGE_REASONS = new Set(['click', 'manual-hotkey', 'manual']);
+// Growing the viewport visibly reflows the page, so it happens only when the user asks for it.
+const FULL_PAGE_REASONS = new Set(['manual-hotkey', 'manual']);
 let debuggerTabId = null;
 
 if (HAS_DEBUGGER) {
@@ -512,11 +512,10 @@ async function performCapture(reason, label) {
     reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : reason === 'dialog-opened' ? 550 : 450;
   await delay(state.settings.captureApi ? settle + 500 : settle);
 
-  // Screen mode shows the desktop and DevTools, and API mode pairs each shot with its call table,
-  // so only plain tab capture uses the off-screen full-page render.
+  // Screen mode captures the shared desktop surface, which a page render would throw away.
   const wantsFullPage =
     state.settings.fullPage &&
-    state.settings.captureMode === 'tab' &&
+    state.settings.captureMode !== 'screen' &&
     FULL_PAGE_REASONS.has(reason);
   const fullPage = wantsFullPage ? await captureFullPagePassive(tab.id).catch(() => null) : null;
 
