@@ -317,6 +317,7 @@ const FULL_PAGE_IMAGE_POLLS = 6;
 const FULL_PAGE_IMAGE_POLL_MS = 250;
 // Chromium refuses a single shot past its texture limit, so step down until one is accepted.
 const FULL_PAGE_RETRY_HEIGHTS = [16384, 12000, 8192];
+const FULL_PAGE_SKIP_REASONS = new Set(['devtools-panel', 'field-edited', 'text-selected']);
 let debuggerTabId = null;
 
 if (HAS_DEBUGGER) {
@@ -365,7 +366,13 @@ async function measurePage(tabId) {
         needed = Math.max(needed, Math.round(rect.top + window.scrollY) + el.scrollHeight);
       }
 
-      return { width: innerWidth, viewportHeight: innerHeight, needed: Math.ceil(needed) };
+      return {
+        width: innerWidth,
+        viewportHeight: innerHeight,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        needed: Math.ceil(needed)
+      };
     }
   });
   return injected?.result || null;
@@ -453,6 +460,15 @@ async function captureFullPagePassive(tabId) {
     await chrome.debugger
       .sendCommand({ tabId }, 'Emulation.clearDeviceMetricsOverride')
       .catch(() => {});
+    // Resizing the layout viewport can leave the page resting somewhere else once it snaps back.
+    await chrome.scripting
+      .executeScript({
+        target: { tabId },
+        world: 'ISOLATED',
+        args: [metrics.scrollX, metrics.scrollY],
+        func: (x, y) => window.scrollTo({ left: x, top: y, behavior: 'instant' })
+      })
+      .catch(() => {});
   }
 }
 
@@ -494,9 +510,12 @@ async function performCapture(reason, label) {
   await delay(state.settings.captureApi ? settle + 500 : settle);
 
   // Screen mode exists to show the desktop and DevTools, and the hotkey shot must show exactly what
-  // is on screen, so neither of those goes through the off-screen full-page render.
+  // is on screen, so neither of those goes through the off-screen full-page render. Growing the
+  // viewport visibly reflows the page, so it is also skipped mid-interaction (typing, selecting).
   const wantsFullPage =
-    state.settings.fullPage && state.settings.captureMode !== 'screen' && reason !== 'devtools-panel';
+    state.settings.fullPage &&
+    state.settings.captureMode !== 'screen' &&
+    !FULL_PAGE_SKIP_REASONS.has(reason);
   const fullPage = wantsFullPage ? await captureFullPagePassive(tab.id).catch(() => null) : null;
 
   return persistCapture({
