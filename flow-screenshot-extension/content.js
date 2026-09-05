@@ -182,8 +182,13 @@ window.addEventListener(
   true
 );
 
-// One screenful of scrolling is one new thing to see, so capture whenever the user has travelled
-// that far and paused. Capture phase because scroll events from inner panes do not bubble.
+// Most of a screenful of scrolling is one new thing to see, so capture whenever the user has
+// travelled that far and paused, and again when they land at the end. Capture phase because scroll
+// events from inner panes do not bubble.
+const SCROLL_STEP_RATIO = 0.7;
+const SCROLL_END_SLACK = 4;
+const SCROLL_MIN_TRAVEL = 40;
+
 document.addEventListener(
   'scroll',
   (event) => {
@@ -202,16 +207,24 @@ document.addEventListener(
       scrollAnchors.set(key, position);
       return;
     }
-    if (Math.abs(position - scrollAnchors.get(key)) < screenful) return;
+
+    const travelled = Math.abs(position - scrollAnchors.get(key));
+    const limit = isDocument
+      ? Math.max(document.documentElement.scrollHeight - window.innerHeight, 1)
+      : Math.max(scroller.scrollHeight - scroller.clientHeight, 1);
+    const atEnd = position >= limit - SCROLL_END_SLACK;
+
+    if (travelled < screenful * SCROLL_STEP_RATIO && !(atEnd && travelled >= SCROLL_MIN_TRAVEL)) return;
 
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(() => {
       const settled = isDocument ? window.scrollY : scroller.scrollTop;
       scrollAnchors.set(key, settled);
-      const total = isDocument
-        ? Math.max(document.documentElement.scrollHeight - window.innerHeight, 1)
-        : Math.max(scroller.scrollHeight - scroller.clientHeight, 1);
-      requestCapture('scrolled', `${Math.round((settled / total) * 100)}% down`);
+      const label =
+        settled >= limit - SCROLL_END_SLACK
+          ? 'end of page'
+          : `${Math.round((settled / limit) * 100)}% down`;
+      requestCapture('scrolled', label);
     }, 450);
   },
   true
