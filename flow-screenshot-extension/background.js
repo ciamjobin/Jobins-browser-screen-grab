@@ -501,6 +501,39 @@ async function clearScrollerMark(tabId) {
   });
 }
 
+const SCROLLBAR_STYLE_ID = 'jshotz-hide-scrollbars';
+
+// captureVisibleTab paints the page's own (often OS-styled) scrollbar, including its up/down
+// arrow buttons. Those sit at a fixed spot within whatever gets scrolled, so stacking several
+// captured slices duplicates that decoration down the composite; hiding it removes the artifact.
+async function hideScrollbars(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    args: [SCROLLBAR_STYLE_ID],
+    func: (styleId) => {
+      if (document.getElementById(styleId)) return;
+      const style = document.createElement('style');
+      style.id = styleId;
+      style.textContent =
+        '* { scrollbar-width: none !important; -ms-overflow-style: none !important; }' +
+        '*::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }';
+      document.documentElement.appendChild(style);
+    }
+  });
+}
+
+async function restoreScrollbars(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    args: [SCROLLBAR_STYLE_ID],
+    func: (styleId) => {
+      document.getElementById(styleId)?.remove();
+    }
+  });
+}
+
 // Chunked so a multi-megabyte screenshot doesn't blow the call-stack limit of String.fromCharCode.
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -660,6 +693,11 @@ async function captureByScrollerScroll(state, tab, scroller, viewportWidth, view
 async function captureFullPageDataUrl(state, tab) {
   const single = () => grabPngDataUrl(state, tab);
 
+  // A shared screen/window frame includes static desktop/browser chrome that never moves as the
+  // page scrolls; stacking several such frames duplicates that chrome instead of showing more
+  // page content, so 'screen' mode always takes a single frame of whatever is already visible.
+  if (state.settings.captureMode === 'screen') return single();
+
   let metrics;
   try {
     metrics = await getPageMetrics(tab.id);
@@ -670,13 +708,15 @@ async function captureFullPageDataUrl(state, tab) {
 
   const { scrollHeight, viewportHeight, viewportWidth, dpr } = metrics;
   if (scrollHeight > viewportHeight + 4) {
-    // 'screen' mode is deliberately capturing the real desktop/window (DevTools, taskbar, etc.),
-    // so a headless page-only screenshot would defeat the point of choosing that mode.
-    if (state.settings.captureMode !== 'screen') {
-      const headless = await captureFullPageHeadless(tab.id, viewportWidth, scrollHeight);
-      if (headless) return headless;
+    const headless = await captureFullPageHeadless(tab.id, viewportWidth, scrollHeight);
+    if (headless) return headless;
+
+    await hideScrollbars(tab.id).catch(() => {});
+    try {
+      return await captureByWindowScroll(state, tab, metrics, single);
+    } finally {
+      await restoreScrollbars(tab.id).catch(() => {});
     }
-    return captureByWindowScroll(state, tab, metrics, single);
   }
 
   let scroller;
@@ -687,10 +727,12 @@ async function captureFullPageDataUrl(state, tab) {
   }
   if (!scroller?.found || scroller.scrollHeight <= scroller.clientHeight + 4) return single();
 
+  await hideScrollbars(tab.id).catch(() => {});
   try {
     return await captureByScrollerScroll(state, tab, scroller, viewportWidth, viewportHeight, dpr, single);
   } finally {
     await clearScrollerMark(tab.id).catch(() => {});
+    await restoreScrollbars(tab.id).catch(() => {});
   }
 }
 
