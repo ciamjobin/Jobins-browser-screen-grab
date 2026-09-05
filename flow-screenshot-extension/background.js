@@ -516,7 +516,9 @@ async function exportPdfInWindow(filename) {
       resolve(value);
     };
     const onMessage = (message) => {
-      if (message?.type === 'PDF_DONE') finish(message.error ? { error: message.error } : { ok: true });
+      if (message?.type === 'PDF_DONE') {
+        finish(message.error ? { error: message.error } : { ok: true, downloadId: message.downloadId });
+      }
     };
     const onRemoved = (windowId) => {
       if (windowId === win.id) finish({ error: 'The PDF window was closed early.' });
@@ -607,6 +609,18 @@ function pdfFilename(value, sessionId) {
   return `${sanitize(base, 120)}.pdf`;
 }
 
+async function revealSavedFiles(downloadId) {
+  try {
+    if (typeof downloadId === 'number') {
+      await chrome.downloads.show(downloadId);
+      return;
+    }
+    await chrome.downloads.showDefaultFolder();
+  } catch (error) {
+    console.warn('Could not open the download folder:', error.message);
+  }
+}
+
 async function stopRecording(keepFiles = true, requestedPdfFilename) {
   // Anything still queued would be lost, so give it a final frame to sit under.
   if (keepFiles && apiQueue.length) {
@@ -615,6 +629,7 @@ async function stopRecording(keepFiles = true, requestedPdfFilename) {
   await captureChain.catch(() => {});
   const state = await getState();
   let lastError = null;
+  let revealId = state.downloadIds[state.downloadIds.length - 1];
 
   if (!keepFiles) {
     await deleteSessionDownloads(state.downloadIds);
@@ -636,7 +651,7 @@ async function stopRecording(keepFiles = true, requestedPdfFilename) {
         url: manifestUrl,
         filename: `flow-captures/${state.sessionId}/flow-manifest.json`,
         saveAs: false
-      });
+      }).then((id) => { revealId = id; });
     }
 
     if (state.settings.savePdf && state.captures.length) {
@@ -646,11 +661,16 @@ async function stopRecording(keepFiles = true, requestedPdfFilename) {
       if (result.error) {
         lastError = `PDF export failed: ${result.error}`;
         console.error(lastError);
+      } else if (typeof result.downloadId === 'number') {
+        revealId = result.downloadId;
       }
     }
   }
 
   await cleanupCaptureResources();
+
+  // The shelf is suppressed during recording, so opening the folder is the only cue that files landed.
+  if (keepFiles && state.captures.length) await revealSavedFiles(revealId);
 
   const next = await setState({
     recording: false,

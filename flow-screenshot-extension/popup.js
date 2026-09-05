@@ -125,7 +125,9 @@ async function finishRecording(keepFiles, pdfFilename) {
   mainActionsEl.hidden = false;
   awaitingChoice = false;
   toggleEl.disabled = true;
-  statusEl.textContent = keepFiles ? 'Finishing up \u2014 writing files\u2026' : 'Deleting captured files\u2026';
+  statusEl.textContent = keepFiles
+    ? 'Finishing up \u2014 writing files and opening the folder\u2026'
+    : 'Deleting captured files\u2026';
   render(await send('STOP', { keepFiles, pdfFilename }));
   toggleEl.disabled = false;
 }

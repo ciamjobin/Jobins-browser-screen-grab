@@ -77,7 +77,7 @@ async function run() {
 
     stateEl.textContent = `Saved ${frames.length} page(s).`;
     // The background closes this window once it sees the message, avoiding a close/message race.
-    chrome.runtime.sendMessage({ type: 'PDF_DONE', pageCount: frames.length });
+    chrome.runtime.sendMessage({ type: 'PDF_DONE', pageCount: frames.length, downloadId });
   } catch (error) {
     stateEl.textContent = error.message;
     stateEl.className = 'status error';
