@@ -16,6 +16,7 @@ let awaitingChoice = false;
 const controls = {
   captureMode: document.getElementById('captureMode'),
   captureOnClick: document.getElementById('captureOnClick'),
+  captureOnScroll: document.getElementById('captureOnScroll'),
   stampTimestamp: document.getElementById('stampTimestamp'),
   fullPage: document.getElementById('fullPage'),
   savePng: document.getElementById('savePng'),
@@ -30,6 +31,7 @@ function readSettings() {
   return {
     captureMode: controls.captureMode.value,
     captureOnClick: controls.captureOnClick.checked,
+    captureOnScroll: controls.captureOnScroll.checked,
     stampTimestamp: controls.stampTimestamp.checked,
     fullPage: controls.fullPage.checked,
     savePng: controls.savePng.checked,
@@ -76,6 +78,7 @@ function render(state) {
   };
   apply(controls.captureMode, () => (controls.captureMode.value = settings.captureMode ?? 'tab'));
   apply(controls.captureOnClick, () => (controls.captureOnClick.checked = settings.captureOnClick !== false));
+  apply(controls.captureOnScroll, () => (controls.captureOnScroll.checked = settings.captureOnScroll !== false));
   apply(controls.stampTimestamp, () => (controls.stampTimestamp.checked = settings.stampTimestamp !== false));
   apply(controls.fullPage, () => (controls.fullPage.checked = settings.fullPage !== false));
   apply(controls.savePng, () => (controls.savePng.checked = settings.savePng !== false));

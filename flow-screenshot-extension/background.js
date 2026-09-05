@@ -33,6 +33,7 @@ const defaultState = {
     // 'tab' = viewport only, 'api' = viewport + API table, 'screen' = desktop stream (DevTools/taskbar)
     captureMode: 'tab',
     captureOnClick: true,
+    captureOnScroll: true,
     captureApi: false,
     stampTimestamp: true,
     fullPage: true,
@@ -980,8 +981,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'CLICK_CAPTURE': {
         const state = await getState();
-        if (state.recording && state.settings.captureOnClick && sender.tab?.id === state.tabId) {
-          await captureNow(message.reason || 'click', message.label);
+        const reason = message.reason || 'click';
+        const allowed = reason === 'scrolled' ? state.settings.captureOnScroll : state.settings.captureOnClick;
+        if (state.recording && allowed && sender.tab?.id === state.tabId) {
+          await captureNow(reason, message.label);
         }
         sendResponse({ ok: true });
         break;

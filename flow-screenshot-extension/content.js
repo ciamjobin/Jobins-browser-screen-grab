@@ -40,6 +40,9 @@ let lastSent = { key: '', at: 0 };
 let editTimer = 0;
 let selectionTimer = 0;
 let dialogTimer = 0;
+let scrollTimer = 0;
+let suppressScrollUntil = 0;
+const scrollAnchors = new WeakMap();
 const capturedDialogs = new WeakSet();
 
 function describe(element) {
@@ -64,6 +67,10 @@ function requestCapture(reason, label) {
   const now = Date.now();
   if (key === lastSent.key && now - lastSent.at < 800) return;
   lastSent = { key, at: now };
+
+  // A full-page shot resizes the layout viewport, which moves the page; that must not read as the
+  // user scrolling.
+  if (reason !== 'scrolled') suppressScrollUntil = now + 2500;
 
   chrome.runtime.sendMessage({ type: 'CLICK_CAPTURE', reason, label }).catch(() => {
     /* Background may be asleep or recording stopped; nothing to do. */
@@ -171,6 +178,41 @@ window.addEventListener(
     if (opensList) capturedList = null;
 
     requestCapture(opensList ? 'list-opened' : 'click', describe(trigger));
+  },
+  true
+);
+
+// One screenful of scrolling is one new thing to see, so capture whenever the user has travelled
+// that far and paused. Capture phase because scroll events from inner panes do not bubble.
+document.addEventListener(
+  'scroll',
+  (event) => {
+    const target = event.target;
+    const isDocument = target === document || target === document.documentElement || target === document.body;
+    const scroller = isDocument ? document.documentElement : target;
+    if (!isDocument && !(scroller instanceof Element)) return;
+
+    const position = isDocument ? window.scrollY : scroller.scrollTop;
+    const screenful = isDocument ? window.innerHeight : scroller.clientHeight;
+    if (screenful < 200) return;
+
+    const key = isDocument ? document.documentElement : scroller;
+    if (!scrollAnchors.has(key)) scrollAnchors.set(key, position);
+    if (Date.now() < suppressScrollUntil) {
+      scrollAnchors.set(key, position);
+      return;
+    }
+    if (Math.abs(position - scrollAnchors.get(key)) < screenful) return;
+
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      const settled = isDocument ? window.scrollY : scroller.scrollTop;
+      scrollAnchors.set(key, settled);
+      const total = isDocument
+        ? Math.max(document.documentElement.scrollHeight - window.innerHeight, 1)
+        : Math.max(scroller.scrollHeight - scroller.clientHeight, 1);
+      requestCapture('scrolled', `${Math.round((settled / total) * 100)}% down`);
+    }, 450);
   },
   true
 );
