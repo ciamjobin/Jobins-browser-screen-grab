@@ -472,6 +472,9 @@ async function captureFullPagePassive(tabId) {
         func: (x, y) => window.scrollTo({ left: x, top: y, behavior: 'instant' })
       })
       .catch(() => {});
+    // The debugger is only needed for the instant of the shot, so let go of it immediately - that
+    // is what makes the "started debugging this browser" banner disappear right away.
+    await detachDebugger();
   }
 }
 
@@ -909,6 +912,7 @@ chrome.commands.onCommand.addListener(async (command) => {
 
   if (command === 'capture-panel') await captureNow('devtools-panel');
   if (command === 'capture-manual') await captureNow('manual-hotkey');
+  if (command === 'capture-later') delay(CAPTURE_COUNTDOWN_MS).then(() => captureNow('devtools-panel'));
 });
 
 // If the sharing window is closed mid-flow, keep recording via tab capture instead of failing.
