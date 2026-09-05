@@ -794,7 +794,9 @@ async function captureFullPageDataUrl(state, tab) {
 
   const { scrollHeight, viewportHeight, viewportWidth, dpr } = metrics;
   if (scrollHeight > viewportHeight + 4) {
-    const headless = await captureFullPageHeadlessTrimmed(tab.id, viewportWidth, scrollHeight, viewportHeight + 4);
+    // The document itself scrolls, so the headless render always covers the whole page; a short
+    // result just means scrollHeight overshot what paints, and trimming has already fixed that.
+    const headless = await captureFullPageHeadlessTrimmed(tab.id, viewportWidth, scrollHeight, 0);
     if (headless) return headless;
 
     // Headless capture failed. A shared screen/window frame includes static desktop/browser
@@ -819,7 +821,8 @@ async function captureFullPageDataUrl(state, tab) {
   if (!scroller?.found || scroller.scrollHeight <= scroller.clientHeight + 4) return single();
 
   // Forcing a taller virtual viewport often lets a `height: 100vh`-style content pane grow enough
-  // to show all of its content directly, with no need to scroll it at all.
+  // to show all of its content directly, with no need to scroll it at all. When the pane refuses to
+  // grow the render is just one viewport of a longer pane, so require real growth before trusting it.
   const belowHeight = Math.max(0, viewportHeight - (scroller.rectTop + scroller.rectHeight));
   const totalHeight = scroller.rectTop + scroller.scrollHeight + belowHeight;
   const headlessScroller = await captureFullPageHeadlessTrimmed(tab.id, viewportWidth, totalHeight, viewportHeight + 4);
