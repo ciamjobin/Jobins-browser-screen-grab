@@ -1,6 +1,7 @@
 const statusEl = document.getElementById('status');
 const toggleEl = document.getElementById('toggle');
 const captureNowEl = document.getElementById('captureNow');
+const captureLaterEl = document.getElementById('captureLater');
 const captureListEl = document.getElementById('captureList');
 const settingsEl = document.querySelector('.settings');
 const mainActionsEl = document.getElementById('mainActions');
@@ -98,6 +99,7 @@ function render(state) {
   toggleEl.textContent = recording ? 'Stop recording' : 'Start recording';
   toggleEl.classList.toggle('stop', recording);
   captureNowEl.disabled = !recording;
+  captureLaterEl.disabled = !recording;
 
   renderCaptures(state?.captures ?? []);
 }
@@ -167,6 +169,13 @@ document.getElementById('createPdfLater').addEventListener('click', () => {
 
 captureNowEl.addEventListener('click', async () => {
   render(await send('CAPTURE_NOW'));
+});
+
+// The popup closes as soon as focus moves to DevTools, so the countdown lives in the background.
+captureLaterEl.addEventListener('click', async () => {
+  render(await send('CAPTURE_LATER'));
+  statusEl.textContent = 'Capturing in 5s \u2014 click into DevTools now\u2026';
+  window.close();
 });
 
 for (const control of Object.values(controls)) {

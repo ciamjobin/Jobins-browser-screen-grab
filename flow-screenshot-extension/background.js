@@ -14,6 +14,7 @@ let apiQueue = [];
 let apiHeaderRecords = [];
 
 const API_HEADER_TTL_MS = 120000;
+const CAPTURE_COUNTDOWN_MS = 5000;
 
 const defaultState = {
   recording: false,
@@ -964,6 +965,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'CAPTURE_NOW':
         await captureNow('manual');
         sendResponse(await getState());
+        break;
+
+      // Chrome does not deliver extension shortcuts while the DevTools window has focus, so this
+      // gives the user time to click into DevTools before the shot is taken.
+      case 'CAPTURE_LATER':
+        sendResponse(await getState());
+        delay(CAPTURE_COUNTDOWN_MS).then(() => captureNow('devtools-panel'));
         break;
 
       case 'SET_SETTINGS':

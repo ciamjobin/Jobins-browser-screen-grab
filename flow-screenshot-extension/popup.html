@@ -21,7 +21,8 @@
 
       <p class="note" id="shortcutHint" hidden>
         Press <strong>Alt+Shift+S</strong> while a DevTools Headers / Payload / Response panel is open to
-        capture it.
+        capture it. Chrome ignores extension shortcuts while the DevTools window itself has focus, so use
+        <strong>Capture in 5s</strong> below and click into DevTools during the countdown.
       </p>
 
       <p class="note">
@@ -39,6 +40,7 @@
     <div class="actions" id="mainActions">
       <button id="toggle" class="primary">Start recording</button>
       <button id="captureNow" disabled>Capture now</button>
+      <button id="captureLater" disabled>Capture in 5s</button>
     </div>
 
     <div class="confirm" id="confirm" hidden>
