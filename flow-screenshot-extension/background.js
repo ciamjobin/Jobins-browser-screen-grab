@@ -299,6 +299,17 @@ async function captureNow(reason, label) {
   return captureChain;
 }
 
+// Shows an on-page countdown so the user can see exactly when the delayed shot will fire, then
+// takes it. The badge lives in the page itself since the popup that requested this has closed.
+function scheduleDelayedCapture(tabId) {
+  if (typeof tabId === 'number') {
+    chrome.tabs.sendMessage(tabId, { type: 'SHOW_COUNTDOWN', seconds: CAPTURE_COUNTDOWN_MS / 1000 }).catch(() => {
+      /* No content script on this page (chrome://, Web Store); the capture still fires on time. */
+    });
+  }
+  delay(CAPTURE_COUNTDOWN_MS).then(() => captureNow('devtools-panel'));
+}
+
 async function grabPngDataUrl(state, tab) {
   if (state.settings.captureMode === 'screen' && state.streamActive) {
     const result = await askScreen('SCREEN_CAPTURE');
@@ -912,7 +923,7 @@ chrome.commands.onCommand.addListener(async (command) => {
 
   if (command === 'capture-panel') await captureNow('devtools-panel');
   if (command === 'capture-manual') await captureNow('manual-hotkey');
-  if (command === 'capture-later') delay(CAPTURE_COUNTDOWN_MS).then(() => captureNow('devtools-panel'));
+  if (command === 'capture-later') scheduleDelayedCapture(state.tabId);
 });
 
 // If the sharing window is closed mid-flow, keep recording via tab capture instead of failing.
@@ -974,10 +985,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       // Chrome does not deliver extension shortcuts while the DevTools window has focus, so this
       // gives the user time to click into DevTools before the shot is taken.
-      case 'CAPTURE_LATER':
-        sendResponse(await getState());
-        delay(CAPTURE_COUNTDOWN_MS).then(() => captureNow('devtools-panel'));
+      case 'CAPTURE_LATER': {
+        const state = await getState();
+        sendResponse(state);
+        scheduleDelayedCapture(state.tabId);
         break;
+      }
 
       case 'SET_SETTINGS':
         sendResponse(await setState({ settings: message.settings }));

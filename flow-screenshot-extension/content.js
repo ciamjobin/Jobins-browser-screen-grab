@@ -277,3 +277,42 @@ window.addEventListener('message', (event) => {
 if (document.documentElement.hasAttribute('data-flow-recorder-hook')) {
   chrome.runtime.sendMessage({ type: 'API_HOOK_READY' }).catch(() => {});
 }
+
+// Shows a shrinking countdown so the user knows exactly when "Capture in 5s" will fire, even after
+// the popup has closed and focus has moved to DevTools.
+const COUNTDOWN_ID = 'jshotz-countdown';
+
+function showCountdown(seconds) {
+  document.getElementById(COUNTDOWN_ID)?.remove();
+
+  const badge = document.createElement('div');
+  badge.id = COUNTDOWN_ID;
+  badge.style.cssText = [
+    'position:fixed', 'top:16px', 'right:16px', 'z-index:2147483647',
+    'background:#1a1a2e', 'color:#fff', 'font:600 14px/1.4 system-ui,sans-serif',
+    'padding:8px 14px', 'border-radius:999px', 'box-shadow:0 2px 10px rgba(0,0,0,.35)',
+    'pointer-events:none', 'display:flex', 'align-items:center', 'gap:8px'
+  ].join(';');
+
+  const dot = document.createElement('span');
+  dot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:#ff5555;flex:none;';
+  const label = document.createElement('span');
+  badge.append(dot, label);
+  document.documentElement.append(badge);
+
+  let remaining = seconds;
+  const tick = () => {
+    label.textContent = remaining > 0 ? `Capturing in ${remaining}s\u2026` : 'Capturing\u2026';
+    if (remaining <= 0) {
+      setTimeout(() => badge.remove(), 400);
+      return;
+    }
+    remaining -= 1;
+    setTimeout(tick, 1000);
+  };
+  tick();
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'SHOW_COUNTDOWN') showCountdown(message.seconds);
+});
