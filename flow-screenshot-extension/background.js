@@ -346,10 +346,12 @@ if (HAS_DEBUGGER) {
   });
 }
 
+const VIEWPORT_GROW_SETTLE_MS = 220;
+
 // CDP's own Page.getLayoutMetrics() has been observed reporting a wildly inflated content height
 // on some sites (producing a mostly-blank screenshot with the real content squeezed at the top),
 // so the width/height come from the same DOM measurement already trusted for the scroll fallback.
-async function captureFullPageHeadless(tabId, width, height) {
+async function captureFullPageHeadless(tabId, width, height, { growViewport = false } = {}) {
   if (!width || !height) return null;
 
   // A cross-origin navigation can swap the tab to a new renderer process and silently drop the
@@ -362,6 +364,19 @@ async function captureFullPageHeadless(tabId, width, height) {
   }
 
   try {
+    // captureBeyondViewport alone paints past the viewport but does not relayout, so a pane sized
+    // in vh units stays one screen tall. Overriding the metrics makes the page believe the viewport
+    // really is that tall, which is what lets such a pane expand to its full content.
+    if (growViewport) {
+      await chrome.debugger.sendCommand({ tabId }, 'Emulation.setDeviceMetricsOverride', {
+        width: Math.ceil(width),
+        height: Math.ceil(height),
+        deviceScaleFactor: 0,
+        mobile: false
+      });
+      await delay(VIEWPORT_GROW_SETTLE_MS);
+    }
+
     const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
       format: 'png',
       captureBeyondViewport: true,
@@ -373,6 +388,12 @@ async function captureFullPageHeadless(tabId, width, height) {
     headlessCaptureTabId = null;
     await setState({ headlessCaptureActive: false });
     return null;
+  } finally {
+    if (growViewport && headlessCaptureTabId === tabId) {
+      await chrome.debugger
+        .sendCommand({ tabId }, 'Emulation.clearDeviceMetricsOverride')
+        .catch(() => {});
+    }
   }
 }
 
@@ -590,8 +611,8 @@ async function measureContentHeight(canvas, ctx) {
 
 // Returns the headless capture with any flat trailing band removed, or null when the render clearly
 // failed to expand (content no taller than one viewport) so the caller can fall back.
-async function captureFullPageHeadlessTrimmed(tabId, width, height, minContentHeight) {
-  const raw = await captureFullPageHeadless(tabId, width, height);
+async function captureFullPageHeadlessTrimmed(tabId, width, height, minContentHeight, options) {
+  const raw = await captureFullPageHeadless(tabId, width, height, options);
   if (!raw) return null;
 
   let bitmap;
@@ -796,7 +817,9 @@ async function captureFullPageDataUrl(state, tab) {
   if (scrollHeight > viewportHeight + 4) {
     // The document itself scrolls, so the headless render always covers the whole page; a short
     // result just means scrollHeight overshot what paints, and trimming has already fixed that.
-    const headless = await captureFullPageHeadlessTrimmed(tab.id, viewportWidth, scrollHeight, 0);
+    const headless =
+      (await captureFullPageHeadlessTrimmed(tab.id, viewportWidth, scrollHeight, viewportHeight + 4)) ||
+      (await captureFullPageHeadlessTrimmed(tab.id, viewportWidth, scrollHeight, 0, { growViewport: true }));
     if (headless) return headless;
 
     // Headless capture failed. A shared screen/window frame includes static desktop/browser
@@ -825,7 +848,13 @@ async function captureFullPageDataUrl(state, tab) {
   // grow the render is just one viewport of a longer pane, so require real growth before trusting it.
   const belowHeight = Math.max(0, viewportHeight - (scroller.rectTop + scroller.rectHeight));
   const totalHeight = scroller.rectTop + scroller.scrollHeight + belowHeight;
-  const headlessScroller = await captureFullPageHeadlessTrimmed(tab.id, viewportWidth, totalHeight, viewportHeight + 4);
+  const headlessScroller = await captureFullPageHeadlessTrimmed(
+    tab.id,
+    viewportWidth,
+    totalHeight,
+    viewportHeight + 4,
+    { growViewport: true }
+  );
   if (headlessScroller) {
     await clearScrollerMark(tab.id).catch(() => {});
     return headlessScroller;
