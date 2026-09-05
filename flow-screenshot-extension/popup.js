@@ -16,6 +16,7 @@ const controls = {
   captureMode: document.getElementById('captureMode'),
   captureOnClick: document.getElementById('captureOnClick'),
   stampTimestamp: document.getElementById('stampTimestamp'),
+  fullPage: document.getElementById('fullPage'),
   savePng: document.getElementById('savePng'),
   savePdf: document.getElementById('savePdf')
 };
@@ -29,6 +30,7 @@ function readSettings() {
     captureMode: controls.captureMode.value,
     captureOnClick: controls.captureOnClick.checked,
     stampTimestamp: controls.stampTimestamp.checked,
+    fullPage: controls.fullPage.checked,
     savePng: controls.savePng.checked,
     savePdf: controls.savePdf.checked
   };
@@ -74,6 +76,7 @@ function render(state) {
   apply(controls.captureMode, () => (controls.captureMode.value = settings.captureMode ?? 'tab'));
   apply(controls.captureOnClick, () => (controls.captureOnClick.checked = settings.captureOnClick !== false));
   apply(controls.stampTimestamp, () => (controls.stampTimestamp.checked = settings.stampTimestamp !== false));
+  apply(controls.fullPage, () => (controls.fullPage.checked = settings.fullPage !== false));
   apply(controls.savePng, () => (controls.savePng.checked = settings.savePng !== false));
   apply(controls.savePdf, () => (controls.savePdf.checked = settings.savePdf !== false));
   settingsEl.classList.toggle('locked', recording);

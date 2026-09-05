@@ -34,6 +34,7 @@ const defaultState = {
     captureOnClick: true,
     captureApi: false,
     stampTimestamp: true,
+    fullPage: true,
     savePng: true,
     savePdf: true
   }
@@ -305,6 +306,126 @@ async function grabPngDataUrl(state, tab) {
   return chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
 }
 
+/* ----------------------------------------------------------- full page */
+
+const HAS_DEBUGGER = typeof chrome.debugger !== 'undefined';
+const FULL_PAGE_MAX_HEIGHT = 16384;
+const FULL_PAGE_GROW_ROUNDS = 3;
+const FULL_PAGE_RELAYOUT_MS = 450;
+let debuggerTabId = null;
+
+if (HAS_DEBUGGER) {
+  chrome.debugger.onDetach.addListener((source) => {
+    if (source.tabId === debuggerTabId) debuggerTabId = null;
+  });
+}
+
+async function attachDebugger(tabId) {
+  if (debuggerTabId === tabId) return true;
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    debuggerTabId = tabId;
+    return true;
+  } catch (error) {
+    // Already-attached DevTools owns the session and there is no way to share it.
+    console.warn('Background capture unavailable, using the visible frame:', error.message);
+    debuggerTabId = null;
+    return false;
+  }
+}
+
+async function detachDebugger() {
+  if (debuggerTabId === null) return;
+  const tabId = debuggerTabId;
+  debuggerTabId = null;
+  await chrome.debugger.detach({ tabId }).catch(() => {});
+}
+
+// These pages keep the document at viewport height and scroll an inner pane instead, so the height
+// that matters is the tallest of the document and any large scrollable pane.
+async function measurePage(tabId) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    func: () => {
+      const de = document.documentElement;
+      const b = document.body;
+      let needed = Math.max(de.scrollHeight, de.offsetHeight, b?.scrollHeight || 0, b?.offsetHeight || 0);
+
+      for (const el of document.querySelectorAll('body *')) {
+        if (el.scrollHeight <= el.clientHeight + 4) continue;
+        if (!/auto|scroll/.test(getComputedStyle(el).overflowY)) continue;
+        const rect = el.getBoundingClientRect();
+        if (el.clientHeight < innerHeight * 0.3 || rect.width < innerWidth * 0.4) continue;
+        needed = Math.max(needed, Math.round(rect.top + window.scrollY) + el.scrollHeight);
+      }
+
+      return { width: innerWidth, viewportHeight: innerHeight, needed: Math.ceil(needed) };
+    }
+  });
+  return injected?.result || null;
+}
+
+async function setViewportHeight(tabId, width, height) {
+  await chrome.debugger.sendCommand({ tabId }, 'Emulation.setDeviceMetricsOverride', {
+    width,
+    height,
+    deviceScaleFactor: 0,
+    mobile: false
+  });
+  await delay(FULL_PAGE_RELAYOUT_MS);
+}
+
+// Captures the whole page without ever moving what the user sees: the renderer is told the viewport
+// is as tall as the content, which makes viewport-sized panes lay out in full, and the shot is taken
+// from that off-screen layout. Returns null whenever this is not possible, so the caller can just
+// take the ordinary visible frame - the view is never scrolled as a fallback.
+async function captureFullPagePassive(tabId) {
+  if (!HAS_DEBUGGER) return null;
+
+  const metrics = await measurePage(tabId).catch(() => null);
+  if (!metrics?.viewportHeight) return null;
+  if (metrics.needed <= metrics.viewportHeight + 4) return null;
+  if (!(await attachDebugger(tabId))) return null;
+
+  const width = metrics.width;
+  let height = Math.min(metrics.needed, FULL_PAGE_MAX_HEIGHT);
+  let applied = height;
+  let previousOverflow = Infinity;
+
+  try {
+    for (let round = 0; round < FULL_PAGE_GROW_ROUNDS; round += 1) {
+      await setViewportHeight(tabId, width, height);
+      applied = height;
+
+      const grown = await measurePage(tabId).catch(() => null);
+      if (!grown) break;
+
+      const wanted = Math.min(grown.needed, FULL_PAGE_MAX_HEIGHT);
+      const overflow = wanted - height;
+      // An overflow that stops shrinking means something is sized to the viewport and would grow
+      // with it forever, so stop at the last height that made progress.
+      if (overflow <= 4 || overflow >= previousOverflow - 4) break;
+      previousOverflow = overflow;
+      height = wanted;
+    }
+
+    const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width, height: applied, scale: 1 }
+    });
+    return result?.data ? `data:image/png;base64,${result.data}` : null;
+  } catch (error) {
+    console.warn('Full-page capture failed, using the visible frame:', error.message);
+    return null;
+  } finally {
+    await chrome.debugger
+      .sendCommand({ tabId }, 'Emulation.clearDeviceMetricsOverride')
+      .catch(() => {});
+  }
+}
+
 async function storeFrame(frame) {
   await chrome.storage.local.set({ [`${FRAME_PREFIX}${frame.sequence}`]: frame });
 }
@@ -318,6 +439,7 @@ async function clearStoredFrames() {
 async function cleanupCaptureResources() {
   await closeScreenWindow().catch(() => {});
   await closeOffscreen().catch(() => {});
+  await detachDebugger().catch(() => {});
   await clearStoredFrames().catch(() => {});
   await setDownloadUi(true).catch(() => {});
   apiQueue = [];
@@ -341,8 +463,14 @@ async function performCapture(reason, label) {
     reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : reason === 'dialog-opened' ? 550 : 450;
   await delay(state.settings.captureApi ? settle + 500 : settle);
 
+  // Screen mode exists to show the desktop and DevTools, and the hotkey shot must show exactly what
+  // is on screen, so neither of those goes through the off-screen full-page render.
+  const wantsFullPage =
+    state.settings.fullPage && state.settings.captureMode !== 'screen' && reason !== 'devtools-panel';
+  const fullPage = wantsFullPage ? await captureFullPagePassive(tab.id).catch(() => null) : null;
+
   return persistCapture({
-    rawDataUrl: await grabPngDataUrl(state, tab),
+    rawDataUrl: fullPage || (await grabPngDataUrl(state, tab)),
     title: tab.title || tab.url || 'Untitled page',
     url: tab.url || '',
     reason,
