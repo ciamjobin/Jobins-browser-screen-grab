@@ -365,6 +365,85 @@ async function scrollTabTo(tabId, x, y) {
   return injected?.result || { scrollX: x, scrollY: y };
 }
 
+// Finds the largest scrollable content pane on the page (app-shell layouts often keep the
+// document/body fixed and scroll an inner container instead), and tags it so a later call can
+// find the same element again. Returns null when nothing large enough to matter is scrollable.
+async function findAndMarkScroller(tabId) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    func: () => {
+      document.querySelectorAll('[data-jshotz-scroll-root]').forEach((el) => el.removeAttribute('data-jshotz-scroll-root'));
+
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      let best = null;
+      let bestScore = 0;
+
+      for (const el of document.querySelectorAll('body *')) {
+        if (el.scrollHeight - el.clientHeight < 40) continue;
+        if (el.clientHeight < vh * 0.35) continue;
+        const style = getComputedStyle(el);
+        if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < vw * 0.4) continue;
+        const score = rect.width * el.clientHeight;
+        if (score > bestScore) {
+          bestScore = score;
+          best = { el, rect };
+        }
+      }
+
+      if (!best) return { found: false };
+      best.el.setAttribute('data-jshotz-scroll-root', '1');
+      return {
+        found: true,
+        rectTop: best.rect.top,
+        rectHeight: best.rect.height,
+        scrollHeight: best.el.scrollHeight,
+        clientHeight: best.el.clientHeight,
+        scrollTop: best.el.scrollTop
+      };
+    }
+  });
+  return injected?.result || { found: false };
+}
+
+async function scrollScrollerTo(tabId, top) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    args: [top],
+    func: async (targetTop) => {
+      const el = document.querySelector('[data-jshotz-scroll-root]');
+      if (!el) return { ok: false, scrollTop: targetTop };
+
+      const previousBehavior = el.style.scrollBehavior;
+      el.style.scrollBehavior = 'auto';
+      el.scrollTo({ top: targetTop, behavior: 'instant' });
+
+      const settled = (value, target) => Math.abs(value - target) < 2;
+      for (let attempt = 0; attempt < 10 && !settled(el.scrollTop, targetTop); attempt += 1) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      el.style.scrollBehavior = previousBehavior;
+
+      return { ok: true, scrollTop: el.scrollTop };
+    }
+  });
+  return injected?.result || { ok: false, scrollTop: top };
+}
+
+async function clearScrollerMark(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    func: () => {
+      document.querySelectorAll('[data-jshotz-scroll-root]').forEach((el) => el.removeAttribute('data-jshotz-scroll-root'));
+    }
+  });
+}
+
 // Chunked so a multi-megabyte screenshot doesn't blow the call-stack limit of String.fromCharCode.
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -394,21 +473,66 @@ async function stitchFullPagePng(frames, width, scrollHeight, dpr) {
   return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
 }
 
-// Scrolls the recorded tab in viewport-sized steps, capturing a frame at each stop, then stitches
-// the frames into one tall image so the saved screenshot covers the whole scrollable page.
-async function captureFullPageDataUrl(state, tab) {
-  const single = () => grabPngDataUrl(state, tab);
+// The chrome around an inner scroll pane (fixed header above it, fixed footer below it) never
+// changes as the pane scrolls, so it only needs to be taken from one frame; only the pane's own
+// rectangle is re-cropped from every frame and stacked to cover its full scrollable content.
+async function stitchScrollerPng(frames, { viewportWidth, viewportHeight, rectTop, rectHeight, dpr }) {
+  const belowHeight = Math.max(0, viewportHeight - (rectTop + rectHeight));
+  const scrollHeight = frames[frames.length - 1].scrollTop + rectHeight;
+  const totalHeight = rectTop + scrollHeight + belowHeight;
 
-  let metrics;
+  const canvas = new OffscreenCanvas(Math.round(viewportWidth * dpr), Math.round(totalHeight * dpr));
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const bitmaps = [];
   try {
-    metrics = await getPageMetrics(tab.id);
-  } catch {
-    metrics = null; // Restricted pages (chrome://, Web Store) cannot be instrumented.
-  }
-  if (!metrics || !metrics.viewportHeight) return single();
+    for (const frame of frames) {
+      const blob = await (await fetch(frame.dataUrl)).blob();
+      bitmaps.push({ scrollTop: frame.scrollTop, bitmap: await createImageBitmap(blob) });
+    }
 
+    const topHeight = Math.round(rectTop * dpr);
+    const sliceHeight = Math.round(rectHeight * dpr);
+    const sourceTop = topHeight;
+
+    const first = bitmaps[0].bitmap;
+    if (topHeight > 0) ctx.drawImage(first, 0, 0, first.width, topHeight, 0, 0, first.width, topHeight);
+
+    for (const { scrollTop, bitmap } of bitmaps) {
+      const destY = Math.round((rectTop + scrollTop) * dpr);
+      ctx.drawImage(bitmap, 0, sourceTop, bitmap.width, sliceHeight, 0, destY, bitmap.width, sliceHeight);
+    }
+
+    const last = bitmaps[bitmaps.length - 1].bitmap;
+    const belowSourceTop = Math.round((rectTop + rectHeight) * dpr);
+    const belowSourceHeight = last.height - belowSourceTop;
+    if (belowSourceHeight > 0) {
+      ctx.drawImage(
+        last,
+        0,
+        belowSourceTop,
+        last.width,
+        belowSourceHeight,
+        0,
+        canvas.height - belowSourceHeight,
+        last.width,
+        belowSourceHeight
+      );
+    }
+  } finally {
+    for (const { bitmap } of bitmaps) bitmap.close();
+  }
+
+  const buffer = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
+  return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+}
+
+// Scrolls the document/window in viewport-sized steps, capturing a frame at each stop, then
+// stitches the frames into one tall image covering the whole scrollable page.
+async function captureByWindowScroll(state, tab, metrics, single) {
   const { scrollHeight, viewportHeight, viewportWidth, scrollX, scrollY, dpr } = metrics;
-  if (scrollHeight <= viewportHeight + 4) return single();
 
   const positions = [];
   let y = 0;
@@ -439,9 +563,78 @@ async function captureFullPageDataUrl(state, tab) {
   }
 }
 
+// Scrolls an inner content pane in pane-sized steps (used when the document itself doesn't
+// scroll, e.g. an app shell with a fixed header and an internally scrolling content area).
+async function captureByScrollerScroll(state, tab, scroller, viewportWidth, viewportHeight, dpr, single) {
+  const { rectTop, rectHeight, scrollHeight, scrollTop: originalScrollTop } = scroller;
+  const step = rectHeight;
+
+  const positions = [];
+  let y = 0;
+  while (y < scrollHeight - rectHeight && positions.length < FULL_PAGE_MAX_SEGMENTS - 1) {
+    positions.push(y);
+    y += step;
+  }
+  positions.push(Math.max(0, scrollHeight - rectHeight));
+
+  const frames = [];
+  try {
+    for (let index = 0; index < positions.length; index += 1) {
+      const result = await scrollScrollerTo(tab.id, positions[index]).catch(() => null);
+      await delay(index === 0 ? FULL_PAGE_SETTLE_MS : FULL_PAGE_CAPTURE_GAP_MS);
+      frames.push({ scrollTop: result?.scrollTop ?? positions[index], dataUrl: await single() });
+    }
+  } finally {
+    await scrollScrollerTo(tab.id, originalScrollTop).catch(() => {});
+  }
+
+  if (frames.length <= 1) return frames[0]?.dataUrl ?? single();
+
+  try {
+    return await stitchScrollerPng(frames, { viewportWidth, viewportHeight, rectTop, rectHeight, dpr });
+  } catch (error) {
+    console.warn('Full-page stitch failed, keeping the last captured frame instead:', error.message);
+    return frames[frames.length - 1].dataUrl;
+  }
+}
+
+// Scrolls the recorded tab and stitches the results into one image covering the whole page,
+// whether the page scrolls at the document level or through an inner app-shell content pane.
+async function captureFullPageDataUrl(state, tab) {
+  const single = () => grabPngDataUrl(state, tab);
+
+  let metrics;
+  try {
+    metrics = await getPageMetrics(tab.id);
+  } catch {
+    metrics = null; // Restricted pages (chrome://, Web Store) cannot be instrumented.
+  }
+  if (!metrics || !metrics.viewportHeight) return single();
+
+  const { scrollHeight, viewportHeight, viewportWidth, dpr } = metrics;
+  if (scrollHeight > viewportHeight + 4) {
+    return captureByWindowScroll(state, tab, metrics, single);
+  }
+
+  let scroller;
+  try {
+    scroller = await findAndMarkScroller(tab.id);
+  } catch {
+    scroller = null; // Restricted pages (chrome://, Web Store) cannot be instrumented.
+  }
+  if (!scroller?.found || scroller.scrollHeight <= scroller.clientHeight + 4) return single();
+
+  try {
+    return await captureByScrollerScroll(state, tab, scroller, viewportWidth, viewportHeight, dpr, single);
+  } finally {
+    await clearScrollerMark(tab.id).catch(() => {});
+  }
+}
+
 async function storeFrame(frame) {
   await chrome.storage.local.set({ [`${FRAME_PREFIX}${frame.sequence}`]: frame });
 }
+
 
 async function clearStoredFrames() {
   const stored = await chrome.storage.local.get(null);
