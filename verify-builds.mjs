@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 
-const CHROMIUM_ONLY_PERMS = new Set(['offscreen', 'downloads.ui']);
+const CHROMIUM_ONLY_PERMS = new Set(['offscreen', 'downloads.ui', 'debugger']);
 let failed = false;
 
 const check = (label, ok, detail = '') => {

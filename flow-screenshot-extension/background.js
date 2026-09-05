@@ -305,6 +305,65 @@ async function grabPngDataUrl(state, tab) {
   return chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
 }
 
+/* ------------------------------------------------------- headless full page */
+
+// The scroll+stitch approach below visibly scrolls the real page, which is disruptive while a
+// user is mid-edit. The Chrome DevTools Protocol can render a whole scrollable page in one shot
+// with no visible scrolling at all, so it's used first whenever it's available (Firefox has no
+// equivalent API, and DevTools already open on the tab blocks attaching a second debugger).
+const HAS_DEBUGGER = typeof chrome.debugger !== 'undefined';
+let headlessCaptureTabId = null;
+
+async function attachHeadlessCapture(tabId) {
+  if (!HAS_DEBUGGER) return false;
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
+    headlessCaptureTabId = tabId;
+    return true;
+  } catch (error) {
+    console.warn('Headless full-page capture unavailable, falling back to visible scrolling:', error.message);
+    headlessCaptureTabId = null;
+    return false;
+  }
+}
+
+async function detachHeadlessCapture() {
+  if (!HAS_DEBUGGER || headlessCaptureTabId === null) return;
+  const tabId = headlessCaptureTabId;
+  headlessCaptureTabId = null;
+  await chrome.debugger.detach({ tabId }).catch(() => {});
+}
+
+if (HAS_DEBUGGER) {
+  // DevTools being opened on the tab, or the user dismissing the "being debugged" banner, detaches
+  // us from the outside; fall back to the visible scroll+stitch method for the rest of the session.
+  chrome.debugger.onDetach.addListener((source) => {
+    if (source.tabId === headlessCaptureTabId) headlessCaptureTabId = null;
+  });
+}
+
+async function captureFullPageHeadless(tabId) {
+  if (headlessCaptureTabId !== tabId) return null;
+  try {
+    const metrics = await chrome.debugger.sendCommand({ tabId }, 'Page.getLayoutMetrics');
+    const size = metrics?.cssContentSize || metrics?.contentSize;
+    const width = Math.ceil(size?.width || 0);
+    const height = Math.ceil(size?.height || 0);
+    if (!width || !height) return null;
+
+    const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width, height, scale: 1 }
+    });
+    return result?.data ? `data:image/png;base64,${result.data}` : null;
+  } catch (error) {
+    console.warn('Headless full-page capture failed for this frame, falling back:', error.message);
+    return null;
+  }
+}
+
 /* ------------------------------------------------------------- full page */
 
 // captureVisibleTab (and a shared screen/tab frame) only ever shows one viewport's worth of a
@@ -313,6 +372,7 @@ const FULL_PAGE_MAX_SEGMENTS = 12;
 const FULL_PAGE_SETTLE_MS = 220;
 // Chrome throttles captureVisibleTab to a couple of calls per second; stay comfortably under that.
 const FULL_PAGE_CAPTURE_GAP_MS = 550;
+
 
 async function getPageMetrics(tabId) {
   const [injected] = await chrome.scripting.executeScript({
@@ -603,6 +663,13 @@ async function captureByScrollerScroll(state, tab, scroller, viewportWidth, view
 async function captureFullPageDataUrl(state, tab) {
   const single = () => grabPngDataUrl(state, tab);
 
+  // 'screen' mode is deliberately capturing the real desktop/window (DevTools, taskbar, etc.), so
+  // a headless page-only screenshot would defeat the point of choosing that mode.
+  if (state.settings.captureMode !== 'screen') {
+    const headless = await captureFullPageHeadless(tab.id);
+    if (headless) return headless;
+  }
+
   let metrics;
   try {
     metrics = await getPageMetrics(tab.id);
@@ -645,6 +712,7 @@ async function clearStoredFrames() {
 async function cleanupCaptureResources() {
   await closeScreenWindow().catch(() => {});
   await closeOffscreen().catch(() => {});
+  await detachHeadlessCapture().catch(() => {});
   await clearStoredFrames().catch(() => {});
   await setDownloadUi(true).catch(() => {});
   apiQueue = [];
@@ -875,6 +943,11 @@ async function startRecording(tab, settings) {
   merged.captureApi = merged.captureMode === 'api';
   let streamActive = false;
 
+  // Best-effort: a failed attach just means full-page shots fall back to visible scrolling.
+  if (merged.captureMode !== 'screen') {
+    await attachHeadlessCapture(tab.id);
+  }
+
   try {
     if (merged.captureMode === 'screen' || merged.savePdf) {
       await ensureOffscreen();
@@ -888,6 +961,7 @@ async function startRecording(tab, settings) {
   } catch (error) {
     await closeScreenWindow();
     await closeOffscreen();
+    await detachHeadlessCapture();
     await setDownloadUi(true);
     return await setState({ recording: false, streamActive: false, lastError: error.message });
   }
