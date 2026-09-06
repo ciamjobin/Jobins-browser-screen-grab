@@ -17,25 +17,21 @@ const API_HEADER_TTL_MS = 120000;
 const CAPTURE_COUNTDOWN_MS = 5000;
 
 // A per-session debug log, cleared at the start of each new recording, mirroring capture attempts,
-// timings, errors and mode switches to a downloadable text file - so "screenshot #N at time T had a
-// problem" can be answered from what actually happened, not guessed at.
-const LOG_WRITE_DEBOUNCE_MS = 500;
+// timings, errors and mode switches - so "screenshot #N at time T had a problem" can be answered
+// from what actually happened, not guessed at. Kept in storage (survives a service worker restart)
+// and only written out as a file at natural checkpoints (a PDF export, stopping), rather than after
+// every single action - repeatedly re-downloading the same file was surfacing a Save As prompt.
+const LOG_KEY = 'flowRecorderLog';
 let sessionLog = [];
-let logWriteScheduled = false;
 
 function logLine(text) {
   sessionLog.push(`[${new Date().toISOString()}] ${text}`);
-  if (logWriteScheduled) return;
-  logWriteScheduled = true;
-  setTimeout(() => {
-    logWriteScheduled = false;
-    writeLogFile().catch(() => {});
-  }, LOG_WRITE_DEBOUNCE_MS);
+  chrome.storage.local.set({ [LOG_KEY]: sessionLog }).catch(() => {});
 }
 
 async function writeLogFile() {
   const state = await getState();
-  if (!state.sessionId) return;
+  if (!state.sessionId || !sessionLog.length) return;
   const text = sessionLog.join('\n') + '\n';
   const url = 'data:text/plain;base64,' + btoa(unescape(encodeURIComponent(text)));
   await chrome.downloads
@@ -1139,6 +1135,7 @@ async function switchCaptureMode(newMode) {
 
 async function startRecording(tab, settings) {
   sessionLog = [];
+  await chrome.storage.local.remove(LOG_KEY).catch(() => {});
   await clearStoredFrames();
   await setState({ lastError: null });
   await setDownloadUi(false);
@@ -1242,6 +1239,7 @@ async function exportPdfNow(requestedPdfFilename) {
   const result = await exportPdfInWindow(
     `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, `${state.sessionId}_checkpoint`)}`
   );
+  await writeLogFile().catch(() => {});
   if (result.error) {
     return setState({ lastError: `PDF export failed: ${result.error}` });
   }
