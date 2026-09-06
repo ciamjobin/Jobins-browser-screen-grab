@@ -1462,10 +1462,11 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   const state = await getState();
   if (!state.recording || !(tab.openerTabId === state.tabId || sessionTabIds.has(tab.openerTabId))) return;
   sessionTabIds.add(tab.id);
+  logLine(`NEW_TAB opened from recorded tab (tabId=${tab.id}), bringing it into focus`);
+  // Activating the tab below fires onActivated, which is what actually adopts it as the current
+  // capture target - calling adoptActiveTab here too just raced that same update and logged twice.
   await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
   await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
-  logLine(`NEW_TAB opened from recorded tab (tabId=${tab.id}), bringing it into focus`);
-  await adoptActiveTab(tab.id);
 });
 
 // DevTools panel changes are not observable, so the user triggers those captures by hotkey.
