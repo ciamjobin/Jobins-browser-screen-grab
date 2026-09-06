@@ -497,6 +497,40 @@ async function clearScrollerMark(tabId) {
     .catch(() => {});
 }
 
+const SCROLLBAR_STYLE_ID = 'jshotz-hide-scrollbars';
+
+// The pane's own scrollbar sits at the same on-screen spot in every captured frame, so stacking
+// several of them would repeat its track/thumb down the page the same way a fixed sidebar would.
+async function hideScrollbars(tabId) {
+  await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      args: [SCROLLBAR_STYLE_ID],
+      func: (styleId) => {
+        if (document.getElementById(styleId)) return;
+        const style = document.createElement('style');
+        style.id = styleId;
+        style.textContent =
+          '* { scrollbar-width: none !important; -ms-overflow-style: none !important; }' +
+          '*::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }';
+        document.documentElement.appendChild(style);
+      }
+    })
+    .catch(() => {});
+}
+
+async function restoreScrollbars(tabId) {
+  await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      args: [SCROLLBAR_STYLE_ID],
+      func: (styleId) => document.getElementById(styleId)?.remove()
+    })
+    .catch(() => {});
+}
+
 // Scrolls only the marked pane (never the window), and waits for it to actually settle there -
 // smooth-scroll CSS can otherwise leave the read-back scrollTop stale for a few frames. Uses a wall
 // clock deadline rather than counting animation frames, since rAF can be throttled to roughly once a
@@ -706,6 +740,7 @@ async function captureScrollerStitch(tabId, windowId, scroller) {
 
   const frames = [];
   try {
+    await hideScrollbars(tabId);
     for (const target of stops) {
       const { scrollTop } = await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, target);
       await delay(450);
@@ -750,14 +785,20 @@ async function captureScrollerStitch(tabId, windowId, scroller) {
       const hasLeftRail = sliceLeft > 0;
       const hasRightRail = sliceLeft + sliceWidth < first.width;
       const railHeight = first.height - topHeight;
-      if (hasLeftRail && railHeight > 0) {
-        ctx.drawImage(first, 0, topHeight, sliceLeft, railHeight, 0, topHeight, sliceLeft, railHeight);
-      }
-      if (hasRightRail && railHeight > 0) {
-        const rightX = sliceLeft + sliceWidth;
-        const rightWidth = first.width - rightX;
-        ctx.drawImage(first, rightX, topHeight, rightWidth, railHeight, rightX, topHeight, rightWidth, railHeight);
-      }
+      // A fixed rail has no real content past one viewport's height, but leaving the rest of its
+      // column at the canvas's default white looks like a rendering defect (the panel's own
+      // background colour appearing to just stop partway down) rather than "nothing more to show" -
+      // stretching its own last row down the remaining height reads as one continuous panel instead.
+      const extendRail = (x, w) => {
+        if (w <= 0 || railHeight <= 0) return;
+        const remaining = canvas.height - (topHeight + railHeight);
+        if (remaining > 0) {
+          ctx.drawImage(first, x, first.height - 1, w, 1, x, topHeight + railHeight, w, remaining);
+        }
+        ctx.drawImage(first, x, topHeight, w, railHeight, x, topHeight, w, railHeight);
+      };
+      if (hasLeftRail) extendRail(0, sliceLeft);
+      if (hasRightRail) extendRail(sliceLeft + sliceWidth, first.width - (sliceLeft + sliceWidth));
 
       for (const { scrollTop, bitmap } of bitmaps) {
         const destY = Math.round((rectTop + scrollTop) * dpr);
@@ -789,6 +830,7 @@ async function captureScrollerStitch(tabId, windowId, scroller) {
   } finally {
     await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, scroller.scrollTop);
     await clearScrollerMark(tabId);
+    await restoreScrollbars(tabId);
   }
 }
 
@@ -869,6 +911,7 @@ async function cleanupCaptureResources() {
   apiHeaderRecords = [];
   lastRawCaptureHash = '';
   lastTabTitle = '';
+  sessionTabIds = new Set();
 }
 
 async function performCapture(reason, label) {
@@ -1156,6 +1199,7 @@ async function switchCaptureMode(newMode) {
 }
 
 async function startRecording(tab, settings) {
+  sessionTabIds = new Set([tab.id]);
   await chrome.storage.local.remove(LOG_KEY).catch(() => {});
   await clearStoredFrames();
   await setState({ lastError: null });
@@ -1335,13 +1379,32 @@ async function stopRecording(keepFiles = true, requestedPdfFilename) {
 
 /* ---------------------------------------------------------------- listeners */
 
+// The tab a recording started on, plus any tab opened from it (or from one of those, recursively) -
+// an OAuth/sign-in redirect chain routinely hops across several. In-memory only: a service worker
+// restart forgets any child tabs and falls back to just the original one, which storage still has.
+let sessionTabIds = new Set();
+
 async function isRecordedTab(tabId) {
   const state = await getState();
-  return state.recording && tabId === state.tabId;
+  return state.recording && (tabId === state.tabId || sessionTabIds.has(tabId));
+}
+
+// Whichever of the session's tabs the user is actually looking at is the one background-driven
+// captures (navigation, title changes, the manual hotkey, "Capture now") should act on - this is
+// what lets switching back and forth between a parent tab and a child tab it opened keep capturing
+// from both, instead of staying stuck on whichever tab the recording happened to start on.
+async function adoptActiveTab(tabId) {
+  const state = await getState();
+  if (!state.recording || tabId === state.tabId) return;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) return;
+  logLine(`ACTIVE_TAB now tabId=${tabId} url=${shortUrl(tab.url || '')}`);
+  await setState({ tabId, windowId: tab.windowId });
 }
 
 chrome.webNavigation.onCompleted.addListener(async (details) => {
   if (details.frameId === 0 && (await isRecordedTab(details.tabId))) {
+    await adoptActiveTab(details.tabId);
     await captureNow('navigation');
   }
 });
@@ -1349,12 +1412,14 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
 // Single-page apps change routes without a full page load.
 chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
   if (details.frameId === 0 && (await isRecordedTab(details.tabId))) {
+    await adoptActiveTab(details.tabId);
     await captureNow('url-change');
   }
 });
 
 chrome.webNavigation.onReferenceFragmentUpdated.addListener(async (details) => {
   if (details.frameId === 0 && (await isRecordedTab(details.tabId))) {
+    await adoptActiveTab(details.tabId);
     await captureNow('url-change');
   }
 });
@@ -1363,25 +1428,44 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (!changeInfo.title || !(await isRecordedTab(tabId))) return;
   if (changeInfo.title === lastTabTitle) return;
   lastTabTitle = changeInfo.title;
+  await adoptActiveTab(tabId);
   await captureNow('title-change', changeInfo.title);
 });
 
+// Manually switching back to a tab the recording already knows about (the original tab, or a child
+// tab it opened) should resume capturing there too, not leave the recording pointed at whichever one
+// last had activity.
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  if (await isRecordedTab(tabId)) await adoptActiveTab(tabId);
+});
+
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  if (await isRecordedTab(tabId)) {
+  sessionTabIds.delete(tabId);
+  const state = await getState();
+  if (state.recording && tabId === state.tabId) {
+    // The active tab closed but the session has other known tabs - follow to whichever one is
+    // currently on screen instead of ending the recording.
+    const [fallback] = await chrome.tabs.query({ active: true }).catch(() => []);
+    if (fallback && sessionTabIds.has(fallback.id)) {
+      await adoptActiveTab(fallback.id);
+      return;
+    }
     await stopRecording();
   }
 });
 
 // A flow that opens a new tab from the recorded page (an OAuth/sign-in redirect, for instance) can
 // easily leave the user unsure which tab to look at, and in Screen/window mode sharing the whole
-// display it also determines what actually shows up in the capture. Bring the new tab forward so
-// both the recorded page and wherever it just sent the user stay in view.
+// display it also determines what actually shows up in the capture. Bring the new tab forward, and
+// treat it as part of the same recording so switching between it and its opener keeps capturing.
 chrome.tabs.onCreated.addListener(async (tab) => {
   const state = await getState();
-  if (!state.recording || tab.openerTabId !== state.tabId) return;
+  if (!state.recording || !(tab.openerTabId === state.tabId || sessionTabIds.has(tab.openerTabId))) return;
+  sessionTabIds.add(tab.id);
   await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
   await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
   logLine(`NEW_TAB opened from recorded tab (tabId=${tab.id}), bringing it into focus`);
+  await adoptActiveTab(tab.id);
 });
 
 // DevTools panel changes are not observable, so the user triggers those captures by hotkey.
@@ -1483,7 +1567,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const state = await getState();
         const reason = message.reason || 'click';
         const allowed = reason === 'scrolled' ? state.settings.captureOnScroll : state.settings.captureOnClick;
-        if (state.recording && allowed && sender.tab?.id === state.tabId) {
+        const tabId = sender.tab?.id;
+        if (state.recording && allowed && tabId !== undefined && (await isRecordedTab(tabId))) {
+          await adoptActiveTab(tabId);
           await captureNow(reason, message.label);
         }
         sendResponse({ ok: true });
@@ -1492,7 +1578,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'API_HOOK_READY': {
         const state = await getState();
-        if (state.recording && sender.tab?.id === state.tabId && !state.apiHookReady) {
+        if (state.recording && (await isRecordedTab(sender.tab?.id)) && !state.apiHookReady) {
           await setState({ apiHookReady: true });
         }
         sendResponse({ ok: true });
@@ -1501,7 +1587,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'API_CAPTURE': {
         const state = await getState();
-        if (state.recording && state.settings.captureApi && sender.tab?.id === state.tabId) {
+        if (state.recording && state.settings.captureApi && (await isRecordedTab(sender.tab?.id))) {
           if (!state.apiHookReady) await setState({ apiHookReady: true });
           await queueApiCall({ ...message.detail, tabId: sender.tab.id });
         }
