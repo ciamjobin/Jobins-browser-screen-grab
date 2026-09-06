@@ -147,7 +147,7 @@ async function exportPdfNow(pdfFilename) {
   filenamePromptEl.hidden = true;
   mainActionsEl.hidden = false;
   awaitingChoice = false;
-  statusEl.textContent = 'Writing checkpoint PDF and opening the folder\u2026';
+  statusEl.textContent = 'Writing checkpoint PDF\u2026';
   render(await send('EXPORT_PDF_NOW', { pdfFilename }));
 }
 

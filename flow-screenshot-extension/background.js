@@ -289,9 +289,19 @@ async function openScreenWindow() {
 
 /* ------------------------------------------------------------------ capture */
 
+const CAPTURE_QUEUE_WATCHDOG_MS = 20000;
+
+// However a single capture fails or hangs, the queue must keep moving - otherwise every capture
+// requested after it (including the popup's own "Capture now" / "Capture in 5s" buttons) would wait
+// behind a promise that never settles, which looks exactly like the extension has stopped responding.
 async function captureNow(reason, label) {
   captureChain = captureChain
-    .then(() => performCapture(reason, label))
+    .then(() =>
+      Promise.race([
+        performCapture(reason, label),
+        new Promise((resolve) => setTimeout(resolve, CAPTURE_QUEUE_WATCHDOG_MS))
+      ])
+    )
     .catch(async (error) => {
       console.error('Capture failed:', error);
       await setState({ lastError: `Capture failed: ${error.message}` });
@@ -776,9 +786,13 @@ async function performCapture(reason, label) {
     reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : reason === 'dialog-opened' ? 550 : 450;
   await delay(state.settings.captureApi ? settle + 500 : settle);
 
-  // Full-page capture renders the page itself, not whatever surface a mode normally captures -
-  // that applies just as well in Screen/window and API mode as it does in Tab viewport mode.
-  const wantsFullPage = state.settings.fullPage && FULL_PAGE_REASONS.has(reason);
+  // Full-page capture renders the page itself, not whatever surface a mode normally captures - that
+  // applies just as well in API mode as it does in Tab viewport mode. Screen mode is excluded again:
+  // it is the one combination (Screen/window mode + a full-page request) that has been reported to
+  // wedge the capture queue, and the whole point of that mode is the shared desktop/DevTools surface
+  // anyway, which a page render would throw away.
+  const wantsFullPage =
+    state.settings.fullPage && state.settings.captureMode !== 'screen' && FULL_PAGE_REASONS.has(reason);
   const fullPage = wantsFullPage ? await captureFullPageWithWatchdog(tab.id, tab.windowId) : null;
 
   return persistCapture({
@@ -1101,6 +1115,8 @@ async function revealSavedFiles(downloadId) {
 
 // Writes a PDF from whatever has been captured so far without stopping the recording - a checkpoint
 // the user can hand off or review while the same session keeps adding to the same numbered sequence.
+// Unlike the final export, the folder is not opened here - only the final save should interrupt the
+// user, since this can happen many times over the course of one recording.
 async function exportPdfNow(requestedPdfFilename) {
   if (apiQueue.length) await captureNow('final-api-calls');
   await captureChain.catch(() => {});
@@ -1115,7 +1131,6 @@ async function exportPdfNow(requestedPdfFilename) {
   if (result.error) {
     return setState({ lastError: `PDF export failed: ${result.error}` });
   }
-  if (typeof result.downloadId === 'number') await revealSavedFiles(result.downloadId);
   return setState({ lastError: null });
 }
 
