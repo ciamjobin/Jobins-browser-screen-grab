@@ -1109,6 +1109,12 @@ async function switchCaptureMode(newMode) {
   });
 
   if (newMode === 'screen') {
+    // The switch may have been triggered from a different tab (one the recording opened, DevTools,
+    // etc.) - bring the recorded tab and its window back into focus first, since the share picker
+    // needs a real click and someone looking at the wrong tab could easily miss that it appeared.
+    await chrome.windows.update(state.windowId, { focused: true }).catch(() => {});
+    await chrome.tabs.update(state.tabId, { active: true }).catch(() => {});
+
     ensureOffscreen()
       .then(() => openScreenWindow())
       .then(async (result) => {
