@@ -787,12 +787,10 @@ async function performCapture(reason, label) {
   await delay(state.settings.captureApi ? settle + 500 : settle);
 
   // Full-page capture renders the page itself, not whatever surface a mode normally captures - that
-  // applies just as well in API mode as it does in Tab viewport mode. Screen mode is excluded again:
-  // it is the one combination (Screen/window mode + a full-page request) that has been reported to
-  // wedge the capture queue, and the whole point of that mode is the shared desktop/DevTools surface
-  // anyway, which a page render would throw away.
-  const wantsFullPage =
-    state.settings.fullPage && state.settings.captureMode !== 'screen' && FULL_PAGE_REASONS.has(reason);
+  // applies just as well in Screen/window and API mode as it does in Tab viewport mode. The queue
+  // watchdog above is what actually guards against this hanging the rest of the recording, so this
+  // no longer needs to be restricted to specific modes to stay safe.
+  const wantsFullPage = state.settings.fullPage && FULL_PAGE_REASONS.has(reason);
   const fullPage = wantsFullPage ? await captureFullPageWithWatchdog(tab.id, tab.windowId) : null;
 
   return persistCapture({
