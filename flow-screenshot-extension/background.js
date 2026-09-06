@@ -18,21 +18,34 @@ const CAPTURE_COUNTDOWN_MS = 5000;
 
 // A per-session debug log, cleared at the start of each new recording, mirroring capture attempts,
 // timings, errors and mode switches - so "screenshot #N at time T had a problem" can be answered
-// from what actually happened, not guessed at. Kept in storage (survives a service worker restart)
-// and only written out as a file at natural checkpoints (a PDF export, stopping), rather than after
+// from what actually happened, not guessed at. Storage is the only source of truth (not an in-memory
+// array): the service worker can be evicted and restarted mid-recording (MV3 idles it after periods
+// with no activity), which would silently reset a plain variable and lose everything logged before
+// that point - exactly what produced a near-empty log despite 43 captures having happened. Written
+// out as a file at natural checkpoints (a PDF export, stopping, mode switches), rather than after
 // every single action - repeatedly re-downloading the same file was surfacing a Save As prompt.
 const LOG_KEY = 'flowRecorderLog';
-let sessionLog = [];
+let logChain = Promise.resolve();
 
 function logLine(text) {
-  sessionLog.push(`[${new Date().toISOString()}] ${text}`);
-  chrome.storage.local.set({ [LOG_KEY]: sessionLog }).catch(() => {});
+  const line = `[${new Date().toISOString()}] ${text}`;
+  logChain = logChain
+    .then(async () => {
+      const stored = await chrome.storage.local.get(LOG_KEY);
+      const log = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY] : [];
+      log.push(line);
+      await chrome.storage.local.set({ [LOG_KEY]: log });
+    })
+    .catch(() => {});
 }
 
 async function writeLogFile() {
   const state = await getState();
-  if (!state.sessionId || !sessionLog.length) return;
-  const text = sessionLog.join('\n') + '\n';
+  if (!state.sessionId) return;
+  const stored = await chrome.storage.local.get(LOG_KEY);
+  const log = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY] : [];
+  if (!log.length) return;
+  const text = log.join('\n') + '\n';
   const url = 'data:text/plain;base64,' + btoa(unescape(encodeURIComponent(text)));
   await chrome.downloads
     .download({
@@ -1143,7 +1156,6 @@ async function switchCaptureMode(newMode) {
 }
 
 async function startRecording(tab, settings) {
-  sessionLog = [];
   await chrome.storage.local.remove(LOG_KEY).catch(() => {});
   await clearStoredFrames();
   await setState({ lastError: null });
@@ -1358,6 +1370,18 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   if (await isRecordedTab(tabId)) {
     await stopRecording();
   }
+});
+
+// A flow that opens a new tab from the recorded page (an OAuth/sign-in redirect, for instance) can
+// easily leave the user unsure which tab to look at, and in Screen/window mode sharing the whole
+// display it also determines what actually shows up in the capture. Bring the new tab forward so
+// both the recorded page and wherever it just sent the user stay in view.
+chrome.tabs.onCreated.addListener(async (tab) => {
+  const state = await getState();
+  if (!state.recording || tab.openerTabId !== state.tabId) return;
+  await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  logLine(`NEW_TAB opened from recorded tab (tabId=${tab.id}), bringing it into focus`);
 });
 
 // DevTools panel changes are not observable, so the user triggers those captures by hotkey.
