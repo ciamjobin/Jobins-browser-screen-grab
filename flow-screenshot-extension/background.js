@@ -918,7 +918,7 @@ async function persistCapture({ rawDataUrl, title, url, reason, label, startedAt
       sequence,
       title,
       url,
-      time: `${stampText(capturedAt)}  |  ${reason}${label ? ` "${label}"` : ''}`,
+      time: `${stampText(capturedAt)}  |  ${reason}${label ? ` "${label}"` : ''}  |  ${mode} mode`,
       apiRows,
       base64: jpeg.base64,
       width: jpeg.width,
@@ -932,6 +932,7 @@ async function persistCapture({ rawDataUrl, title, url, reason, label, startedAt
     label: label || null,
     url,
     title,
+    mode,
     apiCalls: apiRows.length,
     capturedAt: capturedAt.toISOString(),
     filename: settings.savePng ? filename : null

@@ -78,7 +78,14 @@ function requestCapture(reason, label) {
 }
 
 const SETTLE_QUIET_MS = 400;
-const SETTLE_MAX_WAIT_MS = 4000;
+const SETTLE_MAX_WAIT_MS = 8000;
+const BUSY_SELECTOR = [
+  '[aria-busy="true"]',
+  '[class*="spinner" i]',
+  '[class*="loading" i]',
+  '[class*="loader" i]'
+].join(',');
+const BUSY_TEXT_PATTERN = /please\s+wait|loading|retrieving/i;
 
 // A button click on a client-rendered page often swaps in a loading spinner before the real next
 // screen appears; capturing right away would just record the spinner. Waits until the DOM stops
@@ -102,8 +109,22 @@ function waitForQuiet(quietMs, maxWaitMs) {
   });
 }
 
+// A pure CSS spinner (no DOM mutations while it spins) looks "quiet" to the observer above
+// immediately, even though the page is still loading. This catches that case by name: if a visible
+// busy indicator or "please wait" style message is still on screen, keep polling briefly instead of
+// capturing it, up to the same overall cap.
+function looksBusy() {
+  if (document.querySelector(BUSY_SELECTOR)) return true;
+  const text = document.body?.innerText || '';
+  return BUSY_TEXT_PATTERN.test(text.slice(0, 500));
+}
+
 async function requestCaptureAfterSettle(reason, label) {
+  const deadline = Date.now() + SETTLE_MAX_WAIT_MS;
   await waitForQuiet(SETTLE_QUIET_MS, SETTLE_MAX_WAIT_MS);
+  while (looksBusy() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
   requestCapture(reason, label);
 }
 
