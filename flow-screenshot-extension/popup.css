@@ -101,12 +101,6 @@ h2 {
   pointer-events: none;
 }
 
-/* Switching source mid-recording is allowed; only the rest of the settings stay frozen. */
-.settings.locked .mode-switch {
-  opacity: 1;
-  pointer-events: auto;
-}
-
 .capture-window {
   width: auto;
   padding: 18px 22px;

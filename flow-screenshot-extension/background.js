@@ -973,41 +973,6 @@ async function exportPdfInWindow(filename) {
   return result;
 }
 
-// Switches capture source mid-recording without stopping. Tab <-> API is a plain settings flip
-// (the API hook script is already injected from the start; only whether its reports are kept
-// changes). Screen mode additionally needs its sharing window opened or torn down, since that is
-// what actually produces the frames it captures.
-async function switchCaptureMode(newMode) {
-  const state = await getState();
-  const previousMode = state.settings.captureMode;
-  if (!state.recording || previousMode === newMode) {
-    return setState({ settings: { ...state.settings, captureMode: newMode, captureApi: newMode === 'api' } });
-  }
-
-  if (previousMode === 'screen') await closeScreenWindow();
-
-  let streamActive = false;
-  if (newMode === 'screen') {
-    try {
-      await ensureOffscreen();
-      const result = await openScreenWindow();
-      if (result.error) throw new Error(result.error);
-      streamActive = true;
-    } catch (error) {
-      // Leave the previous mode in place rather than switching to a screen mode with no stream.
-      return setState({ lastError: `Could not switch to Screen/window mode: ${error.message}` });
-    }
-  } else if (!state.settings.savePdf) {
-    await closeOffscreen().catch(() => {});
-  }
-
-  return setState({
-    streamActive,
-    lastError: null,
-    settings: { ...state.settings, captureMode: newMode, captureApi: newMode === 'api' }
-  });
-}
-
 async function startRecording(tab, settings) {
   await clearStoredFrames();
   await setState({ lastError: null });
@@ -1275,16 +1240,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
 
-      case 'SET_SETTINGS': {
-        const state = await getState();
-        const { captureMode, ...rest } = message.settings;
-        const next =
-          captureMode && captureMode !== state.settings.captureMode
-            ? await switchCaptureMode(captureMode)
-            : state;
-        sendResponse(await setState({ settings: { ...next.settings, ...rest } }));
+      case 'SET_SETTINGS':
+        sendResponse(await setState({ settings: message.settings }));
         break;
-      }
 
       case 'CLICK_CAPTURE': {
         const state = await getState();
