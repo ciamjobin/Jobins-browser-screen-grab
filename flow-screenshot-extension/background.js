@@ -339,6 +339,7 @@ async function captureNow(reason, label) {
     })
     .catch(async (error) => {
       logLine(`ERROR ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
+      await writeLogFile().catch(() => {});
       console.error('Capture failed:', error);
       await setState({ lastError: `Capture failed: ${error.message}` });
     });
@@ -457,6 +458,8 @@ async function findScroller(tabId) {
       best.el.setAttribute(markAttr, '1');
       return {
         rectTop: Math.round(best.rect.top),
+        rectLeft: Math.round(best.rect.left),
+        rectWidth: Math.round(best.rect.width),
         rectHeight: best.el.clientHeight,
         scrollHeight: best.el.scrollHeight,
         clientHeight: best.el.clientHeight,
@@ -677,7 +680,7 @@ async function captureDocumentHeadless(tabId, scrollX, scrollY, width, height) {
 // stitch the results. This never touches the debugger and never resizes the window - only the pane
 // itself visibly moves, exactly as it would if the user scrolled it by hand.
 async function captureScrollerStitch(tabId, windowId, scroller) {
-  const { viewportWidth, viewportHeight, rectTop, rectHeight, dpr } = scroller;
+  const { viewportWidth, viewportHeight, rectTop, rectLeft, rectWidth, rectHeight, dpr } = scroller;
   const totalTravel = scroller.scrollHeight - scroller.clientHeight;
   // Bounds both the capture time and the number of full-resolution bitmaps held in memory at once.
   // A wider overlap between consecutive frames (rather than the bare minimum) gives some slack for
@@ -721,13 +724,31 @@ async function captureScrollerStitch(tabId, windowId, scroller) {
 
       const topHeight = Math.round(rectTop * dpr);
       const sliceHeight = Math.round(rectHeight * dpr);
+      const sliceLeft = Math.round(rectLeft * dpr);
+      const sliceWidth = Math.round(rectWidth * dpr);
 
       const first = bitmaps[0].bitmap;
       if (topHeight > 0) ctx.drawImage(first, 0, 0, first.width, topHeight, 0, 0, first.width, topHeight);
 
+      // A fixed sidebar or rail that sits beside the scroller (not above or below it) does not move
+      // as the pane scrolls, so it must come from a single frame like the top/bottom chrome does -
+      // stitching the full frame width here would draw that same sidebar again in every frame,
+      // stacked down the page (this is what caused a "Home" icon to repeat several times).
+      const hasLeftRail = sliceLeft > 0;
+      const hasRightRail = sliceLeft + sliceWidth < first.width;
+      const railHeight = first.height - topHeight;
+      if (hasLeftRail && railHeight > 0) {
+        ctx.drawImage(first, 0, topHeight, sliceLeft, railHeight, 0, topHeight, sliceLeft, railHeight);
+      }
+      if (hasRightRail && railHeight > 0) {
+        const rightX = sliceLeft + sliceWidth;
+        const rightWidth = first.width - rightX;
+        ctx.drawImage(first, rightX, topHeight, rightWidth, railHeight, rightX, topHeight, rightWidth, railHeight);
+      }
+
       for (const { scrollTop, bitmap } of bitmaps) {
         const destY = Math.round((rectTop + scrollTop) * dpr);
-        ctx.drawImage(bitmap, 0, topHeight, bitmap.width, sliceHeight, 0, destY, bitmap.width, sliceHeight);
+        ctx.drawImage(bitmap, sliceLeft, topHeight, sliceWidth, sliceHeight, sliceLeft, destY, sliceWidth, sliceHeight);
       }
 
       const last = bitmaps[bitmaps.length - 1].bitmap;
@@ -1075,6 +1096,9 @@ async function switchCaptureMode(newMode) {
   const state = await getState();
   const previousMode = state.settings.captureMode;
   logLine(`MODE_SWITCH ${previousMode} -> ${newMode}`);
+  // Written immediately (not just at the usual checkpoints) so a mode switch that is followed by a
+  // crash - the riskiest single moment in a recording - still leaves a log on disk up to this point.
+  await writeLogFile().catch(() => {});
   if (previousMode === 'screen' && newMode !== 'screen') {
     await closeScreenWindow();
   }
@@ -1090,6 +1114,7 @@ async function switchCaptureMode(newMode) {
       .then(async (result) => {
         if (result.error) {
           logLine(`MODE_SWITCH ${previousMode} -> screen failed: ${result.error}`);
+          await writeLogFile().catch(() => {});
           await setState({ lastError: `Could not switch to Screen/window mode: ${result.error}` });
           return;
         }
@@ -1097,11 +1122,13 @@ async function switchCaptureMode(newMode) {
         const latest = await getState();
         if (latest.settings.captureMode === 'screen') {
           logLine('MODE_SWITCH screen share ready');
+          await writeLogFile().catch(() => {});
           await setState({ streamActive: true });
         }
       })
       .catch(async (error) => {
         logLine(`MODE_SWITCH ${previousMode} -> screen failed: ${error.message}`);
+        await writeLogFile().catch(() => {});
         await setState({ lastError: `Could not switch to Screen/window mode: ${error.message}` });
       });
   }
