@@ -16,6 +16,39 @@ let apiHeaderRecords = [];
 const API_HEADER_TTL_MS = 120000;
 const CAPTURE_COUNTDOWN_MS = 5000;
 
+// A per-session debug log, cleared at the start of each new recording, mirroring capture attempts,
+// timings, errors and mode switches to a downloadable text file - so "screenshot #N at time T had a
+// problem" can be answered from what actually happened, not guessed at.
+const LOG_WRITE_DEBOUNCE_MS = 500;
+let sessionLog = [];
+let logWriteScheduled = false;
+
+function logLine(text) {
+  sessionLog.push(`[${new Date().toISOString()}] ${text}`);
+  if (logWriteScheduled) return;
+  logWriteScheduled = true;
+  setTimeout(() => {
+    logWriteScheduled = false;
+    writeLogFile().catch(() => {});
+  }, LOG_WRITE_DEBOUNCE_MS);
+}
+
+async function writeLogFile() {
+  const state = await getState();
+  if (!state.sessionId) return;
+  const text = sessionLog.join('\n') + '\n';
+  const url = 'data:text/plain;base64,' + btoa(unescape(encodeURIComponent(text)));
+  await chrome.downloads
+    .download({
+      url,
+      filename: `flow-captures/${state.sessionId}/debug-log.txt`,
+      saveAs: false,
+      conflictAction: 'overwrite'
+    })
+    .catch(() => {});
+}
+
+
 const defaultState = {
   recording: false,
   tabId: null,
@@ -294,15 +327,22 @@ const CAPTURE_QUEUE_WATCHDOG_MS = 20000;
 // However a single capture fails or hangs, the queue must keep moving - otherwise every capture
 // requested after it (including the popup's own "Capture now" / "Capture in 5s" buttons) would wait
 // behind a promise that never settles, which looks exactly like the extension has stopped responding.
+const QUEUE_WATCHDOG_TOKEN = Symbol('queue-watchdog-timeout');
 async function captureNow(reason, label) {
   captureChain = captureChain
-    .then(() =>
-      Promise.race([
+    .then(async () => {
+      const result = await Promise.race([
         performCapture(reason, label),
-        new Promise((resolve) => setTimeout(resolve, CAPTURE_QUEUE_WATCHDOG_MS))
-      ])
-    )
+        new Promise((resolve) => setTimeout(() => resolve(QUEUE_WATCHDOG_TOKEN), CAPTURE_QUEUE_WATCHDOG_MS))
+      ]);
+      if (result === QUEUE_WATCHDOG_TOKEN) {
+        logLine(
+          `QUEUE_WATCHDOG ${reason}${label ? ` "${label}"` : ''} exceeded ${CAPTURE_QUEUE_WATCHDOG_MS}ms, moving on`
+        );
+      }
+    })
     .catch(async (error) => {
+      logLine(`ERROR ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
       console.error('Capture failed:', error);
       await setState({ lastError: `Capture failed: ${error.message}` });
     });
@@ -791,8 +831,14 @@ async function captureFullPageWithWatchdog(tabId, windowId) {
   const state = await getState();
   await chrome.action.setBadgeText({ text: state.recording ? '\u2026' : '' });
   try {
-    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), FULL_PAGE_WATCHDOG_MS));
-    return await Promise.race([captureFullPagePassive(tabId, windowId).catch(() => null), timeout]);
+    const FULL_PAGE_TIMEOUT_TOKEN = Symbol('full-page-timeout');
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(FULL_PAGE_TIMEOUT_TOKEN), FULL_PAGE_WATCHDOG_MS));
+    const result = await Promise.race([captureFullPagePassive(tabId, windowId).catch(() => null), timeout]);
+    if (result === FULL_PAGE_TIMEOUT_TOKEN) {
+      logLine(`FULL_PAGE_WATCHDOG exceeded ${FULL_PAGE_WATCHDOG_MS}ms, using the visible frame instead`);
+      return null;
+    }
+    return result;
   } finally {
     await updateBadge(await getState());
   }
@@ -821,6 +867,7 @@ async function cleanupCaptureResources() {
 }
 
 async function performCapture(reason, label) {
+  const startedAt = Date.now();
   const state = await getState();
   if (!state.recording || state.tabId === null) return;
 
@@ -841,17 +888,21 @@ async function performCapture(reason, label) {
   // no longer needs to be restricted to specific modes to stay safe.
   const wantsFullPage = state.settings.fullPage && FULL_PAGE_REASONS.has(reason);
   const fullPage = wantsFullPage ? await captureFullPageWithWatchdog(tab.id, tab.windowId) : null;
+  const fullPageInfo = wantsFullPage ? (fullPage ? 'ok' : 'fell back to visible frame') : 'n/a';
 
   return persistCapture({
     rawDataUrl: fullPage || (await grabPngDataUrl(state, tab)),
     title: tab.title || tab.url || 'Untitled page',
     url: tab.url || '',
     reason,
-    label
+    label,
+    startedAt,
+    mode: state.settings.captureMode,
+    fullPageInfo
   });
 }
 
-async function persistCapture({ rawDataUrl, title, url, reason, label }) {
+async function persistCapture({ rawDataUrl, title, url, reason, label, startedAt, mode, fullPageInfo }) {
   const state = await getState();
   if (!state.recording) return;
 
@@ -862,7 +913,10 @@ async function persistCapture({ rawDataUrl, title, url, reason, label }) {
   apiQueue = [];
 
   const rawHash = hashText(rawDataUrl);
-  if (!shouldKeepDuplicate(reason, apiRows) && rawHash === lastRawCaptureHash) return null;
+  if (!shouldKeepDuplicate(reason, apiRows) && rawHash === lastRawCaptureHash) {
+    logLine(`SKIP (duplicate) ${reason}${label ? ` "${label}"` : ''} mode=${mode} fullPage=${fullPageInfo}`);
+    return null;
+  }
   lastRawCaptureHash = rawHash;
 
   await ensureOffscreen();
@@ -920,6 +974,10 @@ async function persistCapture({ rawDataUrl, title, url, reason, label }) {
     captures: [...state.captures, entry].slice(-300)
   });
   await updateBadge(next);
+  logLine(
+    `#${sequence} ${reason}${label ? ` "${label}"` : ''} mode=${mode} fullPage=${fullPageInfo}` +
+      `${apiRows.length ? ` apiCalls=${apiRows.length}` : ''} url=${shortUrl(url)} (${Date.now() - startedAt}ms)`
+  );
   return entry;
 }
 
@@ -1043,7 +1101,9 @@ async function exportPdfInWindow(filename) {
 // to the visible tab automatically because streamActive stays false.
 async function switchCaptureMode(newMode) {
   const state = await getState();
-  if (state.settings.captureMode === 'screen' && newMode !== 'screen') {
+  const previousMode = state.settings.captureMode;
+  logLine(`MODE_SWITCH ${previousMode} -> ${newMode}`);
+  if (previousMode === 'screen' && newMode !== 'screen') {
     await closeScreenWindow();
   }
 
@@ -1057,14 +1117,19 @@ async function switchCaptureMode(newMode) {
       .then(() => openScreenWindow())
       .then(async (result) => {
         if (result.error) {
+          logLine(`MODE_SWITCH ${previousMode} -> screen failed: ${result.error}`);
           await setState({ lastError: `Could not switch to Screen/window mode: ${result.error}` });
           return;
         }
         // Only flip this on if the mode wasn't switched away again while the picker was open.
         const latest = await getState();
-        if (latest.settings.captureMode === 'screen') await setState({ streamActive: true });
+        if (latest.settings.captureMode === 'screen') {
+          logLine('MODE_SWITCH screen share ready');
+          await setState({ streamActive: true });
+        }
       })
       .catch(async (error) => {
+        logLine(`MODE_SWITCH ${previousMode} -> screen failed: ${error.message}`);
         await setState({ lastError: `Could not switch to Screen/window mode: ${error.message}` });
       });
   }
@@ -1073,6 +1138,7 @@ async function switchCaptureMode(newMode) {
 }
 
 async function startRecording(tab, settings) {
+  sessionLog = [];
   await clearStoredFrames();
   await setState({ lastError: null });
   await setDownloadUi(false);
@@ -1130,6 +1196,7 @@ async function startRecording(tab, settings) {
   }
 
   await updateBadge(state);
+  logLine(`SESSION_START mode=${merged.captureMode} url=${shortUrl(tab.url || '')}`);
   await captureNow('start');
   return getState();
 }
@@ -1188,6 +1255,7 @@ async function stopRecording(keepFiles = true, requestedPdfFilename) {
   }
   await captureChain.catch(() => {});
   const state = await getState();
+  logLine(`SESSION_END keepFiles=${keepFiles} captures=${state.captures.length}`);
   let lastError = null;
   let revealId = state.downloadIds[state.downloadIds.length - 1];
 
@@ -1230,6 +1298,7 @@ async function stopRecording(keepFiles = true, requestedPdfFilename) {
   await cleanupCaptureResources();
 
   // The shelf is suppressed during recording, so opening the folder is the only cue that files landed.
+  await writeLogFile().catch(() => {});
   if (keepFiles && state.captures.length) await revealSavedFiles(revealId);
 
   const next = await setState({
