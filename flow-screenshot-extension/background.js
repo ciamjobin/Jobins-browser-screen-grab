@@ -322,7 +322,9 @@ async function grabPngDataUrl(state, tab) {
 /* ----------------------------------------------------------- full page */
 
 const HAS_DEBUGGER = typeof chrome.debugger !== 'undefined';
-const FULL_PAGE_MAX_HEIGHT = 20000;
+const FULL_PAGE_MAX_HEIGHT = 12000;
+const FULL_PAGE_WATCHDOG_MS = 9000;
+const SCROLLER_MAX_FRAMES = 10;
 const FULL_PAGE_GROW_ROUNDS = 4;
 const FULL_PAGE_RELAYOUT_MS = 450;
 const FULL_PAGE_RELAYOUT_MAX_MS = 1400;
@@ -330,7 +332,7 @@ const FULL_PAGE_IMAGE_POLLS = 6;
 const FULL_PAGE_IMAGE_POLL_MS = 250;
 // Chromium refuses a single shot past its texture limit, so step down until one is accepted.
 const FULL_PAGE_RETRY_HEIGHTS = [16384, 12000, 8192];
-const SCROLLER_SETTLE_POLLS = 10;
+const SCROLLER_SETTLE_MAX_MS = 600;
 // Growing the viewport visibly reflows the page, so it happens only when the user asks for it.
 const FULL_PAGE_REASONS = new Set(['manual-hotkey', 'manual']);
 let debuggerTabId = null;
@@ -434,22 +436,24 @@ async function clearScrollerMark(tabId) {
 }
 
 // Scrolls only the marked pane (never the window), and waits for it to actually settle there -
-// smooth-scroll CSS can otherwise leave the read-back scrollTop stale for a few frames.
+// smooth-scroll CSS can otherwise leave the read-back scrollTop stale for a few frames. Uses a wall
+// clock deadline rather than counting animation frames, since rAF can be throttled to roughly once a
+// second for a tab that is not the focused window, which would otherwise stall the whole capture.
 async function scrollScrollerTo(tabId, markAttr, top) {
   const [injected] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'ISOLATED',
-    args: [markAttr, top, SCROLLER_SETTLE_POLLS],
-    func: async (attr, targetTop, polls) => {
+    args: [markAttr, top, SCROLLER_SETTLE_MAX_MS],
+    func: async (attr, targetTop, maxWaitMs) => {
       const el = document.querySelector(`[${attr}]`);
       if (!el) return { ok: false, scrollTop: 0 };
       const previousBehavior = el.style.scrollBehavior;
       el.style.scrollBehavior = 'auto';
       el.scrollTo({ top: targetTop, behavior: 'instant' });
 
-      const settled = (value) => Math.abs(value - targetTop) < 2;
-      for (let attempt = 0; attempt < polls && !settled(el.scrollTop); attempt += 1) {
-        await new Promise((resolve) => requestAnimationFrame(resolve));
+      const deadline = Date.now() + maxWaitMs;
+      while (Math.abs(el.scrollTop - targetTop) >= 2 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
       }
       el.style.scrollBehavior = previousBehavior;
       return { ok: true, scrollTop: el.scrollTop };
@@ -619,10 +623,12 @@ async function captureDocumentHeadless(tabId, scrollX, scrollY, width, height) {
 // itself visibly moves, exactly as it would if the user scrolled it by hand.
 async function captureScrollerStitch(tabId, windowId, scroller) {
   const { viewportWidth, viewportHeight, rectTop, rectHeight, dpr } = scroller;
-  const step = Math.max(rectHeight - 40, 80);
+  const totalTravel = scroller.scrollHeight - scroller.clientHeight;
+  // Bounds both the capture time and the number of full-resolution bitmaps held in memory at once.
+  const step = Math.max(rectHeight - 40, Math.ceil(totalTravel / SCROLLER_MAX_FRAMES), 80);
   const stops = [];
-  for (let top = 0; top < scroller.scrollHeight - scroller.clientHeight; top += step) stops.push(top);
-  stops.push(scroller.scrollHeight - scroller.clientHeight);
+  for (let top = 0; top < totalTravel; top += step) stops.push(top);
+  stops.push(totalTravel);
 
   const frames = [];
   try {
@@ -718,6 +724,21 @@ async function captureFullPagePassive(tabId, windowId) {
   return captureScrollerStitch(tabId, windowId, scroller);
 }
 
+// A page that never settles (throttled background tab, an element that keeps growing, a stalled
+// network wait) must never be allowed to stall the whole recording - past the watchdog, give up and
+// fall back to the ordinary visible frame instead. The badge shows "..." for the same reason: a
+// multi-second full-page capture must not look identical to the extension having stopped responding.
+async function captureFullPageWithWatchdog(tabId, windowId) {
+  const state = await getState();
+  await chrome.action.setBadgeText({ text: state.recording ? '\u2026' : '' });
+  try {
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), FULL_PAGE_WATCHDOG_MS));
+    return await Promise.race([captureFullPagePassive(tabId, windowId).catch(() => null), timeout]);
+  } finally {
+    await updateBadge(await getState());
+  }
+}
+
 async function storeFrame(frame) {
   await chrome.storage.local.set({ [`${FRAME_PREFIX}${frame.sequence}`]: frame });
 }
@@ -758,7 +779,7 @@ async function performCapture(reason, label) {
   // Full-page capture renders the page itself, not whatever surface a mode normally captures -
   // that applies just as well in Screen/window and API mode as it does in Tab viewport mode.
   const wantsFullPage = state.settings.fullPage && FULL_PAGE_REASONS.has(reason);
-  const fullPage = wantsFullPage ? await captureFullPagePassive(tab.id, tab.windowId).catch(() => null) : null;
+  const fullPage = wantsFullPage ? await captureFullPageWithWatchdog(tab.id, tab.windowId) : null;
 
   return persistCapture({
     rawDataUrl: fullPage || (await grabPngDataUrl(state, tab)),
