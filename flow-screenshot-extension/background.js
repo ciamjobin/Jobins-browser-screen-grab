@@ -526,8 +526,6 @@ async function waitForImages(tabId) {
 const BLANK_TAIL_TOLERANCE = 10;
 const BLANK_TAIL_ROW_MATCH_RATIO = 0.97;
 const BLANK_TAIL_SCAN_CHUNK_ROWS = 256;
-const INTERNAL_GAP_MIN_PX = 150;
-const INTERNAL_GAP_KEEP_PX = 24;
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -539,13 +537,12 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-// A requested height is a DOM measurement and can overshoot what actually renders, leaving flat
-// bands of background colour: a trailing one under the very last real content, and sometimes an
-// internal one too - a "sticky footer" flex/grid layout stretches to fill whatever height it is
-// given, inserting a gap between the real content and the footer instead of just at the very end.
-// This scans every row, trims the trailing band entirely, and shrinks any oversized internal one
-// down to a small margin rather than leaving it in the image.
-async function collapseBlankGaps(dataUrl) {
+// A requested height is a DOM measurement and can overshoot what actually renders, leaving a flat
+// trailing band of background colour under the very last real content. Only that trailing band is
+// removed - collapsing blank-looking bands in the middle of the page was tried and reverted, because
+// a sparse row (a single checkbox plus a short label, for instance) can look "blank enough" to a
+// column-sampled colour check and get removed even though it is genuine content.
+async function trimBlankTail(dataUrl) {
   let bitmap;
   try {
     bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
@@ -563,65 +560,40 @@ async function collapseBlankGaps(dataUrl) {
       Math.abs(data[i + 2] - reference[2]) <= BLANK_TAIL_TOLERANCE;
 
     // Accepting a small fraction of mismatched samples per row means a stray divider line or
-    // anti-aliased edge cannot flip an otherwise-blank row to "content" by itself.
-    const blank = new Uint8Array(height);
-    for (let top = 0; top < height; top += BLANK_TAIL_SCAN_CHUNK_ROWS) {
-      const bottom = Math.min(height, top + BLANK_TAIL_SCAN_CHUNK_ROWS);
+    // anti-aliased edge cannot halt the scan one row too early.
+    let contentEnd = height;
+    for (let bottom = height; bottom > 0; bottom -= BLANK_TAIL_SCAN_CHUNK_ROWS) {
+      const top = Math.max(0, bottom - BLANK_TAIL_SCAN_CHUNK_ROWS);
       const { data } = ctx.getImageData(0, top, width, bottom - top);
-      for (let row = 0; row < bottom - top; row += 1) {
+      let stop = false;
+      for (let row = bottom - top - 1; row >= 0; row -= 1) {
         const rowStart = row * width * 4;
         let mismatches = 0;
         for (let i = rowStart; i < rowStart + width * 4; i += sampleStep) {
           if (!matchesReference(data, i)) mismatches += 1;
         }
-        blank[top + row] = mismatches <= samplesPerRow * (1 - BLANK_TAIL_ROW_MATCH_RATIO) ? 1 : 0;
+        if (mismatches > samplesPerRow * (1 - BLANK_TAIL_ROW_MATCH_RATIO)) {
+          contentEnd = top + row + 1;
+          stop = true;
+          break;
+        }
       }
+      if (stop) break;
+      contentEnd = top;
     }
 
-    let contentEnd = height;
-    while (contentEnd > 0 && blank[contentEnd - 1]) contentEnd -= 1;
-    if (contentEnd === 0) return dataUrl; // Nothing recognisable - keep the capture as-is.
+    // If the very last pixel happens to match the page's own content colour (a solid-colour footer
+    // background, for instance) rather than genuine blank space, every row above can look "blank" by
+    // comparison and the whole image would be wiped out. A real trailing gap is realistically a
+    // modest fraction of the page, so refuse to trust a result that removes most of it.
+    if (contentEnd >= height || contentEnd < height * 0.5) return dataUrl;
 
-    const keepRows = [];
-    let sawContent = false;
-    for (let row = 0; row < contentEnd; ) {
-      if (!blank[row]) {
-        keepRows.push(row);
-        sawContent = true;
-        row += 1;
-        continue;
-      }
-      let runEnd = row;
-      while (runEnd < contentEnd && blank[runEnd]) runEnd += 1;
-      const runLength = runEnd - row;
-      if (sawContent && runLength > INTERNAL_GAP_MIN_PX) {
-        for (let i = 0; i < INTERNAL_GAP_KEEP_PX; i += 1) keepRows.push(row + Math.min(i, runLength - 1));
-      } else {
-        for (let i = row; i < runEnd; i += 1) keepRows.push(i);
-      }
-      row = runEnd;
-    }
-
-    if (keepRows.length >= contentEnd) return dataUrl;
-
-    const output = new OffscreenCanvas(width, keepRows.length);
-    const outCtx = output.getContext('2d');
-    // Copy contiguous runs together rather than one drawImage call per row.
-    for (let i = 0, batchStart = 0; i <= keepRows.length; i += 1) {
-      const contiguous = i < keepRows.length && (i === 0 || keepRows[i] === keepRows[i - 1] + 1);
-      if (contiguous) continue;
-      if (i > batchStart) {
-        const srcTop = keepRows[batchStart];
-        const rows = i - batchStart;
-        outCtx.drawImage(canvas, 0, srcTop, width, rows, 0, batchStart, width, rows);
-      }
-      batchStart = i;
-    }
-
-    const buffer = await (await output.convertToBlob({ type: 'image/png' })).arrayBuffer();
+    const cropped = new OffscreenCanvas(width, contentEnd);
+    cropped.getContext('2d').drawImage(canvas, 0, 0);
+    const buffer = await (await cropped.convertToBlob({ type: 'image/png' })).arrayBuffer();
     return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
   } catch (error) {
-    console.warn('Could not clean up blank space, using the capture as-is:', error.message);
+    console.warn('Could not trim blank space, using the capture as-is:', error.message);
     return dataUrl;
   } finally {
     bitmap?.close();
@@ -673,7 +645,7 @@ async function captureDocumentHeadless(tabId, scrollX, scrollY, width, height) {
           captureBeyondViewport: true,
           clip: { x: 0, y: 0, width, height: attempt, scale: 1 }
         });
-        if (result?.data) return await collapseBlankGaps(`data:image/png;base64,${result.data}`);
+        if (result?.data) return await trimBlankTail(`data:image/png;base64,${result.data}`);
       } catch (error) {
         console.warn(`Full-page shot of ${attempt}px refused, trying shorter:`, error.message);
       }
@@ -776,7 +748,7 @@ async function captureScrollerStitch(tabId, windowId, scroller) {
     }
 
     const buffer = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
-    return await collapseBlankGaps(`data:image/png;base64,${arrayBufferToBase64(buffer)}`);
+    return await trimBlankTail(`data:image/png;base64,${arrayBufferToBase64(buffer)}`);
   } finally {
     await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, scroller.scrollTop);
     await clearScrollerMark(tabId);
