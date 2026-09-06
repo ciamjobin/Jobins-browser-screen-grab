@@ -10,8 +10,8 @@
     <p id="status" class="status idle">Idle</p>
 
     <div class="settings">
-      <label class="field">
-        <span>Capture source</span>
+      <label class="field mode-switch">
+        <span>Capture source (can be changed mid-recording)</span>
         <select id="captureMode">
           <option value="tab">Tab viewport only</option>
           <option value="api">API + Screenshot</option>
@@ -43,6 +43,7 @@
       <button id="toggle" class="primary">Start recording</button>
       <button id="captureNow" disabled>Capture now</button>
       <button id="captureLater" disabled>Capture in 5s</button>
+      <button id="exportPdfNow" disabled>Export PDF so far</button>
     </div>
 
     <div class="confirm" id="confirm" hidden>

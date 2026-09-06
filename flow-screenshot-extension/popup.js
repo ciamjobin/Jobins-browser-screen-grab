@@ -2,6 +2,7 @@ const statusEl = document.getElementById('status');
 const toggleEl = document.getElementById('toggle');
 const captureNowEl = document.getElementById('captureNow');
 const captureLaterEl = document.getElementById('captureLater');
+const exportPdfNowEl = document.getElementById('exportPdfNow');
 const captureListEl = document.getElementById('captureList');
 const settingsEl = document.querySelector('.settings');
 const mainActionsEl = document.getElementById('mainActions');
@@ -12,6 +13,7 @@ const pdfFilenameEl = document.getElementById('pdfFilename');
 const shortcutHintEl = document.getElementById('shortcutHint');
 
 let awaitingChoice = false;
+let pendingExportOnly = false;
 
 const controls = {
   captureMode: document.getElementById('captureMode'),
@@ -103,6 +105,7 @@ function render(state) {
   toggleEl.classList.toggle('stop', recording);
   captureNowEl.disabled = !recording;
   captureLaterEl.disabled = !recording;
+  exportPdfNowEl.disabled = !recording || !state?.captures?.length;
 
   renderCaptures(state?.captures ?? []);
 }
@@ -140,8 +143,17 @@ async function finishRecording(keepFiles, pdfFilename) {
   toggleEl.disabled = false;
 }
 
+async function exportPdfNow(pdfFilename) {
+  filenamePromptEl.hidden = true;
+  mainActionsEl.hidden = false;
+  awaitingChoice = false;
+  statusEl.textContent = 'Writing checkpoint PDF and opening the folder\u2026';
+  render(await send('EXPORT_PDF_NOW', { pdfFilename }));
+}
+
 document.getElementById('keepYes').addEventListener('click', async () => {
   const state = await send('GET_STATE');
+  pendingExportOnly = false;
   pdfFilenameEl.value = `${state.sessionId || 'JShotz-session'}.pdf`;
   confirmEl.hidden = true;
   filenamePromptEl.hidden = false;
@@ -155,10 +167,19 @@ document.getElementById('keepNo').addEventListener('click', () => {
 });
 document.getElementById('filenameCancel').addEventListener('click', () => {
   filenamePromptEl.hidden = true;
-  confirmEl.hidden = false;
+  if (pendingExportOnly) {
+    mainActionsEl.hidden = false;
+    awaitingChoice = false;
+  } else {
+    confirmEl.hidden = false;
+  }
 });
 document.getElementById('saveWithName').addEventListener('click', () => {
-  finishRecording(true, pdfFilenameEl.value);
+  if (pendingExportOnly) {
+    exportPdfNow(pdfFilenameEl.value);
+  } else {
+    finishRecording(true, pdfFilenameEl.value);
+  }
 });
 document.getElementById('deleteConfirmYes').addEventListener('click', () => finishRecording(false));
 document.getElementById('deleteConfirmNo').addEventListener('click', () => {
@@ -172,6 +193,17 @@ document.getElementById('createPdfLater').addEventListener('click', () => {
 
 captureNowEl.addEventListener('click', async () => {
   render(await send('CAPTURE_NOW'));
+});
+
+exportPdfNowEl.addEventListener('click', async () => {
+  const state = await send('GET_STATE');
+  pendingExportOnly = true;
+  awaitingChoice = true;
+  pdfFilenameEl.value = `${state.sessionId || 'JShotz-session'}_checkpoint.pdf`;
+  mainActionsEl.hidden = true;
+  filenamePromptEl.hidden = false;
+  pdfFilenameEl.focus();
+  pdfFilenameEl.select();
 });
 
 // The popup closes as soon as focus moves to DevTools, so the countdown lives in the background.

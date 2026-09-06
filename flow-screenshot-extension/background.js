@@ -973,6 +973,44 @@ async function exportPdfInWindow(filename) {
   return result;
 }
 
+// Switches capture source mid-recording without stopping. The mode itself is committed to storage
+// immediately and never blocks on anything - a previous version awaited the screen-share picker
+// (which only resolves once the user picks a source, sometimes tens of seconds later) before
+// committing the switch, and since that same long-lived promise held a stale settings snapshot,
+// finishing it later could silently overwrite settings changed in the meantime. Opening the share
+// window happens afterwards, best-effort; until (or unless) it succeeds, captures already fall back
+// to the visible tab automatically because streamActive stays false.
+async function switchCaptureMode(newMode) {
+  const state = await getState();
+  if (state.settings.captureMode === 'screen' && newMode !== 'screen') {
+    await closeScreenWindow();
+  }
+
+  const next = await setState({
+    streamActive: newMode === 'screen' ? false : state.streamActive,
+    settings: { ...state.settings, captureMode: newMode, captureApi: newMode === 'api' }
+  });
+
+  if (newMode === 'screen') {
+    ensureOffscreen()
+      .then(() => openScreenWindow())
+      .then(async (result) => {
+        if (result.error) {
+          await setState({ lastError: `Could not switch to Screen/window mode: ${result.error}` });
+          return;
+        }
+        // Only flip this on if the mode wasn't switched away again while the picker was open.
+        const latest = await getState();
+        if (latest.settings.captureMode === 'screen') await setState({ streamActive: true });
+      })
+      .catch(async (error) => {
+        await setState({ lastError: `Could not switch to Screen/window mode: ${error.message}` });
+      });
+  }
+
+  return next;
+}
+
 async function startRecording(tab, settings) {
   await clearStoredFrames();
   await setState({ lastError: null });
@@ -1059,6 +1097,26 @@ async function revealSavedFiles(downloadId) {
   } catch (error) {
     console.warn('Could not open the download folder:', error.message);
   }
+}
+
+// Writes a PDF from whatever has been captured so far without stopping the recording - a checkpoint
+// the user can hand off or review while the same session keeps adding to the same numbered sequence.
+async function exportPdfNow(requestedPdfFilename) {
+  if (apiQueue.length) await captureNow('final-api-calls');
+  await captureChain.catch(() => {});
+
+  const state = await getState();
+  if (!state.recording) return setState({ lastError: 'Not currently recording.' });
+  if (!state.captures.length) return setState({ lastError: 'Nothing captured yet.' });
+
+  const result = await exportPdfInWindow(
+    `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, `${state.sessionId}_checkpoint`)}`
+  );
+  if (result.error) {
+    return setState({ lastError: `PDF export failed: ${result.error}` });
+  }
+  if (typeof result.downloadId === 'number') await revealSavedFiles(result.downloadId);
+  return setState({ lastError: null });
 }
 
 async function stopRecording(keepFiles = true, requestedPdfFilename) {
@@ -1226,6 +1284,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         break;
 
+      case 'EXPORT_PDF_NOW':
+        try {
+          sendResponse(await exportPdfNow(message.pdfFilename));
+        } catch (error) {
+          sendResponse(await setState({ lastError: `PDF export failed: ${error.message}` }));
+        }
+        break;
+
       case 'CAPTURE_NOW':
         await captureNow('manual');
         sendResponse(await getState());
@@ -1240,9 +1306,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
 
-      case 'SET_SETTINGS':
-        sendResponse(await setState({ settings: message.settings }));
+      case 'SET_SETTINGS': {
+        const state = await getState();
+        const { captureMode, ...rest } = message.settings;
+        const next =
+          state.recording && captureMode && captureMode !== state.settings.captureMode
+            ? await switchCaptureMode(captureMode)
+            : state;
+        sendResponse(await setState({ settings: { ...next.settings, ...(state.recording ? rest : message.settings) } }));
         break;
+      }
 
       case 'CLICK_CAPTURE': {
         const state = await getState();
