@@ -680,7 +680,10 @@ async function captureScrollerStitch(tabId, windowId, scroller) {
   const { viewportWidth, viewportHeight, rectTop, rectHeight, dpr } = scroller;
   const totalTravel = scroller.scrollHeight - scroller.clientHeight;
   // Bounds both the capture time and the number of full-resolution bitmaps held in memory at once.
-  const step = Math.max(rectHeight - 40, Math.ceil(totalTravel / SCROLLER_MAX_FRAMES), 80);
+  // A wider overlap between consecutive frames (rather than the bare minimum) gives some slack for
+  // any lazily-rendered content near a scroll boundary to have actually painted by the time of the
+  // next frame, instead of a thin seam where a row could be missed by both frames' visible slice.
+  const step = Math.max(rectHeight - 150, Math.ceil(totalTravel / SCROLLER_MAX_FRAMES), 80);
   const stops = [];
   for (let top = 0; top < totalTravel; top += step) stops.push(top);
   stops.push(totalTravel);
@@ -689,7 +692,7 @@ async function captureScrollerStitch(tabId, windowId, scroller) {
   try {
     for (const target of stops) {
       const { scrollTop } = await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, target);
-      await delay(220);
+      await delay(450);
       // Must target the recorded tab's own window explicitly - omitting it captures whatever
       // window the OS currently has focused, which can be a different one entirely.
       const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' }).catch(() => null);
