@@ -77,6 +77,36 @@ function requestCapture(reason, label) {
   });
 }
 
+const SETTLE_QUIET_MS = 400;
+const SETTLE_MAX_WAIT_MS = 4000;
+
+// A button click on a client-rendered page often swaps in a loading spinner before the real next
+// screen appears; capturing right away would just record the spinner. Waits until the DOM stops
+// actively changing (or a hard cap is reached, in case something keeps animating indefinitely).
+function waitForQuiet(quietMs, maxWaitMs) {
+  return new Promise((resolve) => {
+    let settleTimer = 0;
+    const finish = () => {
+      observer.disconnect();
+      clearTimeout(settleTimer);
+      clearTimeout(hardStop);
+      resolve();
+    };
+    const observer = new MutationObserver(() => {
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(finish, quietMs);
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+    settleTimer = setTimeout(finish, quietMs);
+    const hardStop = setTimeout(finish, maxWaitMs);
+  });
+}
+
+async function requestCaptureAfterSettle(reason, label) {
+  await waitForQuiet(SETTLE_QUIET_MS, SETTLE_MAX_WAIT_MS);
+  requestCapture(reason, label);
+}
+
 function describeEditedField(element) {
   if (element instanceof HTMLInputElement && element.type === 'password') {
     return `${describe(element)} edited`;
@@ -177,7 +207,14 @@ window.addEventListener(
     const opensList = trigger.hasAttribute('aria-haspopup') || trigger.hasAttribute('aria-expanded');
     if (opensList) capturedList = null;
 
-    requestCapture(opensList ? 'list-opened' : 'click', describe(trigger));
+    // A button click on a client-rendered page often swaps in a loading spinner before the real
+    // next screen appears; capturing immediately would just record the spinner. Waiting for the
+    // page to stop actively changing catches the settled result instead.
+    if (opensList) {
+      requestCapture('list-opened', describe(trigger));
+    } else {
+      requestCaptureAfterSettle('click', describe(trigger));
+    }
   },
   true
 );
