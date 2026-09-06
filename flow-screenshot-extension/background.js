@@ -755,11 +755,9 @@ async function performCapture(reason, label) {
     reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : reason === 'dialog-opened' ? 550 : 450;
   await delay(state.settings.captureApi ? settle + 500 : settle);
 
-  // Screen mode captures the shared desktop surface, which a page render would throw away.
-  const wantsFullPage =
-    state.settings.fullPage &&
-    state.settings.captureMode !== 'screen' &&
-    FULL_PAGE_REASONS.has(reason);
+  // Full-page capture renders the page itself, not whatever surface a mode normally captures -
+  // that applies just as well in Screen/window and API mode as it does in Tab viewport mode.
+  const wantsFullPage = state.settings.fullPage && FULL_PAGE_REASONS.has(reason);
   const fullPage = wantsFullPage ? await captureFullPagePassive(tab.id, tab.windowId).catch(() => null) : null;
 
   return persistCapture({
