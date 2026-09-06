@@ -617,7 +617,7 @@ async function captureDocumentHeadless(tabId, scrollX, scrollY, width, height) {
 // For an app-shell pane that only reveals its content while scrolled, scroll just that pane and
 // stitch the results. This never touches the debugger and never resizes the window - only the pane
 // itself visibly moves, exactly as it would if the user scrolled it by hand.
-async function captureScrollerStitch(tabId, scroller) {
+async function captureScrollerStitch(tabId, windowId, scroller) {
   const { viewportWidth, viewportHeight, rectTop, rectHeight, dpr } = scroller;
   const step = Math.max(rectHeight - 40, 80);
   const stops = [];
@@ -629,7 +629,9 @@ async function captureScrollerStitch(tabId, scroller) {
     for (const target of stops) {
       const { scrollTop } = await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, target);
       await delay(220);
-      const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'png' }).catch(() => null);
+      // Must target the recorded tab's own window explicitly - omitting it captures whatever
+      // window the OS currently has focused, which can be a different one entirely.
+      const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' }).catch(() => null);
       if (!dataUrl) continue;
       frames.push({ scrollTop, dataUrl });
     }
@@ -697,7 +699,7 @@ async function captureScrollerStitch(tabId, scroller) {
 // document instead needs a momentary viewport resize so lazy-loaded content actually renders (a
 // resize-only capture leaves anything below the original viewport as unloaded placeholders).
 // Returns null when neither applies, so the caller just takes the ordinary visible frame.
-async function captureFullPagePassive(tabId) {
+async function captureFullPagePassive(tabId, windowId) {
   if (!HAS_DEBUGGER) return null;
 
   const doc = await measureDocument(tabId).catch(() => null);
@@ -713,7 +715,7 @@ async function captureFullPagePassive(tabId) {
     await clearScrollerMark(tabId);
     return null;
   }
-  return captureScrollerStitch(tabId, scroller);
+  return captureScrollerStitch(tabId, windowId, scroller);
 }
 
 async function storeFrame(frame) {
@@ -758,7 +760,7 @@ async function performCapture(reason, label) {
     state.settings.fullPage &&
     state.settings.captureMode !== 'screen' &&
     FULL_PAGE_REASONS.has(reason);
-  const fullPage = wantsFullPage ? await captureFullPagePassive(tab.id).catch(() => null) : null;
+  const fullPage = wantsFullPage ? await captureFullPagePassive(tab.id, tab.windowId).catch(() => null) : null;
 
   return persistCapture({
     rawDataUrl: fullPage || (await grabPngDataUrl(state, tab)),
