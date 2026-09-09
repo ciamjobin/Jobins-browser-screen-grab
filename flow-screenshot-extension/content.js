@@ -70,6 +70,12 @@ function describe(element) {
   return element.tagName ? element.tagName.toLowerCase() : 'element';
 }
 
+function sendRuntimeMessage(message) {
+  try {
+    Promise.resolve(chrome.runtime.sendMessage(message)).catch(() => {});
+  } catch {}
+}
+
 function requestCapture(reason, label) {
   const key = `${reason}:${label}`;
   const now = Date.now();
@@ -80,9 +86,7 @@ function requestCapture(reason, label) {
   // user scrolling.
   if (reason !== 'scrolled') suppressScrollUntil = now + 2500;
 
-  chrome.runtime.sendMessage({ type: 'CLICK_CAPTURE', reason, label }).catch(() => {
-    /* Background may be asleep or recording stopped; nothing to do. */
-  });
+  sendRuntimeMessage({ type: 'CLICK_CAPTURE', reason, label });
 }
 
 const SETTLE_QUIET_MS = 400;
@@ -344,11 +348,11 @@ window.addEventListener('select', requestSelectionCapture, true);
 // page-hook.js runs in the MAIN world and can only reach the extension through postMessage.
 window.addEventListener('message', (event) => {
   if (event.source !== window || event.data?.source !== 'flow-recorder-api') return;
-  chrome.runtime.sendMessage({ type: 'API_CAPTURE', detail: event.data.detail }).catch(() => {});
+  sendRuntimeMessage({ type: 'API_CAPTURE', detail: event.data.detail });
 });
 
 if (document.documentElement.hasAttribute('data-flow-recorder-hook')) {
-  chrome.runtime.sendMessage({ type: 'API_HOOK_READY' }).catch(() => {});
+  sendRuntimeMessage({ type: 'API_HOOK_READY' });
 }
 
 // Shows a shrinking countdown so the user knows exactly when "Capture in 5s" will fire, even after
