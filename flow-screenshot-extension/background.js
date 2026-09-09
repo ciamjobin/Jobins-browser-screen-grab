@@ -191,7 +191,8 @@ function hashText(value) {
 }
 
 // Only page-driven captures are worth skipping; anything the user did must always be recorded.
-const DEDUPE_REASONS = new Set(['navigation', 'url-change']);
+// 'click-loaded' is the settled follow-up to a click - keep it only when the page actually changed.
+const DEDUPE_REASONS = new Set(['navigation', 'url-change', 'click-loaded']);
 
 function shouldKeepDuplicate(reason, apiRows) {
   return apiRows.length > 0 || !DEDUPE_REASONS.has(reason);
@@ -422,6 +423,41 @@ async function detachDebugger() {
   const tabId = debuggerTabId;
   debuggerTabId = null;
   await chrome.debugger.detach({ tabId }).catch(() => {});
+}
+
+// The tab title is often a generic site-wide string ("John Hancock - My Retirement") that says
+// little about the step being documented, so prefer the heading the page actually shows.
+async function getPageHeading(tabId) {
+  const [injected] = await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      func: () => {
+        const visible = (el) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 2 || rect.height < 2) return false;
+          const style = getComputedStyle(el);
+          return style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+        };
+
+        // A dialog's own heading describes the current step better than the page behind it.
+        const dialog = [...document.querySelectorAll('dialog[open], [role="dialog"], [role="alertdialog"]')]
+          .filter(visible)
+          .pop();
+        const scope = dialog || document;
+
+        for (const selector of ['h1', '[role="heading"][aria-level="1"]', 'h2']) {
+          for (const el of scope.querySelectorAll(selector)) {
+            if (!visible(el)) continue;
+            const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+            if (text) return text.slice(0, 120);
+          }
+        }
+        return '';
+      }
+    })
+    .catch(() => [null]);
+  return injected?.result || '';
 }
 
 // Plain document height only: does not look at inner scroll panes, so it never suggests forcing the
@@ -937,10 +973,11 @@ async function performCapture(reason, label) {
   const wantsFullPage = state.settings.fullPage && FULL_PAGE_REASONS.has(reason);
   const fullPage = wantsFullPage ? await captureFullPageWithWatchdog(tab.id, tab.windowId) : null;
   const fullPageInfo = wantsFullPage ? (fullPage ? 'ok' : 'fell back to visible frame') : 'n/a';
+  const heading = await getPageHeading(tab.id).catch(() => '');
 
   return persistCapture({
     rawDataUrl: fullPage || (await grabPngDataUrl(state, tab)),
-    title: tab.title || tab.url || 'Untitled page',
+    title: heading || tab.title || tab.url || 'Untitled page',
     url: tab.url || '',
     reason,
     label,

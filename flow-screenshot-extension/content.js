@@ -119,13 +119,20 @@ function looksBusy() {
   return BUSY_TEXT_PATTERN.test(text.slice(0, 500));
 }
 
+// A button click on a client-rendered page often swaps in a loading spinner before the real next
+// screen appears. Both are worth keeping: the interim frame shows the action was taken, the settled
+// one shows the result. Fires immediately, then again once the DOM stops changing.
 async function requestCaptureAfterSettle(reason, label) {
+  requestCapture(reason, label);
+
   const deadline = Date.now() + SETTLE_MAX_WAIT_MS;
   await waitForQuiet(SETTLE_QUIET_MS, SETTLE_MAX_WAIT_MS);
   while (looksBusy() && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
-  requestCapture(reason, label);
+  // A distinct reason so the settled shot is not deduped against the interim one by label alone;
+  // the background still drops it if the page turned out not to have changed at all.
+  requestCapture(`${reason}-loaded`, label);
 }
 
 function describeEditedField(element) {
