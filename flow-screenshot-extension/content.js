@@ -1,3 +1,11 @@
+// Declared in the manifest AND injected programmatically when a recording starts (to seed a page
+// that was already open). Both can land in the same isolated world, so without this guard the
+// top-level declarations below re-run and throw "Identifier ... has already been declared", which
+// kills the whole script and silently stops click/scroll capture on that page.
+(() => {
+if (window.__jshotzContentReady) return;
+window.__jshotzContentReady = true;
+
 const INTERACTIVE_SELECTOR = [
   'button',
   '[role="button"]',
@@ -381,3 +389,4 @@ function showCountdown(seconds) {
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'SHOW_COUNTDOWN') showCountdown(message.seconds);
 });
+})();

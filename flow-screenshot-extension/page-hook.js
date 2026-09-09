@@ -1,5 +1,9 @@
 // Runs in the page's MAIN world so it can wrap the page's own fetch/XHR and read response bodies.
 (() => {
+  // Injected again whenever a recording starts on an already-open page; wrapping fetch/XHR a second
+  // time would report every call twice.
+  if (document.documentElement.hasAttribute('data-flow-recorder-hook')) return;
+
   const MAX_BODY = 6000;
 
   function trim(text) {

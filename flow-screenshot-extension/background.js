@@ -371,13 +371,33 @@ function scheduleDelayedCapture(tabId) {
   delay(CAPTURE_COUNTDOWN_MS).then(() => captureNow('devtools-panel'));
 }
 
+// "Failed to capture tab: image readback failed" is a transient compositor/GPU error - the frame
+// simply was not readable at that instant (mid-paint, tab backgrounded, GPU process recycling).
+// A short retry recovers it; without one, a whole capture is lost or a stitch frame silently dropped.
+const CAPTURE_RETRY_DELAYS_MS = [150, 400, 900];
+
+async function captureVisibleTabWithRetry(windowId) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= CAPTURE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+    } catch (error) {
+      lastError = error;
+      const wait = CAPTURE_RETRY_DELAYS_MS[attempt];
+      if (wait === undefined) break;
+      await delay(wait);
+    }
+  }
+  throw lastError;
+}
+
 async function grabPngDataUrl(state, tab) {
   if (state.settings.captureMode === 'screen' && state.streamActive) {
     const result = await askScreen('SCREEN_CAPTURE');
     if (result?.dataUrl) return result.dataUrl;
     console.warn('Screen capture unavailable, falling back to tab capture:', result?.error);
   }
-  return chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+  return captureVisibleTabWithRetry(tab.windowId);
 }
 
 /* ----------------------------------------------------------- full page */
@@ -782,7 +802,7 @@ async function captureScrollerStitch(tabId, windowId, scroller) {
       await delay(450);
       // Must target the recorded tab's own window explicitly - omitting it captures whatever
       // window the OS currently has focused, which can be a different one entirely.
-      const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' }).catch(() => null);
+      const dataUrl = await captureVisibleTabWithRetry(windowId).catch(() => null);
       if (!dataUrl) continue;
       frames.push({ scrollTop, dataUrl });
     }
