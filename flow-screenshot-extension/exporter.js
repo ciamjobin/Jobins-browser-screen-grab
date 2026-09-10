@@ -44,7 +44,17 @@ function fieldsFor(frame) {
 // A real extension page is required here: offscreen documents expose only chrome.runtime,
 // and service workers cannot create blob URLs.
 async function run() {
-  const filename = new URLSearchParams(location.search).get('filename');
+  const params = new URLSearchParams(location.search);
+  const filename = params.get('filename');
+  const selectedSequences = params.has('selected')
+    ? new Set(
+        params
+          .get('selected')
+          .split(',')
+          .map(Number)
+          .filter((sequence) => Number.isSafeInteger(sequence) && sequence > 0)
+      )
+    : null;
 
   try {
     const stored = await chrome.storage.local.get(null);
@@ -53,12 +63,21 @@ async function run() {
       .map(([, frame]) => frame)
       .sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
     if (!frames.length && Array.isArray(stored[FRAMES_KEY])) frames.push(...stored[FRAMES_KEY]);
-    if (!frames.length) throw new Error('No frames were captured, so no PDF was written.');
+    const includedFrames = selectedSequences
+      ? frames.filter((frame) => selectedSequences.has(frame.sequence))
+      : frames;
+    if (!includedFrames.length) {
+      throw new Error(
+        selectedSequences
+          ? 'No selected screenshots are available for the PDF.'
+          : 'No frames were captured, so no PDF was written.'
+      );
+    }
 
-    stateEl.textContent = `Assembling ${frames.length} page(s)\u2026`;
+    stateEl.textContent = `Assembling ${includedFrames.length} page(s)\u2026`;
 
     const bytes = buildPdf(
-      frames.map((frame) => ({
+      includedFrames.map((frame) => ({
         title: frame.title,
         apiRows: frame.apiRows || [],
         ...fieldsFor(frame),
@@ -75,9 +94,9 @@ async function run() {
 
     if (outcome !== 'complete') throw new Error(`PDF download ${outcome}.`);
 
-    stateEl.textContent = `Saved ${frames.length} page(s).`;
+    stateEl.textContent = `Saved ${includedFrames.length} page(s).`;
     // The background closes this window once it sees the message, avoiding a close/message race.
-    chrome.runtime.sendMessage({ type: 'PDF_DONE', pageCount: frames.length, downloadId });
+    chrome.runtime.sendMessage({ type: 'PDF_DONE', pageCount: includedFrames.length, downloadId });
   } catch (error) {
     stateEl.textContent = error.message;
     stateEl.className = 'status error';

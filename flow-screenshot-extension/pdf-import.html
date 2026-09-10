@@ -14,6 +14,17 @@
       <input id="imageFolder" type="file" accept="image/png,image/jpeg" webkitdirectory multiple />
     </label>
 
+    <div id="fileSelection" hidden>
+      <div class="selection-heading">
+        <h2>Screenshots</h2>
+        <label class="select-all">
+          <input id="selectAllFiles" type="checkbox" checked />
+          <span>Select all</span>
+        </label>
+      </div>
+      <ul id="fileList" class="file-list"></ul>
+    </div>
+
     <label class="field">
       <span>PDF file name</span>
       <input id="pdfFilename" type="text" value="JShotz-screenshots.pdf" autocomplete="off" />

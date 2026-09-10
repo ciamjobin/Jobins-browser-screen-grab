@@ -1164,9 +1164,15 @@ async function queueApiCall({
 
 // Neither the service worker (no blob URLs) nor an offscreen document (chrome.runtime only)
 // can write the PDF, so a short-lived extension page does it.
-async function exportPdfInWindow(filename) {
+async function exportPdfInWindow(filename, selectedSequences) {
+  const params = new URLSearchParams({ filename });
+  if (Array.isArray(selectedSequences)) {
+    const selected = [...new Set(selectedSequences.filter((sequence) => Number.isSafeInteger(sequence) && sequence > 0))];
+    params.set('selected', selected.join(','));
+  }
+
   const win = await chrome.windows.create({
-    url: `exporter.html?filename=${encodeURIComponent(filename)}`,
+    url: `exporter.html?${params}`,
     type: 'popup',
     width: 420,
     height: 200,
@@ -1350,7 +1356,7 @@ async function revealSavedFiles(downloadId) {
 // the user can hand off or review while the same session keeps adding to the same numbered sequence.
 // Unlike the final export, the folder is not opened here - only the final save should interrupt the
 // user, since this can happen many times over the course of one recording.
-async function exportPdfNow(requestedPdfFilename) {
+async function exportPdfNow(requestedPdfFilename, selectedSequences) {
   if (apiQueue.length) await captureNow('final-api-calls');
   await captureChain.catch(() => {});
 
@@ -1359,7 +1365,8 @@ async function exportPdfNow(requestedPdfFilename) {
   if (!state.captures.length) return setState({ lastError: 'Nothing captured yet.' });
 
   const result = await exportPdfInWindow(
-    `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, `${state.sessionId}_checkpoint`)}`
+    `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, `${state.sessionId}_checkpoint`)}`,
+    selectedSequences
   );
   await writeLogFile().catch(() => {});
   if (result.error) {
@@ -1368,7 +1375,7 @@ async function exportPdfNow(requestedPdfFilename) {
   return setState({ lastError: null });
 }
 
-async function stopRecording(keepFiles = true, requestedPdfFilename) {
+async function stopRecording(keepFiles = true, requestedPdfFilename, selectedSequences) {
   // Anything still queued would be lost, so give it a final frame to sit under.
   if (keepFiles && apiQueue.length) {
     await captureNow('final-api-calls');
@@ -1404,7 +1411,8 @@ async function stopRecording(keepFiles = true, requestedPdfFilename) {
 
     if (state.settings.savePdf && state.captures.length) {
       const result = await exportPdfInWindow(
-        `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, state.sessionId)}`
+        `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, state.sessionId)}`,
+        selectedSequences
       );
       if (result.error) {
         lastError = `PDF export failed: ${result.error}`;
@@ -1581,7 +1589,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'STOP':
         try {
-          sendResponse(await stopRecording(message.keepFiles !== false, message.pdfFilename));
+          sendResponse(await stopRecording(message.keepFiles !== false, message.pdfFilename, message.selectedSequences));
         } catch (error) {
           await cleanupCaptureResources();
           sendResponse(await setState({ recording: false, lastError: error.message }));
@@ -1590,7 +1598,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'EXPORT_PDF_NOW':
         try {
-          sendResponse(await exportPdfNow(message.pdfFilename));
+          sendResponse(await exportPdfNow(message.pdfFilename, message.selectedSequences));
         } catch (error) {
           sendResponse(await setState({ lastError: `PDF export failed: ${error.message}` }));
         }

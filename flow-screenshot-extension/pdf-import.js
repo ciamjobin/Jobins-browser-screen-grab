@@ -4,8 +4,12 @@ const folderEl = document.getElementById('imageFolder');
 const filenameEl = document.getElementById('pdfFilename');
 const summaryEl = document.getElementById('fileSummary');
 const generateEl = document.getElementById('generatePdf');
+const fileSelectionEl = document.getElementById('fileSelection');
+const fileListEl = document.getElementById('fileList');
+const selectAllFilesEl = document.getElementById('selectAllFiles');
 
-let selectedFiles = [];
+let imageFiles = [];
+let selectedFileIndexes = new Set();
 
 function sortFiles(files) {
   return [...files].sort((left, right) =>
@@ -22,6 +26,57 @@ function safeFilename(value) {
     .replace(/[\\/:*?"<>|]+/g, '-')
     .trim();
   return `${base || 'JShotz-screenshots'}.pdf`;
+}
+
+function selectedFiles() {
+  return imageFiles.filter((_, index) => selectedFileIndexes.has(index));
+}
+
+function updateFileSelectionControls() {
+  const selected = selectedFiles().length;
+  const total = imageFiles.length;
+  selectAllFilesEl.disabled = !total;
+  selectAllFilesEl.checked = total > 0 && selected === total;
+  selectAllFilesEl.indeterminate = false;
+  summaryEl.textContent = total
+    ? `${selected} of ${total} screenshot(s) selected.`
+    : 'No PNG or JPEG screenshots selected.';
+  summaryEl.className = total ? 'status idle' : 'status error';
+  generateEl.disabled = selected === 0;
+}
+
+function renderFileList() {
+  fileListEl.replaceChildren();
+  fileSelectionEl.hidden = imageFiles.length === 0;
+
+  for (const [index, file] of imageFiles.entries()) {
+    const item = document.createElement('li');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selectedFileIndexes.has(index);
+    checkbox.setAttribute('aria-label', `Include ${file.name} in PDF`);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        selectedFileIndexes.add(index);
+      } else {
+        selectedFileIndexes.delete(index);
+      }
+      updateFileSelectionControls();
+    });
+
+    const name = document.createElement('span');
+    name.className = 'capture-title';
+    name.textContent = file.webkitRelativePath || file.name;
+    name.title = name.textContent;
+
+    const selection = document.createElement('label');
+    selection.className = 'file-select';
+    selection.append(checkbox, name);
+    item.append(selection);
+    fileListEl.append(item);
+  }
+
+  updateFileSelectionControls();
 }
 
 async function imageToPage(file, index) {
@@ -61,25 +116,30 @@ function base64ToBytes(base64) {
 }
 
 folderEl.addEventListener('change', () => {
-  selectedFiles = sortFiles([...folderEl.files].filter((file) => /^image\/(png|jpeg)$/.test(file.type)));
-  summaryEl.textContent = selectedFiles.length
-    ? `${selectedFiles.length} screenshot(s) selected.`
-    : 'No PNG or JPEG screenshots selected.';
-  summaryEl.className = selectedFiles.length ? 'status idle' : 'status error';
-  generateEl.disabled = !selectedFiles.length;
+  imageFiles = sortFiles([...folderEl.files].filter((file) => /^image\/(png|jpeg)$/.test(file.type)));
+  selectedFileIndexes = new Set(imageFiles.map((_, index) => index));
+  renderFileList();
+});
+
+selectAllFilesEl.addEventListener('change', () => {
+  selectedFileIndexes = selectAllFilesEl.checked
+    ? new Set(imageFiles.map((_, index) => index))
+    : new Set();
+  renderFileList();
 });
 
 generateEl.addEventListener('click', async () => {
-  if (!selectedFiles.length) return;
+  const filesToConvert = selectedFiles();
+  if (!filesToConvert.length) return;
 
   generateEl.disabled = true;
   summaryEl.className = 'status recording';
-  summaryEl.textContent = `Preparing ${selectedFiles.length} screenshot(s)...`;
+  summaryEl.textContent = `Preparing ${filesToConvert.length} screenshot(s)...`;
 
   try {
     const pages = [];
-    for (let index = 0; index < selectedFiles.length; index += 1) {
-      pages.push(await imageToPage(selectedFiles[index], index));
+    for (let index = 0; index < filesToConvert.length; index += 1) {
+      pages.push(await imageToPage(filesToConvert[index], index));
     }
 
     const bytes = buildPdf(pages);
@@ -102,6 +162,6 @@ generateEl.addEventListener('click', async () => {
     summaryEl.className = 'status error';
     summaryEl.textContent = `PDF generation failed: ${error.message}`;
   } finally {
-    generateEl.disabled = false;
+    generateEl.disabled = selectedFiles().length === 0;
   }
 });

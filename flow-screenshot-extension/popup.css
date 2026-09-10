@@ -23,6 +23,47 @@ h2 {
   color: #52606d;
 }
 
+.selection-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.selection-heading h2 {
+  margin: 0;
+}
+
+.select-all,
+.capture-select,
+.file-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.select-all {
+  color: #52606d;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.select-all input,
+.capture-select input,
+.file-select input {
+  accent-color: #1565c0;
+  flex: none;
+  margin: 0;
+}
+
+.selection-summary {
+  margin: 3px 0 6px;
+  color: #7b8794;
+  font-size: 11px;
+}
+
 .status {
   margin: 0 0 12px;
   padding: 7px 10px;
@@ -199,7 +240,8 @@ button.danger:hover:not(:disabled) {
   width: 100%;
 }
 
-.captures {
+.captures,
+.file-list {
   max-height: 190px;
   margin: 0;
   padding: 0;
@@ -208,13 +250,21 @@ button.danger:hover:not(:disabled) {
   font-size: 12px;
 }
 
-.captures li {
+.captures li,
+.file-list li {
   padding: 6px 0;
   border-bottom: 1px solid #eceff1;
 }
 
-.captures li:last-child {
+.captures li:last-child,
+.file-list li:last-child {
   border-bottom: none;
+}
+
+.capture-select,
+.file-select {
+  cursor: pointer;
+  min-width: 0;
 }
 
 .captures .empty {
@@ -224,7 +274,9 @@ button.danger:hover:not(:disabled) {
 
 .capture-title {
   display: block;
+  flex: 1;
   font-weight: 600;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

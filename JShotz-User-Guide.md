@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.11.2**
+**Version 3.12.0**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as a
 sequence of timestamped, watermarked screenshots and exports them as a PDF, with an optional
@@ -12,14 +12,14 @@ tickets, and step-by-step evidence of what happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.11.2-chrome-edge.zip`.
+1. Unzip `JShotz-3.12.0-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.11.2-firefox.zip`.
+1. Unzip `JShotz-3.12.0-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -44,7 +44,8 @@ Click the JShotz icon to open the popup. It has three parts:
 - **Settings** — capture source and behavior options (locked once recording starts, except the
   capture source, which can be changed mid-recording).
 - **Actions** — Start/Stop, Capture now, Capture in 5s, Export PDF so far.
-- **Captures list** — a live list of what's been captured so far in the current session.
+- **Screenshots list** — a live list of what's been captured so far in the current session and
+  checkboxes that choose the screenshots included in a PDF.
 
 ---
 
@@ -89,9 +90,12 @@ window), the recording automatically falls back to Tab-viewport captures rather 
    it automatically — that tab is brought to the front and becomes part of the recording.
    Switching back to the original tab (or to any other tab that flow has opened) resumes
    capturing from wherever you actually are.
-4. When you're done, click **Stop recording**. You'll be asked whether to keep the files:
-   - **Yes, keep** — prompts for a PDF file name, then saves everything (PNGs, manifest, PDF)
-     to your Downloads folder and opens that folder.
+4. When you're done, click **Stop recording**. Use the **Screenshots** list to clear any frames
+   you do not want in the PDF. **Select all** starts checked and automatically clears when any
+   individual screenshot is unchecked. You'll then be asked whether to keep the files:
+   - **Yes, keep** — prompts for a PDF file name, then saves all PNGs and the manifest to your
+     Downloads folder. The PDF contains only the screenshots that remain checked, and the folder
+     opens when the export finishes.
    - **No, delete all** — asks you to confirm, then removes everything from that session.
 
 ### Manual capture options
@@ -106,16 +110,17 @@ window), the recording automatically falls back to Tab-viewport captures rather 
 ### Export PDF so far
 
 Click **Export PDF so far** at any point during a recording to write a checkpoint PDF from
-everything captured up to that moment, without stopping. The file is named
+the screenshots currently checked in the **Screenshots** list, without stopping. The file is named
 `..._checkpoint.pdf` and does **not** open your Downloads folder automatically — only the
 final "Stop recording" export does that. The recording keeps going afterward, and the final
-PDF (on Stop) still includes everything, checkpoints included.
+PDF (on Stop) uses the screenshots selected at that time.
 
 ### Create PDF from saved screenshots
 
 If you have a folder of previously saved PNGs (from a session, or from anywhere), click
-**Create PDF from saved screenshots** in the popup to pick that folder and build a fresh PDF
-from its contents, independent of any active recording.
+**Create PDF from saved screenshots** in the popup to pick that folder. Every compatible image
+starts checked in the displayed **Screenshots** list; clear unwanted files, then generate a fresh
+PDF from the remaining checked files, independent of any active recording.
 
 ---
 

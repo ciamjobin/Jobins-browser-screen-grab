@@ -11,9 +11,17 @@ const filenamePromptEl = document.getElementById('filenamePrompt');
 const deleteConfirmEl = document.getElementById('deleteConfirm');
 const pdfFilenameEl = document.getElementById('pdfFilename');
 const shortcutHintEl = document.getElementById('shortcutHint');
+const selectAllCapturesEl = document.getElementById('selectAllCaptures');
+const captureSelectionSummaryEl = document.getElementById('captureSelectionSummary');
+const saveWithNameEl = document.getElementById('saveWithName');
 
 let awaitingChoice = false;
 let pendingExportOnly = false;
+let selectedCaptureSequences = new Set();
+let knownCaptureSequences = new Set();
+let captureSelectionSessionId = null;
+let currentCaptures = [];
+let currentSettings = {};
 
 const controls = {
   captureMode: document.getElementById('captureMode'),
@@ -41,6 +49,46 @@ function readSettings() {
   };
 }
 
+function captureSequences(captures = currentCaptures) {
+  return captures
+    .map((capture) => capture.sequence)
+    .filter((sequence) => Number.isSafeInteger(sequence) && sequence > 0);
+}
+
+function syncCaptureSelection(sessionId, captures) {
+  const sequences = new Set(captureSequences(captures));
+  if (sessionId !== captureSelectionSessionId) {
+    captureSelectionSessionId = sessionId;
+    selectedCaptureSequences = new Set(sequences);
+  } else {
+    for (const sequence of sequences) {
+      if (!knownCaptureSequences.has(sequence)) selectedCaptureSequences.add(sequence);
+    }
+    selectedCaptureSequences = new Set(
+      [...selectedCaptureSequences].filter((sequence) => sequences.has(sequence))
+    );
+  }
+  knownCaptureSequences = sequences;
+  currentCaptures = captures;
+}
+
+function selectedCaptureSequenceList() {
+  return captureSequences().filter((sequence) => selectedCaptureSequences.has(sequence));
+}
+
+function updateCaptureSelectionControls() {
+  const total = captureSequences().length;
+  const selected = selectedCaptureSequenceList().length;
+  selectAllCapturesEl.disabled = !total;
+  selectAllCapturesEl.checked = total > 0 && selected === total;
+  selectAllCapturesEl.indeterminate = false;
+  captureSelectionSummaryEl.textContent = total ? `${selected} of ${total} selected for PDF.` : '';
+
+  const needsSelection = pendingExportOnly || currentSettings.savePdf !== false;
+  saveWithNameEl.disabled =
+    !filenamePromptEl.hidden && needsSelection && total > 0 && selected === 0;
+}
+
 function renderCaptures(captures) {
   captureListEl.replaceChildren();
 
@@ -49,12 +97,26 @@ function renderCaptures(captures) {
     empty.className = 'empty';
     empty.textContent = 'No captures yet.';
     captureListEl.append(empty);
+    updateCaptureSelectionControls();
     return;
   }
 
   // Newest first, and build nodes with textContent so untrusted page titles can't inject markup.
   for (const capture of [...captures].reverse()) {
     const item = document.createElement('li');
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selectedCaptureSequences.has(capture.sequence);
+    checkbox.setAttribute('aria-label', `Include screenshot ${capture.sequence} in PDF`);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        selectedCaptureSequences.add(capture.sequence);
+      } else {
+        selectedCaptureSequences.delete(capture.sequence);
+      }
+      updateCaptureSelectionControls();
+    });
 
     const title = document.createElement('span');
     title.className = 'capture-title';
@@ -65,14 +127,20 @@ function renderCaptures(captures) {
     meta.className = 'capture-meta';
     meta.textContent = `${new Date(capture.capturedAt).toLocaleTimeString()} · ${capture.reason}`;
 
-    item.append(title, meta);
+    const selection = document.createElement('label');
+    selection.className = 'capture-select';
+    selection.append(checkbox, title);
+    item.append(selection, meta);
     captureListEl.append(item);
   }
+  updateCaptureSelectionControls();
 }
 
 function render(state) {
   const recording = Boolean(state?.recording);
   const settings = state?.settings ?? {};
+  currentSettings = settings;
+  syncCaptureSelection(state?.sessionId ?? null, state?.captures ?? []);
 
   // Polling must not steal a control the user is currently interacting with.
   const apply = (control, assign) => {
@@ -107,7 +175,7 @@ function render(state) {
   captureLaterEl.disabled = !recording;
   exportPdfNowEl.disabled = !recording || !state?.captures?.length;
 
-  renderCaptures(state?.captures ?? []);
+  renderCaptures(currentCaptures);
 }
 
 async function refresh() {
@@ -139,7 +207,11 @@ async function finishRecording(keepFiles, pdfFilename) {
   statusEl.textContent = keepFiles
     ? 'Finishing up \u2014 writing files and opening the folder\u2026'
     : 'Deleting captured files\u2026';
-  render(await send('STOP', { keepFiles, pdfFilename }));
+  const payload = { keepFiles, pdfFilename };
+  if (keepFiles && currentSettings.savePdf !== false) {
+    payload.selectedSequences = selectedCaptureSequenceList();
+  }
+  render(await send('STOP', payload));
   toggleEl.disabled = false;
 }
 
@@ -148,15 +220,20 @@ async function exportPdfNow(pdfFilename) {
   mainActionsEl.hidden = false;
   awaitingChoice = false;
   statusEl.textContent = 'Writing checkpoint PDF\u2026';
-  render(await send('EXPORT_PDF_NOW', { pdfFilename }));
+  render(await send('EXPORT_PDF_NOW', {
+    pdfFilename,
+    selectedSequences: selectedCaptureSequenceList()
+  }));
 }
 
 document.getElementById('keepYes').addEventListener('click', async () => {
   const state = await send('GET_STATE');
+  render(state);
   pendingExportOnly = false;
   pdfFilenameEl.value = `${state.sessionId || 'JShotz-session'}.pdf`;
   confirmEl.hidden = true;
   filenamePromptEl.hidden = false;
+  updateCaptureSelectionControls();
   pdfFilenameEl.focus();
   pdfFilenameEl.select();
 });
@@ -175,6 +252,12 @@ document.getElementById('filenameCancel').addEventListener('click', () => {
   }
 });
 document.getElementById('saveWithName').addEventListener('click', () => {
+  const needsSelection = pendingExportOnly || currentSettings.savePdf !== false;
+  if (needsSelection && currentCaptures.length && !selectedCaptureSequenceList().length) {
+    statusEl.textContent = 'Select at least one screenshot for the PDF.';
+    statusEl.className = 'status error';
+    return;
+  }
   if (pendingExportOnly) {
     exportPdfNow(pdfFilenameEl.value);
   } else {
@@ -197,13 +280,22 @@ captureNowEl.addEventListener('click', async () => {
 
 exportPdfNowEl.addEventListener('click', async () => {
   const state = await send('GET_STATE');
+  render(state);
   pendingExportOnly = true;
   awaitingChoice = true;
   pdfFilenameEl.value = `${state.sessionId || 'JShotz-session'}_checkpoint.pdf`;
   mainActionsEl.hidden = true;
   filenamePromptEl.hidden = false;
+  updateCaptureSelectionControls();
   pdfFilenameEl.focus();
   pdfFilenameEl.select();
+});
+
+selectAllCapturesEl.addEventListener('change', () => {
+  selectedCaptureSequences = selectAllCapturesEl.checked
+    ? new Set(captureSequences())
+    : new Set();
+  renderCaptures(currentCaptures);
 });
 
 // The popup closes as soon as focus moves to DevTools, so the countdown lives in the background.

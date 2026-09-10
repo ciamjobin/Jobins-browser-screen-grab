@@ -77,7 +77,14 @@
       <button id="createPdfLater">Create PDF from saved screenshots</button>
     </div>
 
-    <h2>Captures</h2>
+    <div class="selection-heading">
+      <h2>Screenshots</h2>
+      <label class="select-all">
+        <input id="selectAllCaptures" type="checkbox" checked />
+        <span>Select all</span>
+      </label>
+    </div>
+    <p id="captureSelectionSummary" class="selection-summary"></p>
     <ul id="captureList" class="captures">
       <li class="empty">No captures yet.</li>
     </ul>

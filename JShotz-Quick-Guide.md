@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.11.2**
+**Version 3.12.0**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF — handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -17,8 +17,9 @@ documenting a process, a support case, or a step-by-step walkthrough.
      can show DevTools or other apps).
 3. Click **Start recording**.
 4. Use the page normally — screenshots are taken automatically as you click and scroll.
-5. Click **Stop recording**, choose **Yes, keep**, and pick a PDF name. Your files open
-   automatically when they're ready.
+5. Clear unwanted frames in the **Screenshots** list, then click **Stop recording**, choose
+   **Yes, keep**, and pick a PDF name. The PDF includes only the screenshots still checked;
+   your original PNGs are kept in the session folder.
 
 You can change the capture source at any time without stopping the recording.
 
@@ -60,8 +61,19 @@ a moment — both are expected and clear on their own.
 ## Saving a PDF partway through
 
 Click **Export PDF so far** at any point to save everything captured up to that moment as a PDF,
-without stopping the recording. Keep going afterward — your final PDF at "Stop recording" will
-still include everything.
+without stopping the recording. Keep going afterward — your final PDF at "Stop recording" uses
+the screenshots selected at that time.
+
+---
+
+## Choose PDF screenshots
+
+Every screenshot in the **Screenshots** list starts checked. Clear the checkbox beside any frame
+you do not want in the PDF. **Select all** is checked while every frame is included and clears
+when any individual frame is removed.
+
+The same selection list appears after choosing a folder in **Create PDF from saved screenshots**.
+Only the checked PNG or JPEG files are included in that PDF.
 
 ---
 
