@@ -50,6 +50,7 @@ let selectionTimer = 0;
 let dialogTimer = 0;
 let scrollTimer = 0;
 let suppressScrollUntil = 0;
+let fullPageCaptureActive = false;
 const scrollAnchors = new WeakMap();
 const capturedDialogs = new WeakSet();
 
@@ -82,8 +83,8 @@ function requestCapture(reason, label) {
   if (key === lastSent.key && now - lastSent.at < 800) return;
   lastSent = { key, at: now };
 
-  // A full-page shot resizes the layout viewport, which moves the page; that must not read as the
-  // user scrolling.
+  // Chromium can briefly resize the visible viewport while it displays a debugger notice during
+  // ordinary full-page capture; that must not read as a user scroll.
   if (reason !== 'scrolled') suppressScrollUntil = now + 2500;
 
   sendRuntimeMessage({ type: 'CLICK_CAPTURE', reason, label });
@@ -280,7 +281,7 @@ document.addEventListener(
 
     const key = isDocument ? document.documentElement : scroller;
     if (!scrollAnchors.has(key)) scrollAnchors.set(key, position);
-    if (Date.now() < suppressScrollUntil) {
+    if (fullPageCaptureActive || Date.now() < suppressScrollUntil) {
       scrollAnchors.set(key, position);
       return;
     }
@@ -358,6 +359,58 @@ if (document.documentElement.hasAttribute('data-flow-recorder-hook')) {
 // Shows a shrinking countdown so the user knows exactly when "Capture in 5s" will fire, even after
 // the popup has closed and focus has moved to DevTools.
 const COUNTDOWN_ID = 'jshotz-countdown';
+const FULL_PAGE_PROGRESS_ID = 'jshotz-full-page-progress';
+const FULL_PAGE_PROGRESS_STYLE_ID = 'jshotz-full-page-progress-style';
+
+function fullPageProgressElement() {
+  let panel = document.getElementById(FULL_PAGE_PROGRESS_ID);
+  if (panel) return panel;
+
+  if (!document.getElementById(FULL_PAGE_PROGRESS_STYLE_ID)) {
+    const style = document.createElement('style');
+    style.id = FULL_PAGE_PROGRESS_STYLE_ID;
+    style.textContent = `
+      #${FULL_PAGE_PROGRESS_ID}{position:fixed;top:16px;right:16px;z-index:2147483647;width:260px;padding:10px 12px;border:1px solid rgba(255,255,255,.26);border-radius:6px;background:rgba(17,24,39,.94);box-shadow:0 5px 18px rgba(0,0,0,.35);color:#fff;font:600 13px/1.35 "Segoe UI",sans-serif;pointer-events:none}
+      #${FULL_PAGE_PROGRESS_ID} .jshotz-progress-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+      #${FULL_PAGE_PROGRESS_ID} .jshotz-progress-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      #${FULL_PAGE_PROGRESS_ID} .jshotz-progress-percent{color:#fecaca;font-variant-numeric:tabular-nums}
+      #${FULL_PAGE_PROGRESS_ID} .jshotz-progress-track{height:5px;margin-top:8px;overflow:hidden;border-radius:3px;background:rgba(255,255,255,.2)}
+      #${FULL_PAGE_PROGRESS_ID} .jshotz-progress-bar{width:0;height:100%;border-radius:inherit;background:#dc2626;transition:width .28s ease;animation:jshotz-progress-pulse 1.1s ease-in-out infinite}
+      @keyframes jshotz-progress-pulse{50%{opacity:.62}}
+    `;
+    document.documentElement.append(style);
+  }
+
+  panel = document.createElement('div');
+  panel.id = FULL_PAGE_PROGRESS_ID;
+  panel.setAttribute('role', 'status');
+  panel.setAttribute('aria-live', 'polite');
+  panel.innerHTML = '<div class="jshotz-progress-head"><span class="jshotz-progress-label"></span><span class="jshotz-progress-percent"></span></div><div class="jshotz-progress-track"><div class="jshotz-progress-bar"></div></div>';
+  document.documentElement.append(panel);
+  return panel;
+}
+
+function showFullPageProgress(progress) {
+  fullPageCaptureActive = true;
+  const panel = fullPageProgressElement();
+  const percent = Math.max(0, Math.min(100, Number(progress?.percent) || 0));
+  panel.querySelector('.jshotz-progress-label').textContent = progress?.label || 'Capturing full page';
+  panel.querySelector('.jshotz-progress-percent').textContent = `${percent}%`;
+  panel.querySelector('.jshotz-progress-bar').style.width = `${percent}%`;
+  panel.style.visibility = 'visible';
+}
+
+function setFullPageProgressVisibility(hidden) {
+  const panel = document.getElementById(FULL_PAGE_PROGRESS_ID);
+  if (panel) panel.style.visibility = hidden ? 'hidden' : 'visible';
+}
+
+function clearFullPageProgress() {
+  fullPageCaptureActive = false;
+  suppressScrollUntil = Date.now() + 1200;
+  document.getElementById(FULL_PAGE_PROGRESS_ID)?.remove();
+  document.getElementById(FULL_PAGE_PROGRESS_STYLE_ID)?.remove();
+}
 
 function showCountdown(seconds) {
   document.getElementById(COUNTDOWN_ID)?.remove();
@@ -392,5 +445,8 @@ function showCountdown(seconds) {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'SHOW_COUNTDOWN') showCountdown(message.seconds);
+  if (message?.type === 'FULL_PAGE_PROGRESS') showFullPageProgress(message.progress);
+  if (message?.type === 'FULL_PAGE_PROGRESS_VISIBILITY') setFullPageProgressVisibility(Boolean(message.hidden));
+  if (message?.type === 'FULL_PAGE_PROGRESS_CLEAR') clearFullPageProgress();
 });
 })();

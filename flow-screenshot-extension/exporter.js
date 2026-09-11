@@ -41,20 +41,24 @@ function fieldsFor(frame) {
   };
 }
 
+function sequencesFromParams(params, key) {
+  if (!params.has(key)) return null;
+  return new Set(
+    params
+      .get(key)
+      .split(',')
+      .map(Number)
+      .filter((sequence) => Number.isSafeInteger(sequence) && sequence > 0)
+  );
+}
+
 // A real extension page is required here: offscreen documents expose only chrome.runtime,
 // and service workers cannot create blob URLs.
 async function run() {
   const params = new URLSearchParams(location.search);
   const filename = params.get('filename');
-  const selectedSequences = params.has('selected')
-    ? new Set(
-        params
-          .get('selected')
-          .split(',')
-          .map(Number)
-          .filter((sequence) => Number.isSafeInteger(sequence) && sequence > 0)
-      )
-    : null;
+  const selectedSequences = sequencesFromParams(params, 'selected');
+  const excludedSequences = sequencesFromParams(params, 'excluded');
 
   try {
     const stored = await chrome.storage.local.get(null);
@@ -64,11 +68,13 @@ async function run() {
       .sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
     if (!frames.length && Array.isArray(stored[FRAMES_KEY])) frames.push(...stored[FRAMES_KEY]);
     const includedFrames = selectedSequences
-      ? frames.filter((frame) => selectedSequences.has(frame.sequence))
-      : frames;
+      ? frames.filter((frame) => selectedSequences.has(Number(frame.sequence)))
+      : excludedSequences
+        ? frames.filter((frame) => !excludedSequences.has(Number(frame.sequence)))
+        : frames;
     if (!includedFrames.length) {
       throw new Error(
-        selectedSequences
+        selectedSequences || excludedSequences
           ? 'No selected screenshots are available for the PDF.'
           : 'No frames were captured, so no PDF was written.'
       );

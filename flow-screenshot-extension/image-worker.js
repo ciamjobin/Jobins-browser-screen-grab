@@ -197,7 +197,16 @@ function drawApiTable(ctx, table, top, width) {
   ctx.stroke();
 }
 
-async function processCapture({ dataUrl, stampText, watermarkText, wantPng, wantJpeg, apiRows, titleBar }) {
+async function processCapture({
+  dataUrl,
+  stampText,
+  watermarkText,
+  wantPng,
+  wantJpeg,
+  apiRows,
+  titleBar,
+  jpegQuality
+}) {
   let bitmap;
   let imageCanvas;
   let outputCanvas;
@@ -230,11 +239,12 @@ async function processCapture({ dataUrl, stampText, watermarkText, wantPng, want
     ctx.drawImage(imageCanvas, 0, 0);
     if (table) drawApiTable(ctx, table, imageCanvas.height, outputCanvas.width);
 
+    const quality = Number.isFinite(jpegQuality) ? Math.max(0, Math.min(1, jpegQuality)) : 0.82;
     return {
       pngDataUrl: wantPng ? outputCanvas.toDataURL('image/png') : null,
       jpeg: wantJpeg
         ? {
-            base64: imageCanvas.toDataURL('image/jpeg', 0.82).split(',')[1],
+            base64: imageCanvas.toDataURL('image/jpeg', quality).split(',')[1],
             width: imageCanvas.width,
             height: imageCanvas.height
           }

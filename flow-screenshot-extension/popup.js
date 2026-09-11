@@ -1,5 +1,6 @@
 const statusEl = document.getElementById('status');
 const toggleEl = document.getElementById('toggle');
+const pauseResumeEl = document.getElementById('pauseResume');
 const captureNowEl = document.getElementById('captureNow');
 const captureLaterEl = document.getElementById('captureLater');
 const exportPdfNowEl = document.getElementById('exportPdfNow');
@@ -14,14 +15,25 @@ const shortcutHintEl = document.getElementById('shortcutHint');
 const selectAllCapturesEl = document.getElementById('selectAllCaptures');
 const captureSelectionSummaryEl = document.getElementById('captureSelectionSummary');
 const saveWithNameEl = document.getElementById('saveWithName');
+const fullPageProgressEl = document.getElementById('fullPageProgress');
+const fullPageProgressLabelEl = document.getElementById('fullPageProgressLabel');
+const fullPageProgressPercentEl = document.getElementById('fullPageProgressPercent');
+const fullPageProgressBarEl = document.getElementById('fullPageProgressBar');
+const fullPageProgressTrackEl = fullPageProgressBarEl.parentElement;
+const extensionOnlyButtons = [...document.querySelectorAll('button')];
+const CAPTURE_LIST_PAGE_SIZE = 50;
 
 let awaitingChoice = false;
 let pendingExportOnly = false;
+let standalonePopup = false;
 let selectedCaptureSequences = new Set();
 let knownCaptureSequences = new Set();
 let captureSelectionSessionId = null;
 let currentCaptures = [];
 let currentSettings = {};
+let selectionUpdateChain = Promise.resolve();
+let captureListLimit = CAPTURE_LIST_PAGE_SIZE;
+let renderedCaptureListKey = null;
 
 const controls = {
   captureMode: document.getElementById('captureMode'),
@@ -33,8 +45,43 @@ const controls = {
   savePdf: document.getElementById('savePdf')
 };
 
+function hasExtensionRuntime() {
+  try {
+    return (
+      typeof chrome !== 'undefined' &&
+      typeof chrome.runtime?.id === 'string' &&
+      Boolean(chrome.runtime.id) &&
+      typeof chrome.runtime.sendMessage === 'function'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function showRuntimeError() {
+  statusEl.textContent = standalonePopup
+    ? 'Open JShotz from the browser toolbar after loading the extension.'
+    : 'JShotz is unavailable. Reload the extension, then reopen this popup.';
+  statusEl.className = 'status error';
+}
+
+function showStandalonePopup() {
+  standalonePopup = true;
+  for (const button of extensionOnlyButtons) button.disabled = true;
+  for (const control of Object.values(controls)) control.disabled = true;
+  selectAllCapturesEl.disabled = true;
+  showRuntimeError();
+}
+
 function send(type, payload = {}) {
-  return chrome.runtime.sendMessage({ type, ...payload });
+  if (!hasExtensionRuntime()) {
+    return Promise.reject(new Error('JShotz must run from an installed extension popup.'));
+  }
+  try {
+    return Promise.resolve(chrome.runtime.sendMessage({ type, ...payload }));
+  } catch (error) {
+    return Promise.reject(error);
+  }
 }
 
 function readSettings() {
@@ -55,11 +102,24 @@ function captureSequences(captures = currentCaptures) {
     .filter((sequence) => Number.isSafeInteger(sequence) && sequence > 0);
 }
 
-function syncCaptureSelection(sessionId, captures) {
+function captureListKey(captures) {
+  return captures
+    .map((capture) => [capture.sequence, capture.capturedAt, capture.title, capture.url, capture.reason].join('\u001f'))
+    .join('\u001e');
+}
+
+function syncCaptureSelection(sessionId, captures, excludedSequences = []) {
   const sequences = new Set(captureSequences(captures));
   if (sessionId !== captureSelectionSessionId) {
     captureSelectionSessionId = sessionId;
-    selectedCaptureSequences = new Set(sequences);
+    captureListLimit = CAPTURE_LIST_PAGE_SIZE;
+    renderedCaptureListKey = null;
+    const excluded = new Set(
+      Array.isArray(excludedSequences)
+        ? excludedSequences.filter((sequence) => sequences.has(sequence))
+        : []
+    );
+    selectedCaptureSequences = new Set([...sequences].filter((sequence) => !excluded.has(sequence)));
   } else {
     for (const sequence of sequences) {
       if (!knownCaptureSequences.has(sequence)) selectedCaptureSequences.add(sequence);
@@ -76,6 +136,19 @@ function selectedCaptureSequenceList() {
   return captureSequences().filter((sequence) => selectedCaptureSequences.has(sequence));
 }
 
+function excludedCaptureSequenceList() {
+  return captureSequences().filter((sequence) => !selectedCaptureSequences.has(sequence));
+}
+
+function persistCaptureSelection() {
+  const sessionId = captureSelectionSessionId;
+  if (!sessionId) return;
+  const excludedSequences = excludedCaptureSequenceList();
+  selectionUpdateChain = selectionUpdateChain
+    .catch(() => {})
+    .then(() => send('SET_PDF_EXCLUSIONS', { sessionId, excludedSequences }).catch(() => {}));
+}
+
 function updateCaptureSelectionControls() {
   const total = captureSequences().length;
   const selected = selectedCaptureSequenceList().length;
@@ -89,7 +162,13 @@ function updateCaptureSelectionControls() {
     !filenamePromptEl.hidden && needsSelection && total > 0 && selected === 0;
 }
 
-function renderCaptures(captures) {
+function renderCaptures(captures, force = false) {
+  const renderKey = `${captureListLimit}\u001d${captureListKey(captures)}`;
+  if (!force && renderKey === renderedCaptureListKey) {
+    updateCaptureSelectionControls();
+    return;
+  }
+  renderedCaptureListKey = renderKey;
   captureListEl.replaceChildren();
 
   if (!captures.length) {
@@ -101,8 +180,9 @@ function renderCaptures(captures) {
     return;
   }
 
-  // Newest first, and build nodes with textContent so untrusted page titles can't inject markup.
-  for (const capture of [...captures].reverse()) {
+  const fragment = document.createDocumentFragment();
+  const visibleCaptures = captures.slice(-captureListLimit).reverse();
+  for (const capture of visibleCaptures) {
     const item = document.createElement('li');
 
     const checkbox = document.createElement('input');
@@ -116,6 +196,7 @@ function renderCaptures(captures) {
         selectedCaptureSequences.delete(capture.sequence);
       }
       updateCaptureSelectionControls();
+      persistCaptureSelection();
     });
 
     const title = document.createElement('span');
@@ -131,16 +212,47 @@ function renderCaptures(captures) {
     selection.className = 'capture-select';
     selection.append(checkbox, title);
     item.append(selection, meta);
-    captureListEl.append(item);
+    fragment.append(item);
   }
+
+  const remainingCaptureCount = captures.length - visibleCaptures.length;
+  if (remainingCaptureCount > 0) {
+    const item = document.createElement('li');
+    const reveal = document.createElement('button');
+    const revealCount = Math.min(CAPTURE_LIST_PAGE_SIZE, remainingCaptureCount);
+    reveal.type = 'button';
+    reveal.className = 'capture-more';
+    reveal.textContent = `Show ${revealCount} older screenshot${revealCount === 1 ? '' : 's'}`;
+    reveal.addEventListener('click', () => {
+      captureListLimit = Math.min(currentCaptures.length, captureListLimit + CAPTURE_LIST_PAGE_SIZE);
+      renderCaptures(currentCaptures, true);
+    });
+    item.append(reveal);
+    fragment.append(item);
+  }
+  captureListEl.append(fragment);
   updateCaptureSelectionControls();
+}
+
+function renderFullPageProgress(progress) {
+  const active = Boolean(progress?.active);
+  fullPageProgressEl.hidden = !active;
+  if (!active) return;
+
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  fullPageProgressLabelEl.textContent = progress.label || 'Capturing full page';
+  fullPageProgressPercentEl.textContent = `${percent}%`;
+  fullPageProgressBarEl.style.width = `${percent}%`;
+  fullPageProgressTrackEl.setAttribute('aria-valuenow', String(percent));
 }
 
 function render(state) {
   const recording = Boolean(state?.recording);
+  const paused = recording && Boolean(state?.paused);
   const settings = state?.settings ?? {};
   currentSettings = settings;
-  syncCaptureSelection(state?.sessionId ?? null, state?.captures ?? []);
+  syncCaptureSelection(state?.sessionId ?? null, state?.captures ?? [], state?.pdfExcludedSequences);
+  renderFullPageProgress(state?.fullPageProgress);
 
   // Polling must not steal a control the user is currently interacting with.
   const apply = (control, assign) => {
@@ -160,6 +272,9 @@ function render(state) {
   if (problem) {
     statusEl.textContent = problem;
     statusEl.className = 'status error';
+  } else if (paused) {
+    statusEl.textContent = `Paused \u00b7 ${state.sequence} screenshot(s)`;
+    statusEl.className = 'status paused';
   } else if (recording) {
     const api = settings.captureApi ? ` \u00b7 ${state.apiSeen} API call(s)` : '';
     statusEl.textContent = `Recording \u00b7 ${state.sequence} screenshot(s)${api}`;
@@ -171,8 +286,11 @@ function render(state) {
 
   toggleEl.textContent = recording ? 'Stop recording' : 'Start recording';
   toggleEl.classList.toggle('stop', recording);
-  captureNowEl.disabled = !recording;
-  captureLaterEl.disabled = !recording;
+  pauseResumeEl.hidden = !recording;
+  pauseResumeEl.disabled = !recording;
+  pauseResumeEl.textContent = paused ? 'Continue recording' : 'Pause recording';
+  captureNowEl.disabled = !recording || paused || Boolean(state?.fullPageProgress?.active);
+  captureLaterEl.disabled = !recording || paused;
   exportPdfNowEl.disabled = !recording || !state?.captures?.length;
 
   renderCaptures(currentCaptures);
@@ -180,21 +298,40 @@ function render(state) {
 
 async function refresh() {
   // Polling must not dismiss the keep-or-delete prompt out from under the user.
-  if (awaitingChoice) return;
-  render(await send('GET_STATE').catch(() => null));
+  if (awaitingChoice || standalonePopup) return;
+  try {
+    render(await send('GET_STATE'));
+  } catch {
+    showRuntimeError();
+  }
 }
 
 toggleEl.addEventListener('click', async () => {
+  try {
+    const state = await send('GET_STATE');
+    if (state.recording) {
+      awaitingChoice = true;
+      mainActionsEl.hidden = true;
+      confirmEl.hidden = false;
+      filenamePromptEl.hidden = true;
+      deleteConfirmEl.hidden = true;
+      return;
+    }
+    render(await send('START', { settings: readSettings() }));
+  } catch {
+    showRuntimeError();
+  }
+});
+
+pauseResumeEl.addEventListener('click', async () => {
   const state = await send('GET_STATE');
-  if (state.recording) {
-    awaitingChoice = true;
-    mainActionsEl.hidden = true;
-    confirmEl.hidden = false;
-    filenamePromptEl.hidden = true;
-    deleteConfirmEl.hidden = true;
+  if (!state.recording) {
+    render(state);
     return;
   }
-  render(await send('START', { settings: readSettings() }));
+  pauseResumeEl.disabled = true;
+  render(await send('SET_PAUSED', { paused: !state.paused }));
+  pauseResumeEl.disabled = false;
 });
 
 async function finishRecording(keepFiles, pdfFilename) {
@@ -209,7 +346,7 @@ async function finishRecording(keepFiles, pdfFilename) {
     : 'Deleting captured files\u2026';
   const payload = { keepFiles, pdfFilename };
   if (keepFiles && currentSettings.savePdf !== false) {
-    payload.selectedSequences = selectedCaptureSequenceList();
+    payload.excludedSequences = excludedCaptureSequenceList();
   }
   render(await send('STOP', payload));
   toggleEl.disabled = false;
@@ -222,7 +359,7 @@ async function exportPdfNow(pdfFilename) {
   statusEl.textContent = 'Writing checkpoint PDF\u2026';
   render(await send('EXPORT_PDF_NOW', {
     pdfFilename,
-    selectedSequences: selectedCaptureSequenceList()
+    excludedSequences: excludedCaptureSequenceList()
   }));
 }
 
@@ -295,7 +432,8 @@ selectAllCapturesEl.addEventListener('change', () => {
   selectedCaptureSequences = selectAllCapturesEl.checked
     ? new Set(captureSequences())
     : new Set();
-  renderCaptures(currentCaptures);
+  renderCaptures(currentCaptures, true);
+  persistCaptureSelection();
 });
 
 // The popup closes as soon as focus moves to DevTools, so the countdown lives in the background.
@@ -308,10 +446,15 @@ captureLaterEl.addEventListener('click', async () => {
 for (const control of Object.values(controls)) {
   control.addEventListener('change', () => {
     shortcutHintEl.hidden = controls.captureMode.value !== 'screen';
-    send('SET_SETTINGS', { settings: readSettings() });
+    send('SET_SETTINGS', { settings: readSettings() }).catch(showRuntimeError);
   });
 }
 
 // Chrome closes the popup when the share picker opens, so re-sync on open and while visible.
-refresh();
-setInterval(refresh, 1000);
+render(null);
+if (hasExtensionRuntime()) {
+  refresh();
+  setInterval(refresh, 1000);
+} else {
+  showStandalonePopup();
+}

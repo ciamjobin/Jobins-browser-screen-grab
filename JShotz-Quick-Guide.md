@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.12.0**
+**Version 3.13.6**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF — handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -9,7 +9,8 @@ documenting a process, a support case, or a step-by-step walkthrough.
 
 ## Getting started
 
-1. Click the JShotz icon in your toolbar.
+1. Load JShotz as a browser extension, then click the JShotz icon in your toolbar. Do not open
+   `popup.html` directly from its folder; it needs the browser extension runtime to record.
 2. Choose a **Capture source**:
    - **Tab viewport only** — screenshots of the page you're on.
    - **API + Screenshot** — same, plus a table of the page's network calls under each shot.
@@ -17,7 +18,9 @@ documenting a process, a support case, or a step-by-step walkthrough.
      can show DevTools or other apps).
 3. Click **Start recording**.
 4. Use the page normally — screenshots are taken automatically as you click and scroll.
-5. Clear unwanted frames in the **Screenshots** list, then click **Stop recording**, choose
+5. To take a break without ending the session, click **Pause recording**. It becomes
+   **Continue recording**; continuing keeps the same screenshots, numbering, and session folder.
+6. Clear unwanted frames in the **Screenshots** list, then click **Stop recording**, choose
    **Yes, keep**, and pick a PDF name. The PDF includes only the screenshots still checked;
    your original PNGs are kept in the session folder.
 
@@ -50,11 +53,15 @@ error card after reopening the tab.
 
 Turn on **"Whole-page shot for Ctrl+Alt+Q and Capture now"** in settings, then use one of those
 two actions (or Capture in 5s) to capture the *entire* page — including everything below the
-fold — without scrolling your screen. Everyday automatic captures (clicks, scrolling) are left
-as normal single-screen shots so your view is never disturbed.
+fold — without enlarging or reflowing the page. Everyday automatic captures (clicks, scrolling)
+are left as normal single-screen shots so your view is never disturbed.
 
-You may see a brief flicker, and Chrome may show a "started debugging this browser" banner for
-a moment — both are expected and clear on their own.
+Very long pages are saved as adjacent, numbered parts instead of one oversized image; the parts
+remain in order when you export the PDF. A progress bar appears in the popup and on the page while
+the whole-page capture is running, then disappears when it finishes.
+
+For ordinary documents, Chrome may show a "started debugging this browser" banner for a moment.
+That browser notice clears on its own; JShotz does not resize the page to take the capture.
 
 ---
 
@@ -70,7 +77,8 @@ the screenshots selected at that time.
 
 Every screenshot in the **Screenshots** list starts checked. Clear the checkbox beside any frame
 you do not want in the PDF. **Select all** is checked while every frame is included and clears
-when any individual frame is removed.
+when any individual frame is removed. The choice remains for the current recording if the popup
+closes and is reopened.
 
 The same selection list appears after choosing a folder in **Create PDF from saved screenshots**.
 Only the checked PNG or JPEG files are included in that PDF.
@@ -93,7 +101,8 @@ troubleshooting if something needs a closer look.
 ## Multiple tabs
 
 If the page you're recording opens a new tab (like a sign-in redirect), JShotz follows it
-automatically. Switching back and forth between tabs keeps capturing wherever you are.
+automatically. Switching back and forth between tabs keeps capturing wherever you are. Pausing
+does not remove those tracked tabs or child windows, so continuing follows the same browser flow.
 
 ---
 

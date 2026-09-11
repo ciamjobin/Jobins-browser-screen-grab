@@ -9,6 +9,16 @@
 
     <p id="status" class="status idle">Idle</p>
 
+    <div id="fullPageProgress" class="full-page-progress" hidden aria-live="polite">
+      <div class="full-page-progress-heading">
+        <span id="fullPageProgressLabel">Preparing full-page screenshot</span>
+        <span id="fullPageProgressPercent">0%</span>
+      </div>
+      <div class="full-page-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <span id="fullPageProgressBar"></span>
+      </div>
+    </div>
+
     <div class="settings">
       <label class="field mode-switch">
         <span>Capture source (can be changed mid-recording)</span>
@@ -31,16 +41,17 @@
         can be assigned at extensions/shortcuts.
       </p>
 
-      <label class="check"><input type="checkbox" id="captureOnClick" /> Capture on every button click</label>
-      <label class="check"><input type="checkbox" id="captureOnScroll" /> Capture every 60% of a screen scrolled, and at the end</label>
-      <label class="check"><input type="checkbox" id="stampTimestamp" /> Stamp clock + time zone on each shot</label>
-      <label class="check"><input type="checkbox" id="fullPage" /> Whole-page shot for Ctrl+Alt+Q and "Capture now" only</label>
-      <label class="check"><input type="checkbox" id="savePng" /> Save individual PNG files</label>
-      <label class="check"><input type="checkbox" id="savePdf" /> Save PDF on stop (page title as heading)</label>
+      <label class="check"><input type="checkbox" id="captureOnClick" checked /> Capture on every button click</label>
+      <label class="check"><input type="checkbox" id="captureOnScroll" checked /> Capture every 60% of a screen scrolled, and at the end</label>
+      <label class="check"><input type="checkbox" id="stampTimestamp" checked /> Stamp clock + time zone on each shot</label>
+      <label class="check"><input type="checkbox" id="fullPage" checked /> Whole-page shot for Ctrl+Alt+Q and "Capture now" only</label>
+      <label class="check"><input type="checkbox" id="savePng" checked /> Save individual PNG files</label>
+      <label class="check"><input type="checkbox" id="savePdf" checked /> Save PDF on stop (page title as heading)</label>
     </div>
 
     <div class="actions" id="mainActions">
       <button id="toggle" class="primary">Start recording</button>
+      <button id="pauseResume" hidden>Pause recording</button>
       <button id="captureNow" disabled>Capture now</button>
       <button id="captureLater" disabled>Capture in 5s</button>
       <button id="exportPdfNow" disabled>Export PDF so far</button>

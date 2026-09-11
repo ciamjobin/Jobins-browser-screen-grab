@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.12.0**
+**Version 3.13.6**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as a
 sequence of timestamped, watermarked screenshots and exports them as a PDF, with an optional
@@ -12,14 +12,14 @@ tickets, and step-by-step evidence of what happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.12.0-chrome-edge.zip`.
+1. Unzip `JShotz-3.13.6-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.12.0-firefox.zip`.
+1. Unzip `JShotz-3.13.6-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -40,12 +40,17 @@ indicate a problem with a newly opened or refreshed recording page.
 
 Click the JShotz icon to open the popup. It has three parts:
 
-- **Status line** — shows *Idle*, *Recording · N screenshot(s)*, or an error message.
+- **Status line** — shows *Idle*, *Recording · N screenshot(s)*, *Paused · N screenshot(s)*,
+  or an error message.
 - **Settings** — capture source and behavior options (locked once recording starts, except the
   capture source, which can be changed mid-recording).
-- **Actions** — Start/Stop, Capture now, Capture in 5s, Export PDF so far.
+- **Actions** — Start/Stop, Pause/Continue, Capture now, Capture in 5s, Export PDF so far.
 - **Screenshots list** — a live list of what's been captured so far in the current session and
   checkboxes that choose the screenshots included in a PDF.
+
+Open this popup from the browser toolbar after loading JShotz as an extension. Opening
+`popup.html` directly from its source folder cannot start a recording because browser extension
+APIs are unavailable there.
 
 ---
 
@@ -90,9 +95,14 @@ window), the recording automatically falls back to Tab-viewport captures rather 
    it automatically — that tab is brought to the front and becomes part of the recording.
    Switching back to the original tab (or to any other tab that flow has opened) resumes
    capturing from wherever you actually are.
-4. When you're done, click **Stop recording**. Use the **Screenshots** list to clear any frames
+4. To temporarily suspend screenshots without ending the session, click **Pause recording**.
+  The button changes to **Continue recording**. While paused, JShotz keeps the screenshot list,
+  PDF selections, capture numbering, session folder, and tracked tabs or child windows. Click
+  **Continue recording** to add subsequent screenshots to that same session.
+5. When you're done, click **Stop recording**. Use the **Screenshots** list to clear any frames
    you do not want in the PDF. **Select all** starts checked and automatically clears when any
-   individual screenshot is unchecked. You'll then be asked whether to keep the files:
+  individual screenshot is unchecked. This choice remains for the current recording if the popup
+  closes and is reopened. You'll then be asked whether to keep the files:
    - **Yes, keep** — prompts for a PDF file name, then saves all PNGs and the manifest to your
      Downloads folder. The PDF contains only the screenshots that remain checked, and the folder
      opens when the export finishes.
@@ -137,18 +147,22 @@ Everything else (clicks, scrolling, field edits, navigation) stays as ordinary v
 so your view is never disturbed by the automatic captures.
 
 **How it works, and what to expect:**
-- For a page whose content naturally extends below the viewport, the browser briefly resizes
-  its internal layout to render everything, takes one shot, then restores it — you may see a
-  very brief flicker.
+- For a page whose content naturally extends below the viewport, Chromium rasterizes the document
+  beyond its existing viewport. JShotz does not enlarge or reflow the page to render the shot.
 - For an "app-shell" style page (a fixed header/sidebar with an inner scrolling panel), JShotz
-  scrolls just that inner panel and stitches the results — this doesn't touch your window size
-  at all.
+  scrolls just that inner panel, then returns the panel to its original position. The surrounding
+  page layout stays in place.
+- Long captures are split into sequential, bounded **part N of M** screenshots at one shared
+  scale. Adjacent parts preserve the full page without a giant image, and are exported as
+  consecutive PDF pages. Compact captures crop unneeded blank canvas conservatively.
+- A progress bar appears in the popup and on the page while the capture runs. It is hidden before
+  each screenshot and removed when capture completes.
 - If DevTools is already open on the tab, whole-page capture is skipped for that shot (DevTools
   and the extension can't share the same debugging connection) and a normal single-frame
   screenshot is taken instead.
-- Chrome shows a **"started debugging this browser"** banner for the brief moment a whole-page
-  capture is in progress. This is a hard Chrome platform notice with no way to hide it — it
-  disappears again immediately after each shot.
+- Chrome may show a **"started debugging this browser"** banner for an ordinary-document capture.
+  This is a hard Chrome platform notice with no way to hide it; it disappears immediately after
+  the shot. App-shell stitch capture does not attach the debugger.
 
 ---
 
@@ -181,6 +195,9 @@ Downloads/
       debug-log.txt             (diagnostic log, see below)
 ```
 
+    Pausing does not create another folder. When you click **Continue recording**, new screenshots
+    keep the next number and are written beside the screenshots already shown in the list.
+
 ---
 
 ## 9. The debug log
@@ -201,8 +218,8 @@ available afterward if something needs investigating.
 - The "started debugging this browser" banner during whole-page captures cannot be hidden —
   this is a Chrome security notice, not a bug.
 - Whole-page capture is skipped while DevTools is open on the recorded tab.
-- Multi-tab following works for the current session only; it doesn't persist across a browser
-  restart or an unlikely mid-session extension reload.
+- Multi-tab and child-window following remains active while a session is paused and when the
+  background service worker restarts.
 - A horizontally-scrolling element on a page (e.g. a carousel) is captured exactly as it
   appears at the time — whole-page capture only extends vertically.
 - Reloading or updating JShotz requires refreshing any already-open recording tabs before use.

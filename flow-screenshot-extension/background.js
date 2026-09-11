@@ -1,4 +1,7 @@
 const STATE_KEY = 'flowRecorderState';
+const PDF_EXCLUSIONS_KEY = 'flowRecorderPdfExcludedSequences';
+const SESSION_CONTROL_KEY = 'flowRecorderSessionControl';
+const SESSION_TRACKING_KEY = 'flowRecorderSessionTracking';
 const FRAMES_KEY = 'flowRecorderFrames';
 const FRAME_PREFIX = `${FRAMES_KEY}:`;
 const OFFSCREEN_PATH = 'offscreen.html';
@@ -60,16 +63,22 @@ async function writeLogFile() {
 
 const defaultState = {
   recording: false,
+  paused: false,
+  captureGeneration: 0,
   tabId: null,
   windowId: null,
   sessionId: null,
   sequence: 0,
   captures: [],
+  pdfExcludedSequences: [],
+  trackedTabIds: [],
+  trackedWindowIds: [],
   downloadIds: [],
   apiSeen: 0,
   apiHookReady: false,
   streamActive: false,
   screenWindowId: null,
+  fullPageProgress: null,
   lastError: null,
   settings: {
     // 'tab' = viewport only, 'api' = viewport + API table, 'screen' = desktop stream (DevTools/taskbar)
@@ -85,16 +94,126 @@ const defaultState = {
 };
 
 async function getState() {
-  const stored = await chrome.storage.local.get(STATE_KEY);
+  const stored = await chrome.storage.local.get([
+    STATE_KEY,
+    PDF_EXCLUSIONS_KEY,
+    SESSION_CONTROL_KEY,
+    SESSION_TRACKING_KEY
+  ]);
   const state = stored[STATE_KEY] || {};
-  return { ...defaultState, ...state, settings: { ...defaultState.settings, ...state.settings } };
+  const selection = stored[PDF_EXCLUSIONS_KEY];
+  const control = stored[SESSION_CONTROL_KEY];
+  const tracking = stored[SESSION_TRACKING_KEY];
+  const hasCurrentSessionRecord = (record) => Boolean(state.sessionId) && record?.sessionId === state.sessionId;
+  const pdfExcludedSequences = hasCurrentSessionRecord(selection)
+    ? normalizeSequenceList(selection.sequences)
+    : [];
+  const hasCurrentControl = hasCurrentSessionRecord(control);
+  const hasCurrentTracking = hasCurrentSessionRecord(tracking);
+  const trackedTabIds = hasCurrentTracking
+    ? normalizeIdList(tracking.tabIds)
+    : normalizeIdList([state.tabId]);
+  const trackedWindowIds = hasCurrentTracking
+    ? normalizeIdList(tracking.windowIds)
+    : normalizeIdList([state.windowId]);
+  return {
+    ...defaultState,
+    ...state,
+    pdfExcludedSequences,
+    paused: hasCurrentControl ? Boolean(control.paused) : false,
+    captureGeneration: hasCurrentControl ? normalizeCaptureGeneration(control.captureGeneration) : 0,
+    trackedTabIds,
+    trackedWindowIds,
+    settings: { ...defaultState.settings, ...state.settings }
+  };
 }
 
 async function setState(patch) {
   const current = await getState();
   const next = { ...current, ...patch, settings: { ...current.settings, ...patch.settings } };
-  await chrome.storage.local.set({ [STATE_KEY]: next });
+  const storedState = { ...next };
+  delete storedState.pdfExcludedSequences;
+  delete storedState.paused;
+  delete storedState.captureGeneration;
+  delete storedState.trackedTabIds;
+  delete storedState.trackedWindowIds;
+  await chrome.storage.local.set({ [STATE_KEY]: storedState });
   return next;
+}
+
+function normalizeIdList(values) {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.filter((value) => Number.isSafeInteger(value) && value > 0))];
+}
+
+function normalizeSequenceList(sequences) {
+  return normalizeIdList(sequences);
+}
+
+function normalizeCaptureGeneration(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+let trackingUpdateChain = Promise.resolve();
+
+function replaceSessionTracking(sessionId, tabIds, windowIds) {
+  trackingUpdateChain = trackingUpdateChain
+    .catch(() => {})
+    .then(() =>
+      chrome.storage.local.set({
+        [SESSION_TRACKING_KEY]: {
+          sessionId,
+          tabIds: normalizeIdList(tabIds),
+          windowIds: normalizeIdList(windowIds)
+        }
+      })
+    );
+  return trackingUpdateChain;
+}
+
+function updateSessionTracking(sessionId, update) {
+  trackingUpdateChain = trackingUpdateChain
+    .catch(() => {})
+    .then(async () => {
+      const stored = await chrome.storage.local.get(SESSION_TRACKING_KEY);
+      const current = stored[SESSION_TRACKING_KEY];
+      if (current?.sessionId !== sessionId) return null;
+      const next = update({
+        tabIds: normalizeIdList(current.tabIds),
+        windowIds: normalizeIdList(current.windowIds)
+      });
+      const tracking = {
+        sessionId,
+        tabIds: normalizeIdList(next.tabIds),
+        windowIds: normalizeIdList(next.windowIds)
+      };
+      await chrome.storage.local.set({ [SESSION_TRACKING_KEY]: tracking });
+      return tracking;
+    });
+  return trackingUpdateChain;
+}
+
+function clearSessionTracking() {
+  trackingUpdateChain = trackingUpdateChain
+    .catch(() => {})
+    .then(() => chrome.storage.local.remove(SESSION_TRACKING_KEY));
+  return trackingUpdateChain;
+}
+
+function trackSessionTab(state, tab) {
+  if (!state.sessionId || !Number.isSafeInteger(tab?.id)) return Promise.resolve();
+  return updateSessionTracking(state.sessionId, (tracking) => ({
+    tabIds: [...tracking.tabIds, tab.id],
+    windowIds: [...tracking.windowIds, tab.windowId]
+  }));
+}
+
+function untrackSessionTab(state, tabId) {
+  if (!state.sessionId) return Promise.resolve();
+  return updateSessionTracking(state.sessionId, (tracking) => ({
+    tabIds: tracking.tabIds.filter((trackedTabId) => trackedTabId !== tabId),
+    windowIds: tracking.windowIds
+  }));
 }
 
 function sanitize(value, maxLength = 60) {
@@ -208,8 +327,9 @@ async function setDownloadUi(enabled) {
 }
 
 async function updateBadge(state) {
-  await chrome.action.setBadgeBackgroundColor({ color: state.recording ? '#c62828' : '#455a64' });
-  await chrome.action.setBadgeText({ text: state.recording ? String(state.sequence) : '' });
+  const paused = state.recording && state.paused;
+  await chrome.action.setBadgeBackgroundColor({ color: paused ? '#f9a825' : state.recording ? '#c62828' : '#455a64' });
+  await chrome.action.setBadgeText({ text: paused ? '||' : state.recording ? String(state.sequence) : '' });
 }
 
 /* ---------------------------------------------------------------- offscreen */
@@ -333,28 +453,37 @@ async function openScreenWindow() {
 /* ------------------------------------------------------------------ capture */
 
 const CAPTURE_QUEUE_WATCHDOG_MS = 20000;
+const FULL_PAGE_CAPTURE_QUEUE_WATCHDOG_MS = 330000;
 
 // However a single capture fails or hangs, the queue must keep moving - otherwise every capture
 // requested after it (including the popup's own "Capture now" / "Capture in 5s" buttons) would wait
 // behind a promise that never settles, which looks exactly like the extension has stopped responding.
 const QUEUE_WATCHDOG_TOKEN = Symbol('queue-watchdog-timeout');
-async function captureNow(reason, label) {
+async function captureNow(reason, label, requestedState) {
+  const captureRequest = requestedState || (await getState());
+  const captureWatchdogMs =
+    captureRequest.settings?.fullPage && FULL_PAGE_REASONS.has(reason)
+      ? FULL_PAGE_CAPTURE_QUEUE_WATCHDOG_MS
+      : CAPTURE_QUEUE_WATCHDOG_MS;
   captureChain = captureChain
     .then(async () => {
       const result = await Promise.race([
-        performCapture(reason, label),
-        new Promise((resolve) => setTimeout(() => resolve(QUEUE_WATCHDOG_TOKEN), CAPTURE_QUEUE_WATCHDOG_MS))
+        performCapture(reason, label, captureRequest.sessionId, captureRequest.captureGeneration),
+        new Promise((resolve) => setTimeout(() => resolve(QUEUE_WATCHDOG_TOKEN), captureWatchdogMs))
       ]);
       if (result === QUEUE_WATCHDOG_TOKEN) {
         logLine(
-          `QUEUE_WATCHDOG ${reason}${label ? ` "${label}"` : ''} exceeded ${CAPTURE_QUEUE_WATCHDOG_MS}ms, moving on`
+          `QUEUE_WATCHDOG ${reason}${label ? ` "${label}"` : ''} exceeded ${captureWatchdogMs}ms, moving on`
         );
+        await clearFullPageProgress(captureRequest.tabId);
       }
     })
     .catch(async (error) => {
       logLine(`ERROR ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
       await writeLogFile().catch(() => {});
       console.error('Capture failed:', error);
+      const state = await getState();
+      await clearFullPageProgress(state.tabId);
       await setState({ lastError: `Capture failed: ${error.message}` });
     });
   return captureChain;
@@ -362,13 +491,14 @@ async function captureNow(reason, label) {
 
 // Shows an on-page countdown so the user can see exactly when the delayed shot will fire, then
 // takes it. The badge lives in the page itself since the popup that requested this has closed.
-function scheduleDelayedCapture(tabId) {
+async function scheduleDelayedCapture(tabId, requestedState) {
+  const captureRequest = requestedState || (await getState());
   if (typeof tabId === 'number') {
     chrome.tabs.sendMessage(tabId, { type: 'SHOW_COUNTDOWN', seconds: CAPTURE_COUNTDOWN_MS / 1000 }).catch(() => {
       /* No content script on this page (chrome://, Web Store); the capture still fires on time. */
     });
   }
-  delay(CAPTURE_COUNTDOWN_MS).then(() => captureNow('devtools-panel'));
+  delay(CAPTURE_COUNTDOWN_MS).then(() => captureNow('devtools-panel', undefined, captureRequest));
 }
 
 // "Failed to capture tab: image readback failed" is a transient compositor/GPU error - the frame
@@ -403,18 +533,24 @@ async function grabPngDataUrl(state, tab) {
 /* ----------------------------------------------------------- full page */
 
 const HAS_DEBUGGER = typeof chrome.debugger !== 'undefined';
-const FULL_PAGE_MAX_HEIGHT = 12000;
-const FULL_PAGE_WATCHDOG_MS = 9000;
-const SCROLLER_MAX_FRAMES = 10;
-const FULL_PAGE_GROW_ROUNDS = 4;
-const FULL_PAGE_RELAYOUT_MS = 450;
-const FULL_PAGE_RELAYOUT_MAX_MS = 1400;
+const FULL_PAGE_WATCHDOG_MS = 75000;
+const FULL_PAGE_SCROLLER_WATCHDOG_MAX_MS = 300000;
+const FULL_PAGE_SCROLLER_FRAME_ESTIMATE_MS = 1200;
+const FULL_PAGE_SCROLLER_WATCHDOG_OVERHEAD_MS = 30000;
+const SCROLLER_FRAME_OVERLAP = 150;
 const FULL_PAGE_IMAGE_POLLS = 6;
 const FULL_PAGE_IMAGE_POLL_MS = 250;
-// Chromium refuses a single shot past its texture limit, so step down until one is accepted.
-const FULL_PAGE_RETRY_HEIGHTS = [16384, 12000, 8192];
+const FULL_PAGE_LAYOUT_ATTEMPTS = 2;
+const FULL_PAGE_LAYOUT_POLL_MS = 250;
+const FULL_PAGE_LAYOUT_STABLE_POLLS = 2;
+const FULL_PAGE_SINGLE_IMAGE_MAX_PIXELS = 10000000;
+const FULL_PAGE_PART_MAX_PIXELS = 8000000;
+const FULL_PAGE_PART_MAX_DIMENSION = 8192;
+const FULL_PAGE_BASE_TILE_HEIGHT = 3000;
+const FULL_PAGE_PREFERRED_MAX_PARTS = 8;
+const FULL_PAGE_TILE_JPEG_QUALITY = 94;
 const SCROLLER_SETTLE_MAX_MS = 600;
-// Growing the viewport visibly reflows the page, so it happens only when the user asks for it.
+// Full-document work is deliberately limited to manual capture actions.
 const FULL_PAGE_REASONS = new Set(['manual-hotkey', 'manual']);
 let debuggerTabId = null;
 
@@ -490,9 +626,11 @@ async function measureDocument(tabId) {
       const de = document.documentElement;
       const b = document.body;
       const docHeight = Math.max(de.scrollHeight, de.offsetHeight, b?.scrollHeight || 0, b?.offsetHeight || 0);
+      const docWidth = Math.max(de.scrollWidth, de.offsetWidth, b?.scrollWidth || 0, b?.offsetWidth || 0, innerWidth);
       return {
-        width: innerWidth,
+        width: Math.ceil(docWidth),
         viewportHeight: innerHeight,
+        dpr: window.devicePixelRatio || 1,
         scrollX: window.scrollX,
         scrollY: window.scrollY,
         docHeight: Math.ceil(docHeight)
@@ -568,8 +706,10 @@ async function hideScrollbars(tabId) {
         const style = document.createElement('style');
         style.id = styleId;
         style.textContent =
-          '* { scrollbar-width: none !important; -ms-overflow-style: none !important; }' +
-          '*::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }';
+          '* { scrollbar-color: transparent transparent !important; }' +
+          '*::-webkit-scrollbar { background: transparent !important; }' +
+          '*::-webkit-scrollbar-thumb { background: transparent !important; border-color: transparent !important; }' +
+          '*::-webkit-scrollbar-corner { background: transparent !important; }';
         document.documentElement.appendChild(style);
       }
     })
@@ -614,7 +754,7 @@ async function scrollScrollerTo(tabId, markAttr, top) {
   return injected?.result || { ok: false, scrollTop: top };
 }
 
-// Growing the viewport starts every lazy image at once; capturing before they land leaves holes.
+// Let images already loading settle before rasterizing or stitching the document.
 async function waitForImages(tabId) {
   for (let poll = 0; poll < FULL_PAGE_IMAGE_POLLS; poll += 1) {
     const [injected] = await chrome.scripting
@@ -629,9 +769,14 @@ async function waitForImages(tabId) {
   }
 }
 
-const BLANK_TAIL_TOLERANCE = 10;
-const BLANK_TAIL_ROW_MATCH_RATIO = 0.97;
-const BLANK_TAIL_SCAN_CHUNK_ROWS = 256;
+const BLANK_MARGIN_TOLERANCE = 10;
+const BLANK_MARGIN_ROW_MATCH_RATIO = 0.97;
+const BLANK_MARGIN_COLUMN_MATCH_RATIO = 0.995;
+const BLANK_MARGIN_SCAN_CHUNK_ROWS = 256;
+const BLANK_MARGIN_SCAN_CHUNK_COLUMNS = 64;
+const BLANK_MARGIN_MIN_PADDING = 16;
+const BLANK_MARGIN_MAX_PADDING = 48;
+const BLANK_MARGIN_MIN_CONTENT_SIZE = 32;
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -643,287 +788,613 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-// A requested height is a DOM measurement and can overshoot what actually renders, leaving a flat
-// trailing band of background colour under the very last real content. Only that trailing band is
-// removed - collapsing blank-looking bands in the middle of the page was tried and reverted, because
-// a sparse row (a single checkbox plus a short label, for instance) can look "blank enough" to a
-// column-sampled colour check and get removed even though it is genuine content.
-async function trimBlankTail(dataUrl) {
+function cropBlankMargins(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const { width, height } = canvas;
+  if (!width || !height) return null;
+
+  const rowSampleStep = Math.max(1, Math.floor(width / 300));
+  const samplesPerRow = Math.ceil(width / rowSampleStep);
+  const reference = ctx.getImageData(width - 1, height - 1, 1, 1).data;
+  const matchesReference = (data, i) =>
+    Math.abs(data[i] - reference[0]) <= BLANK_MARGIN_TOLERANCE &&
+    Math.abs(data[i + 1] - reference[1]) <= BLANK_MARGIN_TOLERANCE &&
+    Math.abs(data[i + 2] - reference[2]) <= BLANK_MARGIN_TOLERANCE;
+
+  let contentEnd = height;
+  for (let bottom = height; bottom > 0; bottom -= BLANK_MARGIN_SCAN_CHUNK_ROWS) {
+    const top = Math.max(0, bottom - BLANK_MARGIN_SCAN_CHUNK_ROWS);
+    const { data } = ctx.getImageData(0, top, width, bottom - top);
+    let stop = false;
+    for (let row = bottom - top - 1; row >= 0; row -= 1) {
+      const rowStart = row * width * 4;
+      let mismatches = 0;
+      for (let x = 0; x < width; x += rowSampleStep) {
+        const i = rowStart + x * 4;
+        if (!matchesReference(data, i)) mismatches += 1;
+      }
+      if (mismatches > samplesPerRow * (1 - BLANK_MARGIN_ROW_MATCH_RATIO)) {
+        contentEnd = top + row + 1;
+        stop = true;
+        break;
+      }
+    }
+    if (stop) break;
+    contentEnd = top;
+  }
+
+  const scanHeight = Math.max(0, contentEnd);
+  const columnSampleStep = Math.max(1, Math.floor(scanHeight / 600));
+  const samplesPerColumn = Math.ceil(scanHeight / columnSampleStep);
+  let contentRight = width;
+  for (let right = width; right > 0 && scanHeight; right -= BLANK_MARGIN_SCAN_CHUNK_COLUMNS) {
+    const left = Math.max(0, right - BLANK_MARGIN_SCAN_CHUNK_COLUMNS);
+    const blockWidth = right - left;
+    const { data } = ctx.getImageData(left, 0, blockWidth, scanHeight);
+    let stop = false;
+    for (let column = blockWidth - 1; column >= 0; column -= 1) {
+      let mismatches = 0;
+      for (let y = 0; y < scanHeight; y += columnSampleStep) {
+        const i = (y * blockWidth + column) * 4;
+        if (!matchesReference(data, i)) mismatches += 1;
+      }
+      if (mismatches > samplesPerColumn * (1 - BLANK_MARGIN_COLUMN_MATCH_RATIO)) {
+        contentRight = left + column + 1;
+        stop = true;
+        break;
+      }
+      contentRight = left + column;
+    }
+    if (stop) break;
+  }
+
+  if (contentEnd < BLANK_MARGIN_MIN_CONTENT_SIZE || contentRight < BLANK_MARGIN_MIN_CONTENT_SIZE) return null;
+  const padding = Math.max(
+    BLANK_MARGIN_MIN_PADDING,
+    Math.min(BLANK_MARGIN_MAX_PADDING, Math.round(Math.min(width, height) / 50))
+  );
+  const cropWidth = Math.min(width, contentRight + padding);
+  const cropHeight = Math.min(height, contentEnd + padding);
+  if (cropWidth === width && cropHeight === height) return null;
+
+  const cropped = new OffscreenCanvas(cropWidth, cropHeight);
+  cropped.getContext('2d').drawImage(canvas, 0, 0, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+  return cropped;
+}
+
+async function canvasToDataUrl(canvas, type = 'image/png', quality) {
+  const buffer = await (await canvas.convertToBlob({ type, quality })).arrayBuffer();
+  return `data:${type};base64,${arrayBufferToBase64(buffer)}`;
+}
+
+async function trimBlankMargins(dataUrl) {
   let bitmap;
+  let canvas;
+  let cropped;
   try {
     bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(bitmap, 0, 0);
-
-    const { width, height } = canvas;
-    const sampleStep = Math.max(2, Math.floor(width / 300)) * 4;
-    const samplesPerRow = Math.ceil((width * 4) / sampleStep);
-    const reference = ctx.getImageData(width - 1, height - 1, 1, 1).data;
-    const matchesReference = (data, i) =>
-      Math.abs(data[i] - reference[0]) <= BLANK_TAIL_TOLERANCE &&
-      Math.abs(data[i + 1] - reference[1]) <= BLANK_TAIL_TOLERANCE &&
-      Math.abs(data[i + 2] - reference[2]) <= BLANK_TAIL_TOLERANCE;
-
-    // Accepting a small fraction of mismatched samples per row means a stray divider line or
-    // anti-aliased edge cannot halt the scan one row too early.
-    let contentEnd = height;
-    for (let bottom = height; bottom > 0; bottom -= BLANK_TAIL_SCAN_CHUNK_ROWS) {
-      const top = Math.max(0, bottom - BLANK_TAIL_SCAN_CHUNK_ROWS);
-      const { data } = ctx.getImageData(0, top, width, bottom - top);
-      let stop = false;
-      for (let row = bottom - top - 1; row >= 0; row -= 1) {
-        const rowStart = row * width * 4;
-        let mismatches = 0;
-        for (let i = rowStart; i < rowStart + width * 4; i += sampleStep) {
-          if (!matchesReference(data, i)) mismatches += 1;
-        }
-        if (mismatches > samplesPerRow * (1 - BLANK_TAIL_ROW_MATCH_RATIO)) {
-          contentEnd = top + row + 1;
-          stop = true;
-          break;
-        }
-      }
-      if (stop) break;
-      contentEnd = top;
-    }
-
-    // If the very last pixel happens to match the page's own content colour (a solid-colour footer
-    // background, for instance) rather than genuine blank space, every row above can look "blank" by
-    // comparison and the whole image would be wiped out. A real trailing gap is realistically a
-    // modest fraction of the page, so refuse to trust a result that removes most of it.
-    if (contentEnd >= height || contentEnd < height * 0.5) return dataUrl;
-
-    const cropped = new OffscreenCanvas(width, contentEnd);
-    cropped.getContext('2d').drawImage(canvas, 0, 0);
-    const buffer = await (await cropped.convertToBlob({ type: 'image/png' })).arrayBuffer();
-    return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+    canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    canvas.getContext('2d', { willReadFrequently: true }).drawImage(bitmap, 0, 0);
+    cropped = cropBlankMargins(canvas);
+    return cropped ? await canvasToDataUrl(cropped) : dataUrl;
   } catch (error) {
     console.warn('Could not trim blank space, using the capture as-is:', error.message);
     return dataUrl;
   } finally {
     bitmap?.close();
+    if (cropped) {
+      cropped.width = 1;
+      cropped.height = 1;
+    }
+    if (canvas) {
+      canvas.width = 1;
+      canvas.height = 1;
+    }
   }
 }
 
-async function setViewportHeight(tabId, width, height) {
-  await chrome.debugger.sendCommand({ tabId }, 'Emulation.setDeviceMetricsOverride', {
-    width,
-    height,
-    deviceScaleFactor: 0,
-    mobile: false
-  });
-  // A tall page has proportionally more to lay out and more lazy content to trigger.
-  await delay(Math.min(FULL_PAGE_RELAYOUT_MS + height / 20, FULL_PAGE_RELAYOUT_MAX_MS));
+function documentTiles(height, tileHeight) {
+  const tiles = [];
+  for (let top = 0; top < height; top += tileHeight) {
+    tiles.push({ top, height: Math.min(tileHeight, height - top) });
+  }
+  return tiles;
 }
 
-// A plain document is already laid out at its full scrollable height in the common case, but pages
-// that lazy-load content as it enters the viewport only have real content up to where the user has
-// actually scrolled - growing the viewport (not scrolling it) brings the rest into view so it loads,
-// at the cost of a brief, momentary layout change while the shot is taken.
-async function captureDocumentHeadless(tabId, scrollX, scrollY, width, height) {
+function maximumDocumentPartScale(width, height, dpr) {
+  const rasterWidth = Math.max(1, width * dpr);
+  const rasterHeight = Math.max(1, height * dpr);
+  return Math.min(
+    1,
+    FULL_PAGE_PART_MAX_DIMENSION / rasterWidth,
+    FULL_PAGE_PART_MAX_DIMENSION / rasterHeight,
+    Math.sqrt(FULL_PAGE_PART_MAX_PIXELS / (rasterWidth * rasterHeight))
+  );
+}
+
+function fullPageCapturePlan(width, height, dpr) {
+  const safeDpr = Math.max(1, Number(dpr) || 1);
+  const rasterWidth = width * safeDpr;
+  const rasterHeight = height * safeDpr;
+  const pagePixels = rasterWidth * rasterHeight;
+  const fitsSingleImage =
+    pagePixels <= FULL_PAGE_SINGLE_IMAGE_MAX_PIXELS &&
+    rasterWidth <= FULL_PAGE_PART_MAX_DIMENSION &&
+    rasterHeight <= FULL_PAGE_PART_MAX_DIMENSION;
+
+  if (fitsSingleImage) {
+    return {
+      captureScale: 1,
+      format: 'png',
+      tiles: [{ top: 0, height }]
+    };
+  }
+
+  const tileHeight = Math.min(
+    height,
+    Math.max(FULL_PAGE_BASE_TILE_HEIGHT, Math.ceil(height / FULL_PAGE_PREFERRED_MAX_PARTS))
+  );
+  const captureScale = maximumDocumentPartScale(width, tileHeight, safeDpr);
+  if (!Number.isFinite(captureScale) || captureScale <= 0) {
+    throw new Error('The page dimensions cannot be captured safely.');
+  }
+
+  return {
+    captureScale,
+    format: 'jpeg',
+    tiles: documentTiles(height, tileHeight)
+  };
+}
+
+function documentCapturePlan(documentInfo) {
+  return fullPageCapturePlan(documentInfo.width, documentInfo.docHeight, documentInfo.dpr);
+}
+
+function screenshotDataUrl(data, format) {
+  return `data:image/${format};base64,${data}`;
+}
+
+function createFullPagePart(tile, width, outputScale) {
+  const canvas = new OffscreenCanvas(
+    Math.max(1, Math.round(width * outputScale)),
+    Math.max(1, Math.round(tile.height * outputScale))
+  );
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  return { ...tile, canvas, ctx };
+}
+
+function drawBitmapIntoFullPagePart(part, bitmap, source, destination, outputScale) {
+  const partBottom = part.top + part.height;
+  const destinationBottom = destination.y + destination.height;
+  const clippedTop = Math.max(part.top, destination.y);
+  const clippedBottom = Math.min(partBottom, destinationBottom);
+  if (
+    clippedBottom <= clippedTop ||
+    source.width <= 0 ||
+    source.height <= 0 ||
+    destination.width <= 0 ||
+    destination.height <= 0
+  ) {
+    return;
+  }
+
+  const sourceTop = source.y + ((clippedTop - destination.y) / destination.height) * source.height;
+  const sourceHeight = ((clippedBottom - clippedTop) / destination.height) * source.height;
+  const destinationLeft = Math.round(destination.x * outputScale);
+  const destinationRight = Math.round((destination.x + destination.width) * outputScale);
+  const destinationTop = Math.round((clippedTop - part.top) * outputScale);
+  const destinationBottomPixel = Math.round((clippedBottom - part.top) * outputScale);
+  if (destinationRight <= destinationLeft || destinationBottomPixel <= destinationTop) return;
+
+  part.ctx.drawImage(
+    bitmap,
+    source.x,
+    sourceTop,
+    source.width,
+    sourceHeight,
+    destinationLeft,
+    destinationTop,
+    destinationRight - destinationLeft,
+    destinationBottomPixel - destinationTop
+  );
+}
+
+function discardFullPagePart(part) {
+  part.canvas.width = 1;
+  part.canvas.height = 1;
+}
+
+async function reportFullPageProgress(tabId, label, completed, total) {
+  const progress = {
+    active: true,
+    label,
+    completed,
+    total,
+    percent: Math.max(0, Math.min(100, Math.round((completed / Math.max(total, 1)) * 100))),
+    updatedAt: Date.now()
+  };
+  const state = await getState();
+  if (state.recording) await setState({ fullPageProgress: progress });
+  if (Number.isSafeInteger(tabId)) {
+    await chrome.tabs.sendMessage(tabId, { type: 'FULL_PAGE_PROGRESS', progress }).catch(() => {});
+  }
+  return progress;
+}
+
+async function setFullPageProgressVisibility(tabId, hidden) {
+  if (!Number.isSafeInteger(tabId)) return;
+  await chrome.tabs.sendMessage(tabId, { type: 'FULL_PAGE_PROGRESS_VISIBILITY', hidden }).catch(() => {});
+}
+
+async function clearFullPageProgress(tabId) {
+  const state = await getState();
+  if (state.fullPageProgress) await setState({ fullPageProgress: null });
+  if (Number.isSafeInteger(tabId)) {
+    await chrome.tabs.sendMessage(tabId, { type: 'FULL_PAGE_PROGRESS_CLEAR' }).catch(() => {});
+  }
+}
+
+async function captureDocumentTile(tabId, width, tile, plan) {
+  await setFullPageProgressVisibility(tabId, true);
+  try {
+    const options = {
+      format: plan.format,
+      captureBeyondViewport: true,
+      clip: { x: 0, y: tile.top, width, height: tile.height, scale: plan.captureScale }
+    };
+    if (plan.format === 'jpeg') options.quality = FULL_PAGE_TILE_JPEG_QUALITY;
+    const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', options);
+    if (!result?.data) throw new Error('Chromium returned no full-page screenshot data.');
+    return screenshotDataUrl(result.data, plan.format);
+  } finally {
+    await setFullPageProgressVisibility(tabId, false);
+  }
+}
+
+async function captureDocumentParts(tabId, documentInfo) {
+  const plan = documentCapturePlan(documentInfo);
+  const progressTotal = plan.tiles.length * 2;
+  const parts = [];
+  await reportFullPageProgress(tabId, 'Preparing full-page screenshot', 0, progressTotal);
+
+  for (let index = 0; index < plan.tiles.length; index += 1) {
+    await reportFullPageProgress(
+      tabId,
+      `Capturing full page ${index + 1} of ${plan.tiles.length}`,
+      index,
+      progressTotal
+    );
+    const rawDataUrl = await captureDocumentTile(tabId, documentInfo.width, plan.tiles[index], plan);
+    parts.push({ rawDataUrl });
+    await reportFullPageProgress(
+      tabId,
+      `Captured full page ${index + 1} of ${plan.tiles.length}`,
+      index + 1,
+      progressTotal
+    );
+  }
+
+  return {
+    parts,
+    captureScale: plan.captureScale,
+    progressTotal,
+    trimBlankMargins: parts.length === 1
+  };
+}
+
+async function waitForDocumentLayout(tabId, fallback) {
+  let latest = fallback;
+  let stablePolls = 0;
+  for (let poll = 0; poll < FULL_PAGE_LAYOUT_STABLE_POLLS + 1; poll += 1) {
+    await delay(FULL_PAGE_LAYOUT_POLL_MS);
+    const next = await measureDocument(tabId).catch(() => null);
+    if (!next) continue;
+    const stable = Math.abs(next.docHeight - latest.docHeight) <= 4 && Math.abs(next.width - latest.width) <= 4;
+    latest = next;
+    stablePolls = stable ? stablePolls + 1 : 0;
+    if (stablePolls >= FULL_PAGE_LAYOUT_STABLE_POLLS) break;
+  }
+  return latest;
+}
+
+async function restoreDocumentScroll(tabId, left, top) {
+  await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      args: [left, top],
+      func: (x, y) => {
+        const previous = document.documentElement.style.scrollBehavior;
+        document.documentElement.style.scrollBehavior = 'auto';
+        window.scrollTo({ left: x, top: y, behavior: 'instant' });
+        document.documentElement.style.scrollBehavior = previous;
+      }
+    })
+    .catch(() => {});
+}
+
+// Chromium can rasterize a document outside the visible viewport directly. Do not use
+// Emulation.setDeviceMetricsOverride here: enlarging the viewport visibly reflows responsive apps
+// while the user-triggered capture is running.
+async function captureDocumentHeadless(tabId, documentInfo) {
   if (!(await attachDebugger(tabId))) return null;
 
-  let applied = height;
-  let previousOverflow = Infinity;
   try {
-    for (let round = 0; round < FULL_PAGE_GROW_ROUNDS; round += 1) {
-      await setViewportHeight(tabId, width, applied);
-
-      const grown = await measureDocument(tabId).catch(() => null);
-      if (!grown) break;
-
-      const wanted = Math.min(grown.docHeight, FULL_PAGE_MAX_HEIGHT);
-      const overflow = wanted - applied;
-      // An overflow that stops shrinking means something is sized to the viewport and would grow
-      // with it forever, so stop at the last height that made progress.
-      if (overflow <= 4 || overflow >= previousOverflow - 4) break;
-      previousOverflow = overflow;
-      applied = wanted;
-    }
-
     await waitForImages(tabId);
+    let stableDocumentInfo = await waitForDocumentLayout(tabId, documentInfo);
+    let result = null;
+    for (let attempt = 0; attempt < FULL_PAGE_LAYOUT_ATTEMPTS; attempt += 1) {
+      result = await captureDocumentParts(tabId, stableDocumentInfo);
 
-    for (const attempt of [applied, ...FULL_PAGE_RETRY_HEIGHTS.filter((h) => h < applied)]) {
-      try {
-        const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
-          format: 'png',
-          captureBeyondViewport: true,
-          clip: { x: 0, y: 0, width, height: attempt, scale: 1 }
-        });
-        if (result?.data) return await trimBlankTail(`data:image/png;base64,${result.data}`);
-      } catch (error) {
-        console.warn(`Full-page shot of ${attempt}px refused, trying shorter:`, error.message);
+      const latest = await measureDocument(tabId).catch(() => null);
+      if (
+        !latest ||
+        (latest.docHeight <= stableDocumentInfo.docHeight + 4 && latest.width <= stableDocumentInfo.width + 4)
+      ) {
+        return result;
       }
+      result = null;
+      stableDocumentInfo = await waitForDocumentLayout(tabId, latest);
     }
-    return null;
+    return result;
   } catch (error) {
     console.warn('Full-page capture failed, using the visible frame:', error.message);
     return null;
   } finally {
-    await chrome.debugger
-      .sendCommand({ tabId }, 'Emulation.clearDeviceMetricsOverride')
-      .catch(() => {});
-    // Resizing the layout viewport can leave the page resting somewhere else once it snaps back.
-    await chrome.scripting
-      .executeScript({
-        target: { tabId },
-        world: 'ISOLATED',
-        args: [scrollX, scrollY],
-        func: (x, y) => window.scrollTo({ left: x, top: y, behavior: 'instant' })
-      })
-      .catch(() => {});
     // The debugger is only needed for the instant of the shot, so let go of it immediately - that
     // is what makes the "started debugging this browser" banner disappear right away.
     await detachDebugger();
+    await restoreDocumentScroll(tabId, documentInfo.scrollX, documentInfo.scrollY);
   }
 }
 
-// For an app-shell pane that only reveals its content while scrolled, scroll just that pane and
-// stitch the results. This never touches the debugger and never resizes the window - only the pane
-// itself visibly moves, exactly as it would if the user scrolled it by hand.
-async function captureScrollerStitch(tabId, windowId, scroller) {
-  const { viewportWidth, viewportHeight, rectTop, rectLeft, rectWidth, rectHeight, dpr } = scroller;
-  const totalTravel = scroller.scrollHeight - scroller.clientHeight;
-  // Bounds both the capture time and the number of full-resolution bitmaps held in memory at once.
-  // A wider overlap between consecutive frames (rather than the bare minimum) gives some slack for
-  // any lazily-rendered content near a scroll boundary to have actually painted by the time of the
-  // next frame, instead of a thin seam where a row could be missed by both frames' visible slice.
-  const step = Math.max(rectHeight - 150, Math.ceil(totalTravel / SCROLLER_MAX_FRAMES), 80);
+function scrollerCaptureStops(scroller) {
+  const totalTravel = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  const overlap = Math.min(SCROLLER_FRAME_OVERLAP, Math.floor(Math.max(scroller.rectHeight, 1) / 3));
+  const step = Math.max(scroller.rectHeight - overlap, 80);
   const stops = [];
   for (let top = 0; top < totalTravel; top += step) stops.push(top);
-  stops.push(totalTravel);
+  if (!stops.length || stops[stops.length - 1] !== totalTravel) stops.push(totalTravel);
+  return stops;
+}
 
-  const frames = [];
+function scrollerCaptureWatchdogMs(scroller) {
+  const estimate =
+    scrollerCaptureStops(scroller).length * FULL_PAGE_SCROLLER_FRAME_ESTIMATE_MS +
+    FULL_PAGE_SCROLLER_WATCHDOG_OVERHEAD_MS;
+  return Math.max(FULL_PAGE_WATCHDOG_MS, Math.min(FULL_PAGE_SCROLLER_WATCHDOG_MAX_MS, estimate));
+}
+
+function drawScrollerChrome(part, firstBitmap, scroller, totalHeight, sourceScaleX, sourceScaleY, outputScale) {
+  const { viewportWidth, viewportHeight, rectTop, rectLeft, rectWidth } = scroller;
+  const topSourceHeight = Math.min(firstBitmap.height, rectTop * sourceScaleY);
+  if (topSourceHeight > 0) {
+    drawBitmapIntoFullPagePart(
+      part,
+      firstBitmap,
+      { x: 0, y: 0, width: firstBitmap.width, height: topSourceHeight },
+      { x: 0, y: 0, width: viewportWidth, height: rectTop },
+      outputScale
+    );
+  }
+
+  const railHeight = Math.max(0, viewportHeight - rectTop);
+  const railSourceHeight = Math.min(firstBitmap.height - topSourceHeight, railHeight * sourceScaleY);
+  const extendRail = (left, width) => {
+    if (width <= 0 || railHeight <= 0 || railSourceHeight <= 0) return;
+    const sourceLeft = left * sourceScaleX;
+    drawBitmapIntoFullPagePart(
+      part,
+      firstBitmap,
+      { x: sourceLeft, y: topSourceHeight, width: width * sourceScaleX, height: railSourceHeight },
+      { x: left, y: rectTop, width, height: railHeight },
+      outputScale
+    );
+
+    const extensionTop = rectTop + railHeight;
+    if (extensionTop >= totalHeight) return;
+    drawBitmapIntoFullPagePart(
+      part,
+      firstBitmap,
+      { x: sourceLeft, y: topSourceHeight + railSourceHeight - 1, width: width * sourceScaleX, height: 1 },
+      { x: left, y: extensionTop, width, height: totalHeight - extensionTop },
+      outputScale
+    );
+  };
+
+  extendRail(0, rectLeft);
+  extendRail(rectLeft + rectWidth, Math.max(0, viewportWidth - (rectLeft + rectWidth)));
+}
+
+function drawScrollerBottom(part, lastBitmap, scroller, totalHeight, sourceScaleY, outputScale) {
+  const sourceTop = Math.min(lastBitmap.height, (scroller.rectTop + scroller.rectHeight) * sourceScaleY);
+  const sourceHeight = lastBitmap.height - sourceTop;
+  if (sourceHeight <= 0) return;
+  const height = sourceHeight / sourceScaleY;
+  drawBitmapIntoFullPagePart(
+    part,
+    lastBitmap,
+    { x: 0, y: sourceTop, width: lastBitmap.width, height: sourceHeight },
+    { x: 0, y: totalHeight - height, width: scroller.viewportWidth, height },
+    outputScale
+  );
+}
+
+// App-shell content only exists while its pane is scrolled, so capture every overlapping viewport
+// slice and encode bounded, adjacent output parts instead of building one unbounded canvas.
+async function captureScrollerStitch(tabId, windowId, scroller) {
+  const { viewportWidth, viewportHeight, rectTop, rectLeft, rectWidth, rectHeight, dpr } = scroller;
+  const stops = scrollerCaptureStops(scroller);
+  const belowHeight = Math.max(0, viewportHeight - (rectTop + rectHeight));
+  const totalHeight = Math.ceil(rectTop + scroller.scrollHeight + belowHeight);
+  const plan = fullPageCapturePlan(viewportWidth, totalHeight, dpr);
+  const outputScale = Math.max(1, Number(dpr) || 1) * plan.captureScale;
+  const progressTotal = stops.length + plan.tiles.length * 2;
+  const activeParts = new Map();
+  const parts = [];
+  let firstBitmap = null;
+  let lastBitmap = null;
+  let sourceScaleX = 1;
+  let sourceScaleY = 1;
+  let nextPartToCreate = 0;
+  let nextPartToFinish = 0;
+
+  const createPart = (index) => {
+    const part = createFullPagePart(plan.tiles[index], viewportWidth, outputScale);
+    drawScrollerChrome(part, firstBitmap, scroller, totalHeight, sourceScaleX, sourceScaleY, outputScale);
+    activeParts.set(index, part);
+  };
+
+  const ensurePartsThrough = (bottom) => {
+    while (nextPartToCreate < plan.tiles.length && plan.tiles[nextPartToCreate].top < bottom) {
+      createPart(nextPartToCreate);
+      nextPartToCreate += 1;
+    }
+  };
+
+  const finishPart = async (index) => {
+    const part = activeParts.get(index);
+    if (!part) return;
+    const partNumber = parts.length + 1;
+    await reportFullPageProgress(
+      tabId,
+      `Assembling full page ${partNumber} of ${plan.tiles.length}`,
+      stops.length + parts.length,
+      progressTotal
+    );
+    let rawDataUrl;
+    try {
+      rawDataUrl = await canvasToDataUrl(
+        part.canvas,
+        `image/${plan.format}`,
+        plan.format === 'jpeg' ? FULL_PAGE_TILE_JPEG_QUALITY / 100 : undefined
+      );
+    } finally {
+      discardFullPagePart(part);
+      activeParts.delete(index);
+    }
+    parts.push({ rawDataUrl });
+    await reportFullPageProgress(
+      tabId,
+      `Assembled full page ${partNumber} of ${plan.tiles.length}`,
+      stops.length + parts.length,
+      progressTotal
+    );
+  };
+
+  const finishPartsBefore = async (top) => {
+    while (nextPartToFinish < plan.tiles.length) {
+      const part = activeParts.get(nextPartToFinish);
+      if (!part || part.top + part.height > top) break;
+      await finishPart(nextPartToFinish);
+      nextPartToFinish += 1;
+    }
+  };
+
   try {
     await hideScrollbars(tabId);
-    for (const target of stops) {
-      const { scrollTop } = await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, target);
+    await reportFullPageProgress(tabId, 'Preparing scrollable page', 0, progressTotal);
+    for (let index = 0; index < stops.length; index += 1) {
+      const target = stops[index];
+      await reportFullPageProgress(tabId, `Capturing full page ${index + 1} of ${stops.length}`, index, progressTotal);
+      const { ok, scrollTop } = await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, target);
+      if (!ok || Math.abs(scrollTop - target) > 2) throw new Error('Could not reach a scrollable page section.');
       await delay(450);
-      // Must target the recorded tab's own window explicitly - omitting it captures whatever
-      // window the OS currently has focused, which can be a different one entirely.
-      const dataUrl = await captureVisibleTabWithRetry(windowId).catch(() => null);
-      if (!dataUrl) continue;
-      frames.push({ scrollTop, dataUrl });
-    }
-    if (!frames.length) return null;
 
-    const belowHeight = Math.max(0, viewportHeight - (rectTop + rectHeight));
-    const finalScrollHeight = frames[frames.length - 1].scrollTop + rectHeight;
-    const totalHeight = rectTop + finalScrollHeight + belowHeight;
-
-    const canvas = new OffscreenCanvas(Math.round(viewportWidth * dpr), Math.round(totalHeight * dpr));
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    const bitmaps = [];
-    try {
-      for (const frame of frames) {
-        bitmaps.push({
-          scrollTop: frame.scrollTop,
-          bitmap: await createImageBitmap(await (await fetch(frame.dataUrl)).blob())
-        });
+      let dataUrl;
+      await setFullPageProgressVisibility(tabId, true);
+      try {
+        // Must target the recorded tab's own window explicitly - omitting it captures whatever
+        // window the OS currently has focused, which can be a different one entirely.
+        dataUrl = await captureVisibleTabWithRetry(windowId);
+      } finally {
+        await setFullPageProgressVisibility(tabId, false);
       }
 
-      const topHeight = Math.round(rectTop * dpr);
-      const sliceHeight = Math.round(rectHeight * dpr);
-      const sliceLeft = Math.round(rectLeft * dpr);
-      const sliceWidth = Math.round(rectWidth * dpr);
-
-      const first = bitmaps[0].bitmap;
-      if (topHeight > 0) ctx.drawImage(first, 0, 0, first.width, topHeight, 0, 0, first.width, topHeight);
-
-      // A fixed sidebar or rail that sits beside the scroller (not above or below it) does not move
-      // as the pane scrolls, so it must come from a single frame like the top/bottom chrome does -
-      // stitching the full frame width here would draw that same sidebar again in every frame,
-      // stacked down the page (this is what caused a "Home" icon to repeat several times).
-      const hasLeftRail = sliceLeft > 0;
-      const hasRightRail = sliceLeft + sliceWidth < first.width;
-      const railHeight = first.height - topHeight;
-      // A fixed rail has no real content past one viewport's height, but leaving the rest of its
-      // column at the canvas's default white looks like a rendering defect (the panel's own
-      // background colour appearing to just stop partway down) rather than "nothing more to show" -
-      // stretching its own last row down the remaining height reads as one continuous panel instead.
-      const extendRail = (x, w) => {
-        if (w <= 0 || railHeight <= 0) return;
-        const remaining = canvas.height - (topHeight + railHeight);
-        if (remaining > 0) {
-          ctx.drawImage(first, x, first.height - 1, w, 1, x, topHeight + railHeight, w, remaining);
+      const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+      const isFirst = firstBitmap === null;
+      const isLast = index === stops.length - 1;
+      try {
+        if (isFirst) {
+          firstBitmap = bitmap;
+          sourceScaleX = bitmap.width / viewportWidth;
+          sourceScaleY = bitmap.height / viewportHeight;
         }
-        ctx.drawImage(first, x, topHeight, w, railHeight, x, topHeight, w, railHeight);
-      };
-      if (hasLeftRail) extendRail(0, sliceLeft);
-      if (hasRightRail) extendRail(sliceLeft + sliceWidth, first.width - (sliceLeft + sliceWidth));
+        if (isLast) lastBitmap = bitmap;
 
-      for (const { scrollTop, bitmap } of bitmaps) {
-        const destY = Math.round((rectTop + scrollTop) * dpr);
-        ctx.drawImage(bitmap, sliceLeft, topHeight, sliceWidth, sliceHeight, sliceLeft, destY, sliceWidth, sliceHeight);
+        const destinationTop = rectTop + scrollTop;
+        const destinationBottom = destinationTop + rectHeight;
+        await finishPartsBefore(destinationTop);
+        ensurePartsThrough(destinationBottom);
+        for (const part of activeParts.values()) {
+          drawBitmapIntoFullPagePart(
+            part,
+            bitmap,
+            {
+              x: rectLeft * sourceScaleX,
+              y: rectTop * sourceScaleY,
+              width: rectWidth * sourceScaleX,
+              height: rectHeight * sourceScaleY
+            },
+            { x: rectLeft, y: destinationTop, width: rectWidth, height: rectHeight },
+            outputScale
+          );
+        }
+      } finally {
+        if (!isFirst && !isLast) bitmap.close();
       }
-
-      const last = bitmaps[bitmaps.length - 1].bitmap;
-      const belowSourceTop = Math.round((rectTop + rectHeight) * dpr);
-      const belowSourceHeight = last.height - belowSourceTop;
-      if (belowSourceHeight > 0) {
-        ctx.drawImage(
-          last,
-          0,
-          belowSourceTop,
-          last.width,
-          belowSourceHeight,
-          0,
-          canvas.height - belowSourceHeight,
-          last.width,
-          belowSourceHeight
-        );
-      }
-    } finally {
-      for (const { bitmap } of bitmaps) bitmap.close();
+      await reportFullPageProgress(tabId, `Captured full page ${index + 1} of ${stops.length}`, index + 1, progressTotal);
     }
 
-    const buffer = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
-    return await trimBlankTail(`data:image/png;base64,${arrayBufferToBase64(buffer)}`);
+    if (!firstBitmap || !lastBitmap) return null;
+    ensurePartsThrough(totalHeight);
+    for (const part of activeParts.values()) {
+      drawScrollerBottom(part, lastBitmap, scroller, totalHeight, sourceScaleY, outputScale);
+    }
+    await finishPartsBefore(Number.POSITIVE_INFINITY);
+    return {
+      parts,
+      captureScale: plan.captureScale,
+      progressTotal,
+      progressCompleted: stops.length + plan.tiles.length,
+      trimBlankMargins: parts.length === 1
+    };
   } finally {
+    if (lastBitmap && lastBitmap !== firstBitmap) lastBitmap.close();
+    firstBitmap?.close();
+    for (const part of activeParts.values()) discardFullPagePart(part);
     await scrollScrollerTo(tabId, SCROLLER_MARK_ATTR, scroller.scrollTop);
     await clearScrollerMark(tabId);
     await restoreScrollbars(tabId);
   }
 }
 
-// Captures the whole page without ever moving what the user sees where that is possible. An
-// app-shell pane is handled by scrolling only that pane - no debugger, no reflow. A plain tall
-// document instead needs a momentary viewport resize so lazy-loaded content actually renders (a
-// resize-only capture leaves anything below the original viewport as unloaded placeholders).
+// Captures the whole page without changing the tab's layout viewport. An app-shell pane is handled
+// by scrolling only that pane; a plain document is rasterized beyond its existing viewport. Defer
+// debugger attachment until the latter branch because stitch capture does not need CDP, and attach
+// itself causes Chromium to show a transient browser notice.
 // Returns null when neither applies, so the caller just takes the ordinary visible frame.
-async function captureFullPagePassive(tabId, windowId) {
-  if (!HAS_DEBUGGER) return null;
-
-  // DevTools already open on this tab owns the one available debugger session, and a docked
-  // DevTools panel also shrinks the real viewport out from under any scroll/stitch measurement
-  // taken beforehand. Rather than produce a partial or misaligned result, fall straight back to a
-  // single honest screenshot of what is actually on screen right now.
-  if (!(await attachDebugger(tabId))) return null;
-
-  const doc = await measureDocument(tabId).catch(() => null);
-  if (!doc?.viewportHeight) {
-    await detachDebugger();
-    return null;
-  }
+async function captureFullPagePassive(tabId, windowId, documentInfo, knownScroller) {
+  const doc = documentInfo || (await measureDocument(tabId).catch(() => null));
+  if (!doc?.viewportHeight) return null;
 
   if (doc.docHeight > doc.viewportHeight + 4) {
-    const height = Math.min(doc.docHeight, FULL_PAGE_MAX_HEIGHT);
-    return captureDocumentHeadless(tabId, doc.scrollX, doc.scrollY, doc.width, height);
+    if (!HAS_DEBUGGER) return null;
+    return captureDocumentHeadless(tabId, doc);
   }
 
-  const scroller = await findScroller(tabId).catch(() => null);
+  const scroller = knownScroller || (await findScroller(tabId).catch(() => null));
   if (!scroller || scroller.scrollHeight <= scroller.clientHeight + 4) {
     await clearScrollerMark(tabId);
-    await detachDebugger();
     return null;
   }
-  const stitched = await captureScrollerStitch(tabId, windowId, scroller);
-  await detachDebugger();
-  return stitched;
+  try {
+    return await captureScrollerStitch(tabId, windowId, scroller);
+  } finally {
+    await setFullPageProgressVisibility(tabId, false);
+  }
 }
 
 // A page that never settles (throttled background tab, an element that keeps growing, a stalled
@@ -932,13 +1403,24 @@ async function captureFullPagePassive(tabId, windowId) {
 // multi-second full-page capture must not look identical to the extension having stopped responding.
 async function captureFullPageWithWatchdog(tabId, windowId) {
   const state = await getState();
-  await chrome.action.setBadgeText({ text: state.recording ? '\u2026' : '' });
+  await chrome.action.setBadgeText({ text: state.recording && !state.paused ? '\u2026' : '' });
   try {
+    const documentInfo = await measureDocument(tabId).catch(() => null);
+    const scroller =
+      documentInfo?.viewportHeight && documentInfo.docHeight <= documentInfo.viewportHeight + 4
+        ? await findScroller(tabId).catch(() => null)
+        : null;
+    const watchdogMs = scroller && scroller.scrollHeight > scroller.clientHeight + 4
+      ? scrollerCaptureWatchdogMs(scroller)
+      : FULL_PAGE_WATCHDOG_MS;
     const FULL_PAGE_TIMEOUT_TOKEN = Symbol('full-page-timeout');
-    const timeout = new Promise((resolve) => setTimeout(() => resolve(FULL_PAGE_TIMEOUT_TOKEN), FULL_PAGE_WATCHDOG_MS));
-    const result = await Promise.race([captureFullPagePassive(tabId, windowId).catch(() => null), timeout]);
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(FULL_PAGE_TIMEOUT_TOKEN), watchdogMs));
+    const result = await Promise.race([
+      captureFullPagePassive(tabId, windowId, documentInfo, scroller).catch(() => null),
+      timeout
+    ]);
     if (result === FULL_PAGE_TIMEOUT_TOKEN) {
-      logLine(`FULL_PAGE_WATCHDOG exceeded ${FULL_PAGE_WATCHDOG_MS}ms, using the visible frame instead`);
+      logLine(`FULL_PAGE_WATCHDOG exceeded ${watchdogMs}ms, using the visible frame instead`);
       return null;
     }
     return result;
@@ -962,18 +1444,28 @@ async function cleanupCaptureResources() {
   await closeOffscreen().catch(() => {});
   await detachDebugger().catch(() => {});
   await clearStoredFrames().catch(() => {});
+  await chrome.storage.local.remove(SESSION_CONTROL_KEY).catch(() => {});
+  await clearSessionTracking().catch(() => {});
   await setDownloadUi(true).catch(() => {});
   apiQueue = [];
   apiHeaderRecords = [];
   lastRawCaptureHash = '';
   lastTabTitle = '';
-  sessionTabIds = new Set();
 }
 
-async function performCapture(reason, label) {
+function isActiveCapture(state, sessionId, captureGeneration) {
+  return (
+    state.recording &&
+    !state.paused &&
+    state.sessionId === sessionId &&
+    state.captureGeneration === captureGeneration
+  );
+}
+
+async function performCapture(reason, label, requestedSessionId, requestedCaptureGeneration) {
   const startedAt = Date.now();
   const state = await getState();
-  if (!state.recording || state.tabId === null) return;
+  if (state.tabId === null || !isActiveCapture(state, requestedSessionId, requestedCaptureGeneration)) return;
 
   const tab = await chrome.tabs.get(state.tabId).catch(() => null);
   if (!tab) {
@@ -986,56 +1478,193 @@ async function performCapture(reason, label) {
     reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : reason === 'dialog-opened' ? 550 : 450;
   await delay(state.settings.captureApi ? settle + 500 : settle);
 
+  const latest = await getState();
+  if (!isActiveCapture(latest, state.sessionId, state.captureGeneration)) return;
+
   // Full-page capture renders the page itself, not whatever surface a mode normally captures - that
   // applies just as well in Screen/window and API mode as it does in Tab viewport mode. The queue
   // watchdog above is what actually guards against this hanging the rest of the recording, so this
   // no longer needs to be restricted to specific modes to stay safe.
   const wantsFullPage = state.settings.fullPage && FULL_PAGE_REASONS.has(reason);
-  const fullPage = wantsFullPage ? await captureFullPageWithWatchdog(tab.id, tab.windowId) : null;
-  const fullPageInfo = wantsFullPage ? (fullPage ? 'ok' : 'fell back to visible frame') : 'n/a';
-  const heading = await getPageHeading(tab.id).catch(() => '');
+  let fullPage = null;
+  try {
+    if (wantsFullPage) {
+      await reportFullPageProgress(tab.id, 'Preparing full-page screenshot', 0, 1);
+      fullPage = await captureFullPageWithWatchdog(tab.id, tab.windowId);
+    }
+    const fullPageInfo = wantsFullPage
+      ? fullPage?.parts
+        ? `parts=${fullPage.parts.length} scale=${Math.round(fullPage.captureScale * 100)}%`
+        : fullPage
+          ? 'ok'
+          : 'fell back to visible frame'
+      : 'n/a';
+    const heading = await getPageHeading(tab.id).catch(() => '');
+    const capture = {
+      title: heading || tab.title || tab.url || 'Untitled page',
+      url: tab.url || '',
+      reason,
+      label,
+      startedAt,
+      sessionId: state.sessionId,
+      captureGeneration: state.captureGeneration,
+      mode: state.settings.captureMode,
+      fullPageInfo
+    };
 
-  return persistCapture({
-    rawDataUrl: fullPage || (await grabPngDataUrl(state, tab)),
-    title: heading || tab.title || tab.url || 'Untitled page',
-    url: tab.url || '',
-    reason,
-    label,
-    startedAt,
-    mode: state.settings.captureMode,
-    fullPageInfo
-  });
+    if (fullPage?.parts?.length) {
+      return await persistFullPageParts({
+        ...capture,
+        tabId: tab.id,
+        parts: fullPage.parts,
+        progressTotal: fullPage.progressTotal,
+        progressCompleted: fullPage.progressCompleted,
+        trimBlankMargins: fullPage.trimBlankMargins
+      });
+    }
+
+    let rawDataUrl;
+    if (typeof fullPage === 'string') {
+      rawDataUrl = fullPage;
+    } else {
+      if (wantsFullPage) await setFullPageProgressVisibility(tab.id, true);
+      try {
+        rawDataUrl = await grabPngDataUrl(state, tab);
+      } finally {
+        if (wantsFullPage) await setFullPageProgressVisibility(tab.id, false);
+      }
+    }
+    if (wantsFullPage && !fullPage && state.settings.captureMode !== 'screen') {
+      rawDataUrl = await trimBlankMargins(rawDataUrl);
+    }
+    return await persistCapture({ ...capture, rawDataUrl });
+  } finally {
+    if (wantsFullPage) await clearFullPageProgress(tab.id);
+  }
 }
 
-async function persistCapture({ rawDataUrl, title, url, reason, label, startedAt, mode, fullPageInfo }) {
-  const state = await getState();
-  if (!state.recording) return;
+function fullPagePartTitle(title, index, count) {
+  return count > 1 ? `${title} (part ${index + 1} of ${count})` : title;
+}
 
-  const { settings } = state;
-  const capturedAt = new Date();
-  const sequence = state.sequence + 1;
+function fullPagePartLabel(label, index, count) {
+  if (count === 1) return label;
+  const part = `part ${index + 1} of ${count}`;
+  return label ? `${label} - ${part}` : part;
+}
+
+async function persistFullPageParts({
+  tabId,
+  parts,
+  progressTotal,
+  progressCompleted = parts.length,
+  trimBlankMargins: shouldTrimBlankMargins,
+  ...capture
+}) {
   const apiRows = apiQueue;
   apiQueue = [];
+  const entries = [];
 
+  try {
+    for (let index = 0; index < parts.length; index += 1) {
+      await reportFullPageProgress(
+        tabId,
+        `Saving full page ${index + 1} of ${parts.length}`,
+        progressCompleted + index,
+        progressTotal
+      );
+      let rawDataUrl = parts[index].rawDataUrl;
+      parts[index].rawDataUrl = null;
+      if (shouldTrimBlankMargins && parts.length === 1) {
+        rawDataUrl = await trimBlankMargins(rawDataUrl);
+      }
+
+      const entry = await persistCapture({
+        ...capture,
+        rawDataUrl,
+        title: fullPagePartTitle(capture.title, index, parts.length),
+        label: fullPagePartLabel(capture.label, index, parts.length),
+        apiRows: index === 0 ? apiRows : [],
+        titleBar: index === 0,
+        stampTimestamp: index === 0,
+        watermarkText: index === parts.length - 1 ? WATERMARK : null,
+        jpegQuality: parts.length > 1 ? 0.9 : undefined
+      });
+      if (entry) entries.push(entry);
+      await reportFullPageProgress(
+        tabId,
+        `Saved full page ${index + 1} of ${parts.length}`,
+        progressCompleted + index + 1,
+        progressTotal
+      );
+    }
+  } catch (error) {
+    if (!entries.length && apiRows.length) apiQueue = [...apiRows, ...apiQueue].slice(-12);
+    throw error;
+  }
+
+  return entries;
+}
+
+async function persistCapture({
+  rawDataUrl,
+  title,
+  url,
+  reason,
+  label,
+  startedAt,
+  sessionId,
+  captureGeneration,
+  mode,
+  fullPageInfo,
+  apiRows: suppliedApiRows,
+  titleBar = true,
+  stampTimestamp = true,
+  watermarkText = WATERMARK,
+  jpegQuality
+}) {
+  const state = await getState();
+  if (!isActiveCapture(state, sessionId, captureGeneration)) return;
+
+  const { settings } = state;
+  await ensureOffscreen();
+  if (!isActiveCapture(await getState(), sessionId, captureGeneration)) return;
+
+  const capturedAt = new Date();
+  const sequence = state.sequence + 1;
+  const usesQueuedApiRows = suppliedApiRows === undefined;
+  const apiRows = usesQueuedApiRows ? apiQueue : suppliedApiRows;
+  if (usesQueuedApiRows) apiQueue = [];
+  const restoreQueuedApiRows = () => {
+    if (usesQueuedApiRows && apiRows.length) apiQueue = [...apiRows, ...apiQueue].slice(-12);
+  };
+  const processed = await askOffscreen('OFFSCREEN_PROCESS', {
+    dataUrl: rawDataUrl,
+    stampText: stampTimestamp && settings.stampTimestamp ? stampText(capturedAt) : null,
+    watermarkText,
+    titleBar: titleBar ? { title, url } : null,
+    wantPng: settings.savePng,
+    wantJpeg: settings.savePdf,
+    apiRows,
+    jpegQuality
+  });
   const rawHash = hashText(rawDataUrl);
+  rawDataUrl = null;
+  if (processed?.error) {
+    restoreQueuedApiRows();
+    throw new Error(processed.error);
+  }
+  if (!isActiveCapture(await getState(), sessionId, captureGeneration)) {
+    restoreQueuedApiRows();
+    return;
+  }
+
   if (!shouldKeepDuplicate(reason, apiRows) && rawHash === lastRawCaptureHash) {
+    restoreQueuedApiRows();
     logLine(`SKIP (duplicate) ${reason}${label ? ` "${label}"` : ''} mode=${mode} fullPage=${fullPageInfo}`);
     return null;
   }
   lastRawCaptureHash = rawHash;
-
-  await ensureOffscreen();
-  const processed = await askOffscreen('OFFSCREEN_PROCESS', {
-    dataUrl: rawDataUrl,
-    stampText: settings.stampTimestamp ? stampText(capturedAt) : null,
-    watermarkText: WATERMARK,
-    titleBar: { title, url },
-    wantPng: settings.savePng,
-    wantJpeg: settings.savePdf,
-    apiRows
-  });
-  rawDataUrl = null;
-  if (processed?.error) throw new Error(processed.error);
 
   const pngDataUrl = processed.pngDataUrl || rawDataUrl;
   const jpeg = processed.jpeg;
@@ -1164,11 +1793,10 @@ async function queueApiCall({
 
 // Neither the service worker (no blob URLs) nor an offscreen document (chrome.runtime only)
 // can write the PDF, so a short-lived extension page does it.
-async function exportPdfInWindow(filename, selectedSequences) {
+async function exportPdfInWindow(filename, excludedSequences) {
   const params = new URLSearchParams({ filename });
-  if (Array.isArray(selectedSequences)) {
-    const selected = [...new Set(selectedSequences.filter((sequence) => Number.isSafeInteger(sequence) && sequence > 0))];
-    params.set('selected', selected.join(','));
+  if (Array.isArray(excludedSequences)) {
+    params.set('excluded', normalizeSequenceList(excludedSequences).join(','));
   }
 
   const win = await chrome.windows.create({
@@ -1262,8 +1890,11 @@ async function switchCaptureMode(newMode) {
 }
 
 async function startRecording(tab, settings) {
-  sessionTabIds = new Set([tab.id]);
+  const sessionId = `session_${fileTimestamp(new Date())}`;
   await chrome.storage.local.remove(LOG_KEY).catch(() => {});
+  await chrome.storage.local.remove(PDF_EXCLUSIONS_KEY).catch(() => {});
+  await chrome.storage.local.remove(SESSION_CONTROL_KEY).catch(() => {});
+  await clearSessionTracking();
   await clearStoredFrames();
   await setState({ lastError: null });
   await setDownloadUi(false);
@@ -1292,17 +1923,27 @@ async function startRecording(tab, settings) {
     return await setState({ recording: false, streamActive: false, lastError: error.message });
   }
 
+  await chrome.storage.local.set({
+    [SESSION_CONTROL_KEY]: { sessionId, paused: false, captureGeneration: 0 }
+  });
+  await replaceSessionTracking(sessionId, [tab.id], [tab.windowId]);
   const state = await setState({
     recording: true,
+    paused: false,
+    captureGeneration: 0,
     tabId: tab.id,
     windowId: tab.windowId,
-    sessionId: `session_${fileTimestamp(new Date())}`,
+    sessionId,
     sequence: 0,
     captures: [],
+    pdfExcludedSequences: [],
+    trackedTabIds: [tab.id],
+    trackedWindowIds: [tab.windowId],
     downloadIds: [],
     apiSeen: 0,
     apiHookReady: false,
     streamActive,
+    fullPageProgress: null,
     lastError: null,
     settings: merged
   });
@@ -1356,17 +1997,21 @@ async function revealSavedFiles(downloadId) {
 // the user can hand off or review while the same session keeps adding to the same numbered sequence.
 // Unlike the final export, the folder is not opened here - only the final save should interrupt the
 // user, since this can happen many times over the course of one recording.
-async function exportPdfNow(requestedPdfFilename, selectedSequences) {
+async function exportPdfNow(requestedPdfFilename, excludedSequences) {
   if (apiQueue.length) await captureNow('final-api-calls');
   await captureChain.catch(() => {});
 
   const state = await getState();
   if (!state.recording) return setState({ lastError: 'Not currently recording.' });
   if (!state.captures.length) return setState({ lastError: 'Nothing captured yet.' });
+  const excluded = Array.isArray(excludedSequences)
+    ? normalizeSequenceList(excludedSequences)
+    : normalizeSequenceList(state.pdfExcludedSequences);
+  logLine(`PDF_EXPORT checkpoint excluded=${excluded.length} captures=${state.captures.length}`);
 
   const result = await exportPdfInWindow(
     `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, `${state.sessionId}_checkpoint`)}`,
-    selectedSequences
+    excluded
   );
   await writeLogFile().catch(() => {});
   if (result.error) {
@@ -1375,7 +2020,31 @@ async function exportPdfNow(requestedPdfFilename, selectedSequences) {
   return setState({ lastError: null });
 }
 
-async function stopRecording(keepFiles = true, requestedPdfFilename, selectedSequences) {
+async function setRecordingPaused(paused) {
+  const state = await getState();
+  if (!state.recording) return setState({ lastError: 'Not currently recording.' });
+  if (state.paused === paused) return state;
+
+  await chrome.storage.local.set({
+    [SESSION_CONTROL_KEY]: {
+      sessionId: state.sessionId,
+      paused,
+      captureGeneration: paused ? state.captureGeneration + 1 : state.captureGeneration
+    }
+  });
+  if (paused) {
+    logLine(`SESSION_PAUSED captures=${state.captures.length}`);
+  } else {
+    logLine(`SESSION_CONTINUED captures=${state.captures.length}`);
+  }
+
+  const next = await setState({ lastError: null });
+  await updateBadge(next);
+  await writeLogFile().catch(() => {});
+  return next;
+}
+
+async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSequences) {
   // Anything still queued would be lost, so give it a final frame to sit under.
   if (keepFiles && apiQueue.length) {
     await captureNow('final-api-calls');
@@ -1383,6 +2052,9 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, selectedSeq
   await captureChain.catch(() => {});
   const state = await getState();
   logLine(`SESSION_END keepFiles=${keepFiles} captures=${state.captures.length}`);
+  const excluded = Array.isArray(excludedSequences)
+    ? normalizeSequenceList(excludedSequences)
+    : normalizeSequenceList(state.pdfExcludedSequences);
   let lastError = null;
   let revealId = state.downloadIds[state.downloadIds.length - 1];
 
@@ -1410,9 +2082,10 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, selectedSeq
     }
 
     if (state.settings.savePdf && state.captures.length) {
+      logLine(`PDF_EXPORT final excluded=${excluded.length} captures=${state.captures.length}`);
       const result = await exportPdfInWindow(
         `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, state.sessionId)}`,
-        selectedSequences
+        excluded
       );
       if (result.error) {
         lastError = `PDF export failed: ${result.error}`;
@@ -1431,9 +2104,12 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, selectedSeq
 
   const next = await setState({
     recording: false,
+    paused: false,
+    captureGeneration: 0,
     tabId: null,
     windowId: null,
     streamActive: false,
+    fullPageProgress: null,
     downloadIds: [],
     lastError:
       lastError ?? (keepFiles ? null : `Deleted ${state.downloadIds.length} file(s) from this session.`)
@@ -1444,14 +2120,9 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, selectedSeq
 
 /* ---------------------------------------------------------------- listeners */
 
-// The tab a recording started on, plus any tab opened from it (or from one of those, recursively) -
-// an OAuth/sign-in redirect chain routinely hops across several. In-memory only: a service worker
-// restart forgets any child tabs and falls back to just the original one, which storage still has.
-let sessionTabIds = new Set();
-
 async function isRecordedTab(tabId) {
   const state = await getState();
-  return state.recording && (tabId === state.tabId || sessionTabIds.has(tabId));
+  return state.recording && state.trackedTabIds.includes(tabId);
 }
 
 // Whichever of the session's tabs the user is actually looking at is the one background-driven
@@ -1464,6 +2135,7 @@ async function adoptActiveTab(tabId) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab) return;
   logLine(`ACTIVE_TAB now tabId=${tabId} url=${shortUrl(tab.url || '')}`);
+  await trackSessionTab(state, tab);
   await setState({ tabId, windowId: tab.windowId });
 }
 
@@ -1505,13 +2177,15 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  sessionTabIds.delete(tabId);
   const state = await getState();
-  if (state.recording && tabId === state.tabId) {
+  if (!state.recording) return;
+  await untrackSessionTab(state, tabId);
+  const latest = await getState();
+  if (tabId === latest.tabId) {
     // The active tab closed but the session has other known tabs - follow to whichever one is
     // currently on screen instead of ending the recording.
     const [fallback] = await chrome.tabs.query({ active: true }).catch(() => []);
-    if (fallback && sessionTabIds.has(fallback.id)) {
+    if (fallback && latest.trackedTabIds.includes(fallback.id)) {
       await adoptActiveTab(fallback.id);
       return;
     }
@@ -1525,8 +2199,8 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 // treat it as part of the same recording so switching between it and its opener keeps capturing.
 chrome.tabs.onCreated.addListener(async (tab) => {
   const state = await getState();
-  if (!state.recording || !(tab.openerTabId === state.tabId || sessionTabIds.has(tab.openerTabId))) return;
-  sessionTabIds.add(tab.id);
+  if (!state.recording || !state.trackedTabIds.includes(tab.openerTabId)) return;
+  await trackSessionTab(state, tab);
   logLine(`NEW_TAB opened from recorded tab (tabId=${tab.id}), bringing it into focus`);
   // Activating the tab below fires onActivated, which is what actually adopts it as the current
   // capture target - calling adoptActiveTab here too just raced that same update and logged twice.
@@ -1534,14 +2208,20 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
 });
 
+chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
+  const state = await getState();
+  if (!state.recording || !state.trackedTabIds.includes(tabId)) return;
+  await trackSessionTab(state, { id: tabId, windowId: attachInfo.newWindowId });
+});
+
 // DevTools panel changes are not observable, so the user triggers those captures by hotkey.
 chrome.commands.onCommand.addListener(async (command) => {
   const state = await getState();
-  if (!state.recording) return;
+  if (!state.recording || state.paused) return;
 
   if (command === 'capture-panel') await captureNow('devtools-panel');
   if (command === 'capture-manual') await captureNow('manual-hotkey');
-  if (command === 'capture-later') scheduleDelayedCapture(state.tabId);
+  if (command === 'capture-later') scheduleDelayedCapture(state.tabId, state);
 });
 
 // If the sharing window is closed mid-flow, keep recording via tab capture instead of failing.
@@ -1574,6 +2254,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
 
       case 'START': {
+        const current = await getState();
+        if (current.recording) {
+          sendResponse(current);
+          return;
+        }
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab) {
           sendResponse(await setState({ lastError: 'No active tab found.' }));
@@ -1587,9 +2272,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
 
+      case 'SET_PAUSED':
+        try {
+          sendResponse(await setRecordingPaused(Boolean(message.paused)));
+        } catch (error) {
+          sendResponse(await setState({ lastError: error.message }));
+        }
+        break;
+
+      case 'SET_PDF_EXCLUSIONS': {
+        const state = await getState();
+        if (!state.recording || message.sessionId !== state.sessionId) {
+          sendResponse(state);
+          break;
+        }
+        const excluded = normalizeSequenceList(message.excludedSequences);
+        await chrome.storage.local.set({
+          [PDF_EXCLUSIONS_KEY]: { sessionId: state.sessionId, sequences: excluded }
+        });
+        logLine(`PDF_SELECTION excluded=${excluded.length}`);
+        sendResponse({ ...state, pdfExcludedSequences: excluded });
+        break;
+      }
+
       case 'STOP':
         try {
-          sendResponse(await stopRecording(message.keepFiles !== false, message.pdfFilename, message.selectedSequences));
+          sendResponse(await stopRecording(message.keepFiles !== false, message.pdfFilename, message.excludedSequences));
         } catch (error) {
           await cleanupCaptureResources();
           sendResponse(await setState({ recording: false, lastError: error.message }));
@@ -1598,7 +2306,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'EXPORT_PDF_NOW':
         try {
-          sendResponse(await exportPdfNow(message.pdfFilename, message.selectedSequences));
+          sendResponse(await exportPdfNow(message.pdfFilename, message.excludedSequences));
         } catch (error) {
           sendResponse(await setState({ lastError: `PDF export failed: ${error.message}` }));
         }
@@ -1614,7 +2322,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'CAPTURE_LATER': {
         const state = await getState();
         sendResponse(state);
-        scheduleDelayedCapture(state.tabId);
+        if (!state.paused) scheduleDelayedCapture(state.tabId, state);
         break;
       }
 
@@ -1632,11 +2340,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'CLICK_CAPTURE': {
         const state = await getState();
         const reason = message.reason || 'click';
-        const allowed = reason === 'scrolled' ? state.settings.captureOnScroll : state.settings.captureOnClick;
+        const allowed =
+          reason === 'manual-hotkey' ||
+          (reason === 'scrolled' ? state.settings.captureOnScroll : state.settings.captureOnClick);
         const tabId = sender.tab?.id;
         if (state.recording && allowed && tabId !== undefined && (await isRecordedTab(tabId))) {
           await adoptActiveTab(tabId);
-          await captureNow(reason, message.label);
+          if (!state.paused) await captureNow(reason, message.label);
         }
         sendResponse({ ok: true });
         break;
@@ -1655,7 +2365,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const state = await getState();
         if (state.recording && state.settings.captureApi && (await isRecordedTab(sender.tab?.id))) {
           if (!state.apiHookReady) await setState({ apiHookReady: true });
-          await queueApiCall({ ...message.detail, tabId: sender.tab.id });
+          if (!state.paused) await queueApiCall({ ...message.detail, tabId: sender.tab.id });
         }
         sendResponse({ ok: true });
         break;
