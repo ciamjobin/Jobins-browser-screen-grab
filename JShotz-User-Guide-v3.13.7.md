@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.13.6**
+**Version 3.13.7**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as a
 sequence of timestamped, watermarked screenshots and exports them as a PDF, with an optional
@@ -9,17 +9,28 @@ tickets, and step-by-step evidence of what happened in a browser session.
 
 ---
 
+## Before you begin
+
+- Record ordinary web pages. Browsers protect internal pages such as `chrome://` and extension
+  store pages, so JShotz cannot inject its click and scroll capture helpers there.
+- Keep the browser tab focused when using the manual `Ctrl+Alt+Q` shortcut.
+- Treat **API + Screenshot** recordings as sensitive evidence. Request URLs, payloads, and
+  responses can contain credentials, personal data, or other information that should not be
+  shared outside the intended audience.
+
+---
+
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.13.6-chrome-edge.zip`.
+1. Unzip `JShotz-3.13.7-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.13.6-firefox.zip`.
+1. Unzip `JShotz-3.13.7-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -70,6 +81,9 @@ the front first, since the picker needs a real click.
 If Screen/window mode's share source ends (you click "Stop sharing", or close the shared
 window), the recording automatically falls back to Tab-viewport captures rather than failing.
 
+API mode begins collecting newly observed `fetch` and XHR calls while it is selected. It does
+not add network details retroactively to screenshots that were captured in another mode.
+
 ---
 
 ## 4. Settings
@@ -83,6 +97,10 @@ window), the recording automatically falls back to Tab-viewport captures rather 
 - **Whole-page shot for Ctrl+Alt+Q and "Capture now" only** — see [Section 6](#6-full-page-whole-page-capture).
 - **Save individual PNG files** — save each screenshot as its own PNG in the session folder.
 - **Save PDF on stop** — build a PDF from the session when you stop and choose to keep it.
+
+During a recording, the behavior checkboxes are locked so the session stays consistent. The
+**Capture source** menu remains available, allowing you to switch modes without ending the
+session.
 
 ---
 
@@ -117,6 +135,8 @@ window), the recording automatically falls back to Tab-viewport captures rather 
 | DevTools panel capture | Press **Alt+Shift+S** while a DevTools panel is open | Captures exactly what's on screen, including the DevTools panel |
 | Capture in 5s | Click **Capture in 5s**, or press **Alt+Shift+D** | Waits 5 seconds (with an on-page countdown badge) before capturing — use this when you need time to click into DevTools first, since Chrome blocks other shortcuts while DevTools has focus |
 
+Manual captures are available only while recording is active and not paused.
+
 ### Export PDF so far
 
 Click **Export PDF so far** at any point during a recording to write a checkpoint PDF from
@@ -127,10 +147,11 @@ PDF (on Stop) uses the screenshots selected at that time.
 
 ### Create PDF from saved screenshots
 
-If you have a folder of previously saved PNGs (from a session, or from anywhere), click
-**Create PDF from saved screenshots** in the popup to pick that folder. Every compatible image
-starts checked in the displayed **Screenshots** list; clear unwanted files, then generate a fresh
-PDF from the remaining checked files, independent of any active recording.
+If you have a folder of previously saved PNG or JPEG images (from a session, or from anywhere),
+click **Create PDF from saved screenshots** in the popup to pick that folder. JShotz orders the
+compatible files naturally by folder path and name. Every image starts checked in the displayed
+**Screenshots** list; clear unwanted files, enter a PDF name, then generate a fresh PDF from the
+remaining checked files. This workflow is independent of any active recording.
 
 ---
 
@@ -175,6 +196,45 @@ so your view is never disturbed by the automatic captures.
 | `Alt+Shift+D` | Capture in 5 seconds |
 
 All three can be reassigned at `chrome://extensions/shortcuts` (or the Firefox equivalent).
+
+---
+
+## 8. PDF selection and saved files
+
+Every capture starts selected for PDF output. Clear the checkbox beside an unwanted screenshot,
+or use **Select all** to restore the full set. For large sessions, the popup initially shows the
+50 newest screenshots; use **Show older screenshots** to reveal earlier ones. The current
+selection is preserved while the session is active, even when the popup closes.
+
+The same selection controls both **Export PDF so far** and the final PDF created through
+**Stop recording**. Individual PNG files and the final PDF depend on the saving options enabled
+when the session started:
+
+- With **Save individual PNG files** enabled, JShotz saves each captured screenshot separately.
+- With **Save PDF on stop** enabled, choosing **Yes, keep** creates the selected PDF after you
+  enter its file name.
+- With that PDF option disabled, keeping a session retains its available captured files but does
+  not create a final PDF automatically. You can later use **Create PDF from saved screenshots**
+  to make one from a folder of PNG or JPEG images.
+
+The generated PDF uses the page title as the heading for each captured step. Timestamp banners
+appear only when **Stamp clock + time zone on each shot** was enabled. API tables appear only on
+screenshots captured in **API + Screenshot** mode.
+
+---
+
+## 9. Troubleshooting
+
+- After installing, reloading, or updating JShotz, refresh any target tab that was already open.
+  This removes old injected page scripts and avoids an **Extension context invalidated** error.
+- If the popup says JShotz is unavailable, reload the extension in the browser's extension page,
+  then close and reopen the popup.
+- If the Screen/window share picker is cancelled or the shared source closes, recording continues
+  with Tab viewport captures. Select Screen/window again when you are ready to share a surface.
+- During a whole-page capture, wait for the progress bar to complete before capturing again.
+  **Capture now** is temporarily disabled while that work is in progress.
+- If a page does not record clicks or scrolling, confirm that it is an ordinary website rather
+  than a browser-protected page, then refresh the tab and start a new recording.
 
 ---
 

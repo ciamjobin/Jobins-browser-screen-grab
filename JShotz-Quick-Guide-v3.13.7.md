@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.13.6**
+**Version 3.13.7**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF — handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -74,6 +74,41 @@ the screenshots selected at that time.
 ---
 
 ## Choose PDF screenshots
+
+Every captured screenshot starts selected for PDF output. Before a checkpoint or final export:
+
+1. Clear the checkbox beside any screenshot you do not want in the PDF.
+2. Use **Select all** to include every screenshot again.
+3. Use **Show older screenshots** when the recording has more than 50 captures.
+
+Your selection remains with the active recording when the popup closes. Only selected screenshots
+appear in **Export PDF so far** and the PDF created when you stop the recording.
+
+---
+
+## Make a PDF from saved screenshots
+
+1. Click **Create PDF from saved screenshots** in the popup.
+2. Select the folder containing your PNG or JPEG screenshots.
+3. Clear any images you do not want. JShotz orders files naturally by their folder path and name.
+4. Enter a PDF name and click **Generate PDF**.
+
+This is independent of recording, so it can turn a previous JShotz session or another folder of
+screenshots into a new PDF.
+
+---
+
+## Shortcuts and common fixes
+
+- `Ctrl+Alt+Q`: capture manually while the page has focus.
+- `Alt+Shift+S`: capture the currently visible DevTools panel.
+- `Alt+Shift+D`: start a five-second countdown, then capture. Use this when you need time to
+   click into DevTools.
+
+You can change extension shortcuts at `chrome://extensions/shortcuts` or the Firefox equivalent.
+If a page was open while JShotz was installed, reloaded, or updated, refresh that page before
+recording. Browser internal pages and the extension store cannot be recorded because browsers
+protect them from extensions.
 
 Every screenshot in the **Screenshots** list starts checked. Clear the checkbox beside any frame
 you do not want in the PDF. **Select all** is checked while every frame is included and clears

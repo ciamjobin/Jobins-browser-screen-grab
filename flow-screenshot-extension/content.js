@@ -51,6 +51,7 @@ let dialogTimer = 0;
 let scrollTimer = 0;
 let suppressScrollUntil = 0;
 let fullPageCaptureActive = false;
+let countdownTimer = 0;
 const scrollAnchors = new WeakMap();
 const capturedDialogs = new WeakSet();
 
@@ -364,7 +365,12 @@ const FULL_PAGE_PROGRESS_STYLE_ID = 'jshotz-full-page-progress-style';
 
 function fullPageProgressElement() {
   let panel = document.getElementById(FULL_PAGE_PROGRESS_ID);
-  if (panel) return panel;
+  if (panel) {
+    panel.progressLabel ||= panel.querySelector('.jshotz-progress-label');
+    panel.progressPercent ||= panel.querySelector('.jshotz-progress-percent');
+    panel.progressBar ||= panel.querySelector('.jshotz-progress-bar');
+    return panel;
+  }
 
   if (!document.getElementById(FULL_PAGE_PROGRESS_STYLE_ID)) {
     const style = document.createElement('style');
@@ -386,6 +392,9 @@ function fullPageProgressElement() {
   panel.setAttribute('role', 'status');
   panel.setAttribute('aria-live', 'polite');
   panel.innerHTML = '<div class="jshotz-progress-head"><span class="jshotz-progress-label"></span><span class="jshotz-progress-percent"></span></div><div class="jshotz-progress-track"><div class="jshotz-progress-bar"></div></div>';
+  panel.progressLabel = panel.querySelector('.jshotz-progress-label');
+  panel.progressPercent = panel.querySelector('.jshotz-progress-percent');
+  panel.progressBar = panel.querySelector('.jshotz-progress-bar');
   document.documentElement.append(panel);
   return panel;
 }
@@ -394,15 +403,20 @@ function showFullPageProgress(progress) {
   fullPageCaptureActive = true;
   const panel = fullPageProgressElement();
   const percent = Math.max(0, Math.min(100, Number(progress?.percent) || 0));
-  panel.querySelector('.jshotz-progress-label').textContent = progress?.label || 'Capturing full page';
-  panel.querySelector('.jshotz-progress-percent').textContent = `${percent}%`;
-  panel.querySelector('.jshotz-progress-bar').style.width = `${percent}%`;
+  panel.progressLabel.textContent = progress?.label || 'Capturing full page';
+  panel.progressPercent.textContent = `${percent}%`;
+  panel.progressBar.style.width = `${percent}%`;
   panel.style.visibility = 'visible';
 }
 
-function setFullPageProgressVisibility(hidden) {
+async function setFullPageProgressVisibility(hidden) {
   const panel = document.getElementById(FULL_PAGE_PROGRESS_ID);
-  if (panel) panel.style.visibility = hidden ? 'hidden' : 'visible';
+  if (!panel) return;
+  panel.style.visibility = hidden ? 'hidden' : 'visible';
+  panel.style.display = hidden ? 'none' : '';
+  if (hidden) {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
 }
 
 function clearFullPageProgress() {
@@ -414,6 +428,7 @@ function clearFullPageProgress() {
 
 function showCountdown(seconds) {
   document.getElementById(COUNTDOWN_ID)?.remove();
+  clearTimeout(countdownTimer);
 
   const badge = document.createElement('div');
   badge.id = COUNTDOWN_ID;
@@ -434,19 +449,23 @@ function showCountdown(seconds) {
   const tick = () => {
     label.textContent = remaining > 0 ? `Capturing in ${remaining}s\u2026` : 'Capturing\u2026';
     if (remaining <= 0) {
-      setTimeout(() => badge.remove(), 400);
+      countdownTimer = setTimeout(() => badge.remove(), 400);
       return;
     }
     remaining -= 1;
-    setTimeout(tick, 1000);
+    countdownTimer = setTimeout(tick, 1000);
   };
   tick();
 }
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'SHOW_COUNTDOWN') showCountdown(message.seconds);
   if (message?.type === 'FULL_PAGE_PROGRESS') showFullPageProgress(message.progress);
-  if (message?.type === 'FULL_PAGE_PROGRESS_VISIBILITY') setFullPageProgressVisibility(Boolean(message.hidden));
+  if (message?.type === 'FULL_PAGE_PROGRESS_VISIBILITY') {
+    setFullPageProgressVisibility(Boolean(message.hidden)).then(() => sendResponse({ ok: true }));
+    return true;
+  }
   if (message?.type === 'FULL_PAGE_PROGRESS_CLEAR') clearFullPageProgress();
+  return false;
 });
 })();
