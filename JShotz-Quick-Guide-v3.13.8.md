@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.13.7**
+**Version 3.13.8**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF — handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -25,6 +25,10 @@ documenting a process, a support case, or a step-by-step walkthrough.
    your original PNGs are kept in the session folder.
 
 You can change the capture source at any time without stopping the recording.
+
+If Chrome restarts during an active recording, return to the restored page and open the JShotz
+popup. The recording reconnects to that live tab and preserves the existing screenshots, numbering,
+and session folder.
 
 ---
 

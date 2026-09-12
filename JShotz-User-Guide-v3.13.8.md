@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.13.7**
+**Version 3.13.8**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as a
 sequence of timestamped, watermarked screenshots and exports them as a PDF, with an optional
@@ -23,14 +23,14 @@ tickets, and step-by-step evidence of what happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.13.7-chrome-edge.zip`.
+1. Unzip `JShotz-3.13.8-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.13.7-firefox.zip`.
+1. Unzip `JShotz-3.13.8-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -117,6 +117,10 @@ session.
   The button changes to **Continue recording**. While paused, JShotz keeps the screenshot list,
   PDF selections, capture numbering, session folder, and tracked tabs or child windows. Click
   **Continue recording** to add subsequent screenshots to that same session.
+   If Chrome restarts during a recording, return to the restored page and open the JShotz popup.
+   JShotz reconnects to that live tab, restores automatic and manual captures, and keeps the same
+   screenshots, numbering, and session folder. Screen/window sharing cannot survive a browser
+   restart, so that recording continues with tab-viewport capture until sharing is started again.
 5. When you're done, click **Stop recording**. Use the **Screenshots** list to clear any frames
    you do not want in the PDF. **Select all** starts checked and automatically clears when any
   individual screenshot is unchecked. This choice remains for the current recording if the popup

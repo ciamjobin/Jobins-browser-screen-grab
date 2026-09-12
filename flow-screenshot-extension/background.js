@@ -11,6 +11,9 @@ const WATERMARK = "Captured by Jobin's Screenshots";
 let captureChain = Promise.resolve();
 let lastRawCaptureHash = '';
 let lastTabTitle = '';
+let sessionRecoveryPending = false;
+let sessionRecoveryChain = Promise.resolve();
+let recoveredSessionId = null;
 
 // Held in memory rather than storage: concurrent API events would race a read-modify-write.
 let apiQueue = [];
@@ -460,22 +463,30 @@ const FULL_PAGE_CAPTURE_QUEUE_WATCHDOG_MS = 330000;
 // behind a promise that never settles, which looks exactly like the extension has stopped responding.
 const QUEUE_WATCHDOG_TOKEN = Symbol('queue-watchdog-timeout');
 async function captureNow(reason, label, requestedState) {
-  const captureRequest = requestedState || (await getState());
+  const captureRequest = requestedState || (await recoverRecordingSession());
+  if (!captureRequest.recording || captureRequest.paused) return captureRequest;
   const captureWatchdogMs =
     captureRequest.settings?.fullPage && FULL_PAGE_REASONS.has(reason)
       ? FULL_PAGE_CAPTURE_QUEUE_WATCHDOG_MS
       : CAPTURE_QUEUE_WATCHDOG_MS;
   captureChain = captureChain
     .then(async () => {
-      const result = await Promise.race([
-        performCapture(reason, label, captureRequest.sessionId, captureRequest.captureGeneration),
-        new Promise((resolve) => setTimeout(() => resolve(QUEUE_WATCHDOG_TOKEN), captureWatchdogMs))
-      ]);
-      if (result === QUEUE_WATCHDOG_TOKEN) {
-        logLine(
-          `QUEUE_WATCHDOG ${reason}${label ? ` "${label}"` : ''} exceeded ${captureWatchdogMs}ms, moving on`
-        );
-        await clearFullPageProgress(captureRequest.tabId);
+      let watchdogTimer;
+      try {
+        const result = await Promise.race([
+          performCapture(reason, label, captureRequest.sessionId, captureRequest.captureGeneration),
+          new Promise((resolve) => {
+            watchdogTimer = setTimeout(() => resolve(QUEUE_WATCHDOG_TOKEN), captureWatchdogMs);
+          })
+        ]);
+        if (result === QUEUE_WATCHDOG_TOKEN) {
+          logLine(
+            `QUEUE_WATCHDOG ${reason}${label ? ` "${label}"` : ''} exceeded ${captureWatchdogMs}ms, moving on`
+          );
+          await clearFullPageProgress(captureRequest.tabId);
+        }
+      } finally {
+        clearTimeout(watchdogTimer);
       }
     })
     .catch(async (error) => {
@@ -1451,6 +1462,8 @@ async function cleanupCaptureResources() {
   apiHeaderRecords = [];
   lastRawCaptureHash = '';
   lastTabTitle = '';
+  sessionRecoveryPending = false;
+  recoveredSessionId = null;
 }
 
 function isActiveCapture(state, sessionId, captureGeneration) {
@@ -1469,7 +1482,8 @@ async function performCapture(reason, label, requestedSessionId, requestedCaptur
 
   const tab = await chrome.tabs.get(state.tabId).catch(() => null);
   if (!tab) {
-    await stopRecording();
+    sessionRecoveryPending = true;
+    await setState({ lastError: 'Recording target is unavailable. Open the popup to resume on the active tab.' });
     return;
   }
 
@@ -1889,6 +1903,90 @@ async function switchCaptureMode(newMode) {
   return next;
 }
 
+const RECORDING_SCRIPT_TARGETS = [
+  { files: ['page-hook.js'], world: 'MAIN' },
+  { files: ['content.js'], world: 'ISOLATED' }
+];
+
+async function injectRecordingScripts(tabId) {
+  if (!Number.isSafeInteger(tabId)) return;
+  for (const script of RECORDING_SCRIPT_TARGETS) {
+    await chrome.scripting
+      .executeScript({ target: { tabId }, ...script })
+      .catch(() => {
+        /* Restricted pages (chrome://, Web Store) cannot be instrumented. */
+      });
+  }
+}
+
+async function findRecoveryTab(preferredTabId) {
+  if (Number.isSafeInteger(preferredTabId)) {
+    const preferred = await chrome.tabs.get(preferredTabId).catch(() => null);
+    if (preferred?.active) return preferred;
+  }
+  const [lastFocused] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+  if (lastFocused) return lastFocused;
+  const [anyActive] = await chrome.tabs.query({ active: true }).catch(() => []);
+  return anyActive || null;
+}
+
+// Chrome preserves extension storage across a browser restart, but tab and window IDs belong to
+// the old browser process. Rebind the active recording to a live tab before accepting new captures.
+async function recoverRecordingSession(preferredTabId, force = false) {
+  sessionRecoveryChain = sessionRecoveryChain
+    .catch(() => {})
+    .then(async () => {
+      const state = await getState();
+      if (!state.recording) {
+        sessionRecoveryPending = false;
+        recoveredSessionId = null;
+        return state;
+      }
+
+      const shouldCheckTarget = force || sessionRecoveryPending || recoveredSessionId !== state.sessionId;
+      if (!shouldCheckTarget) return state;
+
+      const currentTab = sessionRecoveryPending
+        ? null
+        : await chrome.tabs.get(state.tabId).catch(() => null);
+      if (currentTab) {
+        recoveredSessionId = state.sessionId;
+        return state;
+      }
+
+      const tab = await findRecoveryTab(preferredTabId);
+      if (!Number.isSafeInteger(tab?.id) || !state.sessionId) {
+        sessionRecoveryPending = true;
+        return state;
+      }
+
+      const captureGeneration = state.captureGeneration + 1;
+      await chrome.storage.local.set({
+        [SESSION_CONTROL_KEY]: {
+          sessionId: state.sessionId,
+          paused: state.paused,
+          captureGeneration
+        }
+      });
+      await replaceSessionTracking(state.sessionId, [tab.id], [tab.windowId]);
+      await setState({
+        tabId: tab.id,
+        windowId: tab.windowId,
+        apiHookReady: false,
+        streamActive: false,
+        screenWindowId: null,
+        fullPageProgress: null,
+        lastError: null
+      });
+      await injectRecordingScripts(tab.id);
+      sessionRecoveryPending = false;
+      recoveredSessionId = state.sessionId;
+      logLine(`SESSION_RECOVERED tabId=${tab.id} url=${shortUrl(tab.url || '')}`);
+      return getState();
+    });
+  return sessionRecoveryChain;
+}
+
 async function startRecording(tab, settings) {
   const sessionId = `session_${fileTimestamp(new Date())}`;
   await chrome.storage.local.remove(LOG_KEY).catch(() => {});
@@ -1947,19 +2045,11 @@ async function startRecording(tab, settings) {
     lastError: null,
     settings: merged
   });
+  sessionRecoveryPending = false;
+  recoveredSessionId = sessionId;
 
   // The declared content scripts only load on navigation, so seed the already-open page.
-  for (const files of [['page-hook.js'], ['content.js']]) {
-    await chrome.scripting
-      .executeScript({
-        target: { tabId: tab.id },
-        files,
-        world: files[0] === 'page-hook.js' ? 'MAIN' : 'ISOLATED'
-      })
-      .catch(() => {
-        /* Restricted pages (chrome://, Web Store) cannot be instrumented. */
-      });
-  }
+  await injectRecordingScripts(tab.id);
 
   await updateBadge(state);
   logLine(`SESSION_START mode=${merged.captureMode} url=${shortUrl(tab.url || '')}`);
@@ -2021,7 +2111,7 @@ async function exportPdfNow(requestedPdfFilename, excludedSequences) {
 }
 
 async function setRecordingPaused(paused) {
-  const state = await getState();
+  const state = await recoverRecordingSession(undefined, true);
   if (!state.recording) return setState({ lastError: 'Not currently recording.' });
   if (state.paused === paused) return state;
 
@@ -2121,7 +2211,7 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
 /* ---------------------------------------------------------------- listeners */
 
 async function isRecordedTab(tabId) {
-  const state = await getState();
+  const state = await recoverRecordingSession(tabId);
   return state.recording && state.trackedTabIds.includes(tabId);
 }
 
@@ -2177,7 +2267,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const state = await getState();
+  const state = await recoverRecordingSession();
   if (!state.recording) return;
   await untrackSessionTab(state, tabId);
   const latest = await getState();
@@ -2198,7 +2288,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 // display it also determines what actually shows up in the capture. Bring the new tab forward, and
 // treat it as part of the same recording so switching between it and its opener keeps capturing.
 chrome.tabs.onCreated.addListener(async (tab) => {
-  const state = await getState();
+  const state = await recoverRecordingSession(tab.openerTabId);
   if (!state.recording || !state.trackedTabIds.includes(tab.openerTabId)) return;
   await trackSessionTab(state, tab);
   logLine(`NEW_TAB opened from recorded tab (tabId=${tab.id}), bringing it into focus`);
@@ -2209,14 +2299,14 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 });
 
 chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
-  const state = await getState();
+  const state = await recoverRecordingSession(tabId);
   if (!state.recording || !state.trackedTabIds.includes(tabId)) return;
   await trackSessionTab(state, { id: tabId, windowId: attachInfo.newWindowId });
 });
 
 // DevTools panel changes are not observable, so the user triggers those captures by hotkey.
 chrome.commands.onCommand.addListener(async (command) => {
-  const state = await getState();
+  const state = await recoverRecordingSession(undefined, true);
   if (!state.recording || state.paused) return;
 
   if (command === 'capture-panel') await captureNow('devtools-panel');
@@ -2236,13 +2326,23 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
   }
 });
 
+function recoverAfterBrowserRestart() {
+  sessionRecoveryPending = true;
+  recoverRecordingSession().catch((error) => console.error('Could not recover recording session:', error));
+}
+
+chrome.runtime.onStartup.addListener(recoverAfterBrowserRestart);
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === 'update') recoverAfterBrowserRestart();
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.target === 'offscreen' || message?.target === 'screen') return false;
 
   (async () => {
     switch (message.type) {
       case 'GET_STATE':
-        sendResponse(await getState());
+        sendResponse(await recoverRecordingSession());
         break;
 
       case 'SCREEN_READY':
@@ -2256,7 +2356,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'START': {
         const current = await getState();
         if (current.recording) {
-          sendResponse(current);
+          sendResponse(await recoverRecordingSession());
           return;
         }
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -2313,21 +2413,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
 
       case 'CAPTURE_NOW':
-        await captureNow('manual');
+        await captureNow('manual', undefined, await recoverRecordingSession(undefined, true));
         sendResponse(await getState());
         break;
 
       // Chrome does not deliver extension shortcuts while the DevTools window has focus, so this
       // gives the user time to click into DevTools before the shot is taken.
       case 'CAPTURE_LATER': {
-        const state = await getState();
+        const state = await recoverRecordingSession(undefined, true);
         sendResponse(state);
         if (!state.paused) scheduleDelayedCapture(state.tabId, state);
         break;
       }
 
       case 'SET_SETTINGS': {
-        const state = await getState();
+        const state = await recoverRecordingSession();
         const { captureMode, ...rest } = message.settings;
         const next =
           state.recording && captureMode && captureMode !== state.settings.captureMode
@@ -2338,7 +2438,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'CLICK_CAPTURE': {
-        const state = await getState();
+        const state = await recoverRecordingSession(sender.tab?.id);
         const reason = message.reason || 'click';
         const allowed =
           reason === 'manual-hotkey' ||
@@ -2353,7 +2453,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'API_HOOK_READY': {
-        const state = await getState();
+        const state = await recoverRecordingSession(sender.tab?.id);
         if (state.recording && (await isRecordedTab(sender.tab?.id)) && !state.apiHookReady) {
           await setState({ apiHookReady: true });
         }
@@ -2362,7 +2462,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'API_CAPTURE': {
-        const state = await getState();
+        const state = await recoverRecordingSession(sender.tab?.id);
         if (state.recording && state.settings.captureApi && (await isRecordedTab(sender.tab?.id))) {
           if (!state.apiHookReady) await setState({ apiHookReady: true });
           if (!state.paused) await queueApiCall({ ...message.detail, tabId: sender.tab.id });
