@@ -49,9 +49,9 @@ const LIST_SELECTOR = [
 ].join(',');
 
 const DIALOG_SELECTOR = ['dialog', '[role="dialog"]', '[role="alertdialog"]'].join(',');
+const MODAL_SCROLL_MIN_VIEWPORT = 220;
+const MODAL_SCROLL_MIN_OVERFLOW = 80;
 
-// The list whose opened state was already captured; further poking or scrolling inside adds nothing.
-let capturedList = null;
 let lastSent = { key: '', at: 0 };
 let editTimer = 0;
 let selectionTimer = 0;
@@ -60,6 +60,7 @@ let scrollTimer = 0;
 let suppressScrollUntil = 0;
 let fullPageCaptureActive = false;
 let countdownTimer = 0;
+let saveShortcutTimer = 0;
 const scrollAnchors = new WeakMap();
 const capturedDialogs = new WeakSet();
 
@@ -86,7 +87,11 @@ function sendRuntimeMessage(message) {
   } catch {}
 }
 
-function requestCapture(reason, label) {
+function isScrollCapture(reason) {
+  return reason === 'scrolled' || reason === 'modal-scrolled';
+}
+
+function requestCapture(reason, label, options = {}) {
   const key = `${reason}:${label}`;
   const now = Date.now();
   if (key === lastSent.key && now - lastSent.at < 800) return;
@@ -94,9 +99,9 @@ function requestCapture(reason, label) {
 
   // Chromium can briefly resize the visible viewport while it displays a debugger notice during
   // ordinary full-page capture; that must not read as a user scroll.
-  if (reason !== 'scrolled') suppressScrollUntil = now + 2500;
+  if (!isScrollCapture(reason)) suppressScrollUntil = now + 2500;
 
-  sendRuntimeMessage({ type: 'CLICK_CAPTURE', reason, label });
+  sendRuntimeMessage({ type: 'CLICK_CAPTURE', reason, label, ...options });
 }
 
 const SETTLE_QUIET_MS = 400;
@@ -145,6 +150,10 @@ function looksBusy() {
 // screen appears. Both are worth keeping: the interim frame shows the action was taken, the settled
 // one shows the result. Fires immediately, then again once the DOM stops changing.
 async function requestCaptureAfterSettle(reason, label) {
+  // Let a synchronous dialog-opening click finish first. The dialog observer owns that capture,
+  // so the underlying button does not add a duplicate frame behind the modal.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (activeModal()) return;
   requestCapture(reason, label);
 
   const deadline = Date.now() + SETTLE_MAX_WAIT_MS;
@@ -154,6 +163,7 @@ async function requestCaptureAfterSettle(reason, label) {
   }
   // A distinct reason so the settled shot is not deduped against the interim one by label alone;
   // the background still drops it if the page turned out not to have changed at all.
+  if (activeModal()) return;
   requestCapture(`${reason}-loaded`, label);
 }
 
@@ -165,8 +175,19 @@ function describeEditedField(element) {
 }
 
 function requestEditCapture(element) {
+  const dialog = modalForElement(element);
+  if (activeModal() && !dialog) return;
   clearTimeout(editTimer);
-  editTimer = setTimeout(() => requestCapture('field-edited', describeEditedField(element)), 700);
+  editTimer = setTimeout(() => {
+    const currentDialog = activeModal();
+    if (currentDialog && currentDialog !== dialog) return;
+    const activeDialog = dialog && isVisible(dialog) ? dialog : null;
+    requestCapture(
+      activeDialog ? 'modal-edited' : 'field-edited',
+      describeEditedField(element),
+      activeDialog ? modalCaptureOptions(activeDialog) : undefined
+    );
+  }, 700);
 }
 
 function selectedTextFromActiveElement() {
@@ -182,6 +203,7 @@ function selectedTextFromActiveElement() {
 function requestSelectionCapture() {
   clearTimeout(selectionTimer);
   selectionTimer = setTimeout(() => {
+    if (activeModal()) return;
     const text = selectedTextFromActiveElement().trim().replace(/\s+/g, ' ');
     if (text) requestCapture('text-selected', text.slice(0, 80));
   }, 500);
@@ -193,16 +215,97 @@ function isVisible(element) {
   return rect.width > 0 && rect.height > 0;
 }
 
+function visibleDialogs() {
+  return [...document.querySelectorAll(DIALOG_SELECTOR)].filter(isVisible);
+}
+
+function activeModal() {
+  const dialogs = visibleDialogs();
+  return dialogs[dialogs.length - 1] || null;
+}
+
+function modalForElement(element) {
+  const dialog = element?.closest?.(DIALOG_SELECTOR);
+  return dialog && isVisible(dialog) ? dialog : null;
+}
+
+function isModalScrollableElement(element, dialog) {
+  if (!element || modalForElement(element) !== dialog) return false;
+  const overflow = Math.max(0, Number(element.scrollHeight) - Number(element.clientHeight));
+  if (overflow < 4) return false;
+  const overflowY = typeof getComputedStyle === 'function' ? getComputedStyle(element).overflowY : '';
+  return !overflowY || /auto|scroll|overlay/i.test(overflowY);
+}
+
+function isLargeModalScroller(element, dialog) {
+  if (!isModalScrollableElement(element, dialog)) return false;
+  const viewportHeight = Math.max(MODAL_SCROLL_MIN_VIEWPORT, Math.round(window.innerHeight * 0.3));
+  const overflow = Math.max(0, Number(element.scrollHeight) - Number(element.clientHeight));
+  return (
+    element.clientHeight >= viewportHeight &&
+    overflow >= Math.max(MODAL_SCROLL_MIN_OVERFLOW, element.clientHeight * 0.15)
+  );
+}
+
+function modalElements(dialog) {
+  const descendants = typeof dialog?.querySelectorAll === 'function' ? dialog.querySelectorAll('*') : [];
+  return [dialog, ...descendants];
+}
+
+function modalScrollContainer(dialog) {
+  return modalElements(dialog).find((element) => isLargeModalScroller(element, dialog)) || null;
+}
+
+function hasModalScrollbar(dialog) {
+  return modalElements(dialog).some((element) => isModalScrollableElement(element, dialog));
+}
+
+function modalCaptureOptions(dialog) {
+  if (!dialog || !isVisible(dialog)) return undefined;
+  const rect = dialog.getBoundingClientRect();
+  const viewportWidth = Math.round(Number(window.innerWidth) || 0);
+  const viewportHeight = Math.round(Number(window.innerHeight) || 0);
+  const width = Math.round(Number(rect.width) || 0);
+  const height = Math.round(Number(rect.height) || 0);
+  if (viewportWidth < 2 || viewportHeight < 2 || width < 2 || height < 2) return undefined;
+  return {
+    modal: {
+      left: Math.round(Number(rect.left) || 0),
+      top: Math.round(Number(rect.top) || 0),
+      width,
+      height,
+      viewportWidth,
+      viewportHeight,
+      compact: !hasModalScrollbar(dialog)
+    }
+  };
+}
+
+async function requestModalActionAfterSettle(reason, label, sourceDialog) {
+  const deadline = Date.now() + SETTLE_MAX_WAIT_MS;
+  await waitForQuiet(SETTLE_QUIET_MS, SETTLE_MAX_WAIT_MS);
+  while (looksBusy() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  const dialog = activeModal();
+  // Opening a different modal is already captured by scanForDialogs().
+  if (dialog && dialog !== sourceDialog) return;
+  requestCapture(reason, label, dialog ? modalCaptureOptions(dialog) : undefined);
+}
+
 // A modal can be opened by a control we do not recognise, so watch for the dialog itself appearing.
 function scanForDialogs() {
   clearTimeout(dialogTimer);
   dialogTimer = setTimeout(() => {
-    for (const dialog of document.querySelectorAll(DIALOG_SELECTOR)) {
-      if (capturedDialogs.has(dialog) || !isVisible(dialog)) continue;
-      capturedDialogs.add(dialog);
-      requestCapture('dialog-opened', describe(dialog));
-      return;
+    const dialogs = [...document.querySelectorAll(DIALOG_SELECTOR)];
+    for (const dialog of dialogs) {
+      if (!isVisible(dialog)) capturedDialogs.delete(dialog);
     }
+    const dialog = dialogs.filter(isVisible).at(-1);
+    if (!dialog || capturedDialogs.has(dialog)) return;
+    capturedDialogs.add(dialog);
+    requestCapture('dialog-opened', describe(dialog), modalCaptureOptions(dialog));
   }, 350);
 }
 
@@ -212,18 +315,67 @@ new MutationObserver(scanForDialogs).observe(document.documentElement, {
   attributes: true,
   attributeFilter: ['open', 'hidden', 'aria-hidden', 'class', 'style']
 });
+scanForDialogs();
 
 function isManualShortcut(event) {
   return event.ctrlKey && event.altKey && !event.shiftKey && event.key?.toLowerCase() === 'q';
 }
 
+function isPlainControlShortcut(event, key) {
+  return (
+    event.ctrlKey &&
+    !event.altKey &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    event.key?.toLowerCase() === key
+  );
+}
+
+function preventShortcut(event) {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function scheduleFlowSave() {
+  clearTimeout(saveShortcutTimer);
+  // A browser key event carries one non-modifier key at a time. Briefly wait after Ctrl+S so a
+  // held Ctrl+S+O chord can request the explicit reveal without saving the PDF twice.
+  saveShortcutTimer = setTimeout(() => {
+    saveShortcutTimer = 0;
+    sendRuntimeMessage({ type: 'SAVE_FLOW' });
+  }, 450);
+}
+
 window.addEventListener(
   'keydown',
   (event) => {
-    if (!isManualShortcut(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    requestCapture('manual-hotkey', 'Ctrl+Alt+Q');
+    if (isManualShortcut(event)) {
+      preventShortcut(event);
+      requestCapture('manual-hotkey', 'Ctrl+Alt+Q');
+      return;
+    }
+    if (isPlainControlShortcut(event, 'o') && saveShortcutTimer) {
+      preventShortcut(event);
+      if (!event.repeat) {
+        clearTimeout(saveShortcutTimer);
+        saveShortcutTimer = 0;
+        sendRuntimeMessage({ type: 'SAVE_FLOW', reveal: true });
+      }
+      return;
+    }
+    if (isPlainControlShortcut(event, 's')) {
+      preventShortcut(event);
+      if (!event.repeat) scheduleFlowSave();
+      return;
+    }
+    if (isPlainControlShortcut(event, 'n')) {
+      preventShortcut(event);
+      if (!event.repeat) {
+        clearTimeout(saveShortcutTimer);
+        saveShortcutTimer = 0;
+        sendRuntimeMessage({ type: 'START_NEW_RECORDING' });
+      }
+    }
   },
   true
 );
@@ -234,37 +386,47 @@ window.addEventListener(
   (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    const openDialog = activeModal();
 
-    // Choosing an entry closes the list, so this is the selection worth keeping.
+    // A picker may be explored with many clicks and scrolls. Keep only the committed value.
     const option = target.closest(OPTION_SELECTOR);
     if (option) {
-      capturedList = null;
-      requestCapture('selection', describe(option));
+      const dialog = modalForElement(option) || openDialog;
+      if (dialog) {
+        requestModalActionAfterSettle('modal-selection', describe(option), dialog);
+      } else {
+        requestCapture('selection', describe(option));
+      }
       return;
     }
 
     const list = target.closest(LIST_SELECTOR);
     if (list) {
-      if (capturedList === list) return;
-      capturedList = list;
-      requestCapture('list-opened', describe(list));
       return;
     }
+
+    const dialog = modalForElement(target);
+    // A visible modal owns interaction. Background controls and its underlying page should not
+    // create captures until the modal closes or the user acts inside it.
+    if (openDialog && !dialog) return;
 
     const trigger = target.closest(INTERACTIVE_SELECTOR) || target.closest('a[href]');
     if (!trigger) return;
 
+    if (trigger instanceof HTMLInputElement && (trigger.type === 'checkbox' || trigger.type === 'radio')) return;
+
     const opensList = trigger.hasAttribute('aria-haspopup') || trigger.hasAttribute('aria-expanded');
-    if (opensList) capturedList = null;
+    if (opensList) return;
+
+    if (dialog) {
+      requestModalActionAfterSettle('modal-click', describe(trigger), dialog);
+      return;
+    }
 
     // A button click on a client-rendered page often swaps in a loading spinner before the real
     // next screen appears; capturing immediately would just record the spinner. Waiting for the
     // page to stop actively changing catches the settled result instead.
-    if (opensList) {
-      requestCapture('list-opened', describe(trigger));
-    } else {
-      requestCaptureAfterSettle('click', describe(trigger));
-    }
+    requestCaptureAfterSettle('click', describe(trigger));
   },
   true
 );
@@ -284,13 +446,30 @@ document.addEventListener(
     const scroller = isDocument ? document.documentElement : target;
     if (!isDocument && !(scroller instanceof Element)) return;
 
+    // Listbox/menu scrolling is browsing choices, not a recordable page transition. Some controls
+    // virtualize long lists, so this must be checked against the scroller and its ancestors.
+    if (!isDocument && scroller.closest(LIST_SELECTOR)) {
+      clearTimeout(scrollTimer);
+      scrollAnchors.set(scroller, scroller.scrollTop);
+      return;
+    }
+
+    const openDialog = activeModal();
+    const dialog = isDocument ? null : modalForElement(scroller);
+    const modalScroller = dialog && dialog === openDialog && isLargeModalScroller(scroller, dialog);
+    if (openDialog && !modalScroller) {
+      clearTimeout(scrollTimer);
+      if (!isDocument) scrollAnchors.set(scroller, scroller.scrollTop);
+      return;
+    }
+
     const position = isDocument ? window.scrollY : scroller.scrollTop;
     const screenful = isDocument ? window.innerHeight : scroller.clientHeight;
     if (screenful < 200) return;
 
     const key = isDocument ? document.documentElement : scroller;
     if (!scrollAnchors.has(key)) scrollAnchors.set(key, position);
-    if (fullPageCaptureActive || Date.now() < suppressScrollUntil) {
+    if (fullPageCaptureActive || (!modalScroller && Date.now() < suppressScrollUntil)) {
       scrollAnchors.set(key, position);
       return;
     }
@@ -305,13 +484,19 @@ document.addEventListener(
 
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(() => {
+      const currentModal = activeModal();
+      if (modalScroller ? currentModal !== dialog : currentModal) return;
       const settled = isDocument ? window.scrollY : scroller.scrollTop;
       scrollAnchors.set(key, settled);
       const label =
         settled >= limit - SCROLL_END_SLACK
           ? 'end of page'
           : `${Math.round((settled / limit) * 100)}% down`;
-      requestCapture('scrolled', label);
+      requestCapture(
+        modalScroller ? 'modal-scrolled' : 'scrolled',
+        modalScroller ? `${describe(dialog)} ${label}` : label,
+        modalScroller ? modalCaptureOptions(dialog) : undefined
+      );
     }, 450);
   },
   true
@@ -322,15 +507,26 @@ window.addEventListener(
   'change',
   (event) => {
     const element = event.target;
+    const openDialog = activeModal();
+    const dialog = modalForElement(element);
+    if (openDialog && !dialog) return;
     if (element instanceof HTMLSelectElement) {
       const chosen = element.options[element.selectedIndex]?.text ?? element.value;
-      requestCapture('selection', `${describe(element)} = ${chosen}`.slice(0, 80));
+      requestCapture(
+        dialog ? 'modal-selection' : 'selection',
+        `${describe(element)} = ${chosen}`.slice(0, 80),
+        dialog ? modalCaptureOptions(dialog) : undefined
+      );
       return;
     }
 
     if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) {
       const state = element.checked ? 'checked' : 'unchecked';
-      requestCapture('toggle', `${describe(element)} = ${state}`.slice(0, 80));
+      requestCapture(
+        dialog ? 'modal-edited' : 'toggle',
+        `${describe(element)} = ${state}`.slice(0, 80),
+        dialog ? modalCaptureOptions(dialog) : undefined
+      );
     }
   },
   true
@@ -341,9 +537,8 @@ window.addEventListener(
   (event) => {
     const element = event.target;
     if (
-      element instanceof HTMLInputElement ||
+      (element instanceof HTMLInputElement && element.type !== 'checkbox' && element.type !== 'radio') ||
       element instanceof HTMLTextAreaElement ||
-      element instanceof HTMLSelectElement ||
       element?.isContentEditable
     ) {
       requestEditCapture(element);

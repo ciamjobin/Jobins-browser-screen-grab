@@ -86,6 +86,48 @@ function drawWatermark(canvas, text) {
   ctx.textAlign = 'left';
 }
 
+function clamp(value, lower, upper) {
+  return Math.min(upper, Math.max(lower, value));
+}
+
+// Capture-visible-tab returns bitmap pixels while dialog geometry arrives in CSS viewport pixels.
+// Keep a small surrounding gutter so the modal still reads as a complete UI surface in the export.
+function modalCropRect(modal, bitmapWidth, bitmapHeight) {
+  if (!modal?.compact) return null;
+  const numbers = [
+    modal.left,
+    modal.top,
+    modal.width,
+    modal.height,
+    modal.viewportWidth,
+    modal.viewportHeight,
+    bitmapWidth,
+    bitmapHeight
+  ].map(Number);
+  if (!numbers.every(Number.isFinite)) return null;
+
+  const [left, top, width, height, viewportWidth, viewportHeight] = numbers;
+  if (width < 2 || height < 2 || viewportWidth < 2 || viewportHeight < 2 || bitmapWidth < 2 || bitmapHeight < 2) {
+    return null;
+  }
+
+  const scaleX = bitmapWidth / viewportWidth;
+  const scaleY = bitmapHeight / viewportHeight;
+  if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || scaleX <= 0 || scaleY <= 0) return null;
+
+  const gutter = Math.min(16, Math.max(8, Math.round(Math.min(width, height) * 0.035)));
+  const startX = Math.floor(clamp(left - gutter, 0, viewportWidth) * scaleX);
+  const startY = Math.floor(clamp(top - gutter, 0, viewportHeight) * scaleY);
+  const endX = Math.ceil(clamp(left + width + gutter, 0, viewportWidth) * scaleX);
+  const endY = Math.ceil(clamp(top + height + gutter, 0, viewportHeight) * scaleY);
+  const x = clamp(startX, 0, bitmapWidth);
+  const y = clamp(startY, 0, bitmapHeight);
+  const right = clamp(endX, x, bitmapWidth);
+  const bottom = clamp(endY, y, bitmapHeight);
+  if (right - x < 2 || bottom - y < 2) return null;
+  return { x, y, width: right - x, height: bottom - y };
+}
+
 const TABLE_FONT = 14;
 const TABLE_LINE = 19;
 const TABLE_PAD = 10;
@@ -205,7 +247,8 @@ async function processCapture({
   wantJpeg,
   apiRows,
   titleBar,
-  jpegQuality
+  jpegQuality,
+  modal
 }) {
   let bitmap;
   let imageCanvas;
@@ -213,18 +256,25 @@ async function processCapture({
   try {
     const blob = await (await fetch(dataUrl)).blob();
     bitmap = await createImageBitmap(blob);
-    const titleHeight = titleBar ? titleBarHeight(bitmap.width) : 0;
+    const crop = modalCropRect(modal, bitmap.width, bitmap.height);
+    const imageWidth = crop?.width || bitmap.width;
+    const imageHeight = crop?.height || bitmap.height;
+    const titleHeight = titleBar ? titleBarHeight(imageWidth) : 0;
 
-    const table = apiRows?.length ? layoutApiTable(apiRows, bitmap.width) : null;
+    const table = apiRows?.length ? layoutApiTable(apiRows, imageWidth) : null;
     imageCanvas = document.createElement('canvas');
-    imageCanvas.width = bitmap.width;
-    imageCanvas.height = bitmap.height + titleHeight;
+    imageCanvas.width = imageWidth;
+    imageCanvas.height = imageHeight + titleHeight;
 
     const imageCtx = imageCanvas.getContext('2d');
     imageCtx.fillStyle = '#ffffff';
     imageCtx.fillRect(0, 0, imageCanvas.width, imageCanvas.height);
     if (titleBar) drawCapturedTitleBar(imageCanvas, titleBar.title, titleBar.url);
-    imageCtx.drawImage(bitmap, 0, titleHeight);
+    if (crop) {
+      imageCtx.drawImage(bitmap, crop.x, crop.y, crop.width, crop.height, 0, titleHeight, imageWidth, imageHeight);
+    } else {
+      imageCtx.drawImage(bitmap, 0, titleHeight);
+    }
 
     if (stampText) drawTimestampBanner(imageCanvas, stampText, titleHeight);
     if (watermarkText) drawWatermark(imageCanvas, watermarkText);
@@ -304,4 +354,4 @@ const handlers = {
   OFFSCREEN_PROCESS: (message) => processCapture(message)
 };
 
-export { processCapture, handlers };
+export { processCapture, handlers, modalCropRect };

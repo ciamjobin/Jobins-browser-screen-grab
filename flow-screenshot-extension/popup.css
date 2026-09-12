@@ -157,6 +157,9 @@ h2 {
 }
 
 #toggle,
+#saveFlow,
+#saveAndOpen,
+#startNewRecording,
 #exportPdfNow {
   grid-column: 1 / -1;
 }

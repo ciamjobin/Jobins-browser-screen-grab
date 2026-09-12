@@ -471,7 +471,7 @@ const FULL_PAGE_CAPTURE_QUEUE_WATCHDOG_MS = 330000;
 // requested after it (including the popup's own "Capture now" / "Capture in 5s" buttons) would wait
 // behind a promise that never settles, which looks exactly like the extension has stopped responding.
 const QUEUE_WATCHDOG_TOKEN = Symbol('queue-watchdog-timeout');
-async function captureNow(reason, label, requestedState) {
+async function captureNow(reason, label, requestedState, modal) {
   const captureRequest = requestedState || (await recoverRecordingSession());
   if (!captureRequest.recording || captureRequest.paused) return captureRequest;
   const captureWatchdogMs =
@@ -483,7 +483,7 @@ async function captureNow(reason, label, requestedState) {
       let watchdogTimer;
       try {
         const result = await Promise.race([
-          performCapture(reason, label, captureRequest.sessionId, captureRequest.captureGeneration),
+          performCapture(reason, label, captureRequest.sessionId, captureRequest.captureGeneration, modal),
           new Promise((resolve) => {
             watchdogTimer = setTimeout(() => resolve(QUEUE_WATCHDOG_TOKEN), captureWatchdogMs);
           })
@@ -1554,7 +1554,7 @@ function isActiveCapture(state, sessionId, captureGeneration) {
   );
 }
 
-async function performCapture(reason, label, requestedSessionId, requestedCaptureGeneration) {
+async function performCapture(reason, label, requestedSessionId, requestedCaptureGeneration, modal) {
   const startedAt = Date.now();
   const state = await getState();
   if (state.tabId === null || !isActiveCapture(state, requestedSessionId, requestedCaptureGeneration)) return;
@@ -1602,7 +1602,9 @@ async function performCapture(reason, label, requestedSessionId, requestedCaptur
       sessionId: state.sessionId,
       captureGeneration: state.captureGeneration,
       mode: state.settings.captureMode,
-      fullPageInfo
+      fullPageInfo,
+      // Screen/window and stitched full-page images do not share the page viewport coordinate system.
+      modal: !wantsFullPage && (state.settings.captureMode === 'tab' || state.settings.captureMode === 'api') ? modal : null
     };
 
     if (fullPage?.parts?.length) {
@@ -1710,6 +1712,7 @@ async function persistCapture({
   captureGeneration,
   mode,
   fullPageInfo,
+  modal,
   apiRows: suppliedApiRows,
   titleBar = true,
   stampTimestamp = true,
@@ -1739,7 +1742,8 @@ async function persistCapture({
     wantPng: settings.savePng,
     wantJpeg: settings.savePdf,
     apiRows,
-    jpegQuality
+    jpegQuality,
+    modal
   });
   const rawHash = hashText(rawDataUrl);
   rawDataUrl = null;
@@ -2408,7 +2412,7 @@ async function revealSavedFiles(downloadId) {
 // the user can hand off or review while the same session keeps adding to the same numbered sequence.
 // Unlike the final export, the folder is not opened here - only the final save should interrupt the
 // user, since this can happen many times over the course of one recording.
-async function exportPdfNow(requestedPdfFilename, excludedSequences) {
+async function exportPdfNow(requestedPdfFilename, excludedSequences, reveal = false) {
   if (apiQueue.length) await captureNow('final-api-calls');
   await captureChain.catch(() => {});
 
@@ -2428,7 +2432,24 @@ async function exportPdfNow(requestedPdfFilename, excludedSequences) {
   if (result.error) {
     return setState({ lastError: `PDF export failed: ${result.error}` });
   }
+  if (reveal && !savesToSelectedFolder(state) && typeof result.downloadId === 'number') {
+    await revealSavedFiles(result.downloadId);
+  }
   return setState({ lastError: null });
+}
+
+function checkpointPdfFilename(sessionId) {
+  return pdfFilename(undefined, `${sessionId}_checkpoint_${fileTimestamp(new Date())}`);
+}
+
+async function saveFlow(reveal, requestedPdfFilename, excludedSequences) {
+  const state = await recoverRecordingSession(undefined, true);
+  if (!state.recording) return setState({ lastError: 'Not currently recording.' });
+  return exportPdfNow(
+    requestedPdfFilename || checkpointPdfFilename(state.sessionId),
+    excludedSequences,
+    reveal
+  );
 }
 
 async function setRecordingPaused(paused) {
@@ -2455,7 +2476,7 @@ async function setRecordingPaused(paused) {
   return next;
 }
 
-async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSequences) {
+async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSequences, reveal = true) {
   // Anything still queued would be lost, so give it a final frame to sit under.
   if (keepFiles && apiQueue.length) {
     await captureNow('final-api-calls');
@@ -2527,7 +2548,7 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
 
   // The shelf is suppressed during recording, so opening the folder is the only cue that files landed.
   await flushLog();
-  if (keepFiles && state.captures.length && !savedToFolder) await revealSavedFiles(revealId);
+  if (keepFiles && reveal && state.captures.length && !savedToFolder) await revealSavedFiles(revealId);
 
   const next = await setState({
     recording: false,
@@ -2546,6 +2567,18 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
   });
   await updateBadge(next);
   return next;
+}
+
+async function startNewRecording(tab, settings, excludedSequences) {
+  const state = await recoverRecordingSession(undefined, true);
+  const nextSettings = { ...state.settings, ...settings };
+  if (state.recording) {
+    if (!state.paused) await setRecordingPaused(true);
+    // Finish the old flow first, but do not reveal its folder: Ctrl+N is intended to keep users
+    // working in the current tab while the next session starts in its own capture folder.
+    await stopRecording(true, undefined, excludedSequences, false);
+  }
+  return startRecording(tab, nextSettings);
 }
 
 /* ---------------------------------------------------------------- listeners */
@@ -2795,6 +2828,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         break;
 
+      case 'SAVE_FLOW':
+        try {
+          sendResponse(await saveFlow(Boolean(message.reveal), message.pdfFilename, message.excludedSequences));
+        } catch (error) {
+          sendResponse(await setState({
+            folderAccessNeeded: needsFolderReconnect(error),
+            lastError: `PDF export failed: ${error.message}`
+          }));
+        }
+        break;
+
+      case 'START_NEW_RECORDING': {
+        const [activeTab] = sender.tab
+          ? [sender.tab]
+          : await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!activeTab) {
+          sendResponse(await setState({ lastError: 'No active tab found.' }));
+          break;
+        }
+        try {
+          sendResponse(await startNewRecording(activeTab, message.settings, message.excludedSequences));
+        } catch (error) {
+          sendResponse(await setState({ recording: false, folderAccessNeeded: false, lastError: error.message }));
+        }
+        break;
+      }
+
       case 'CAPTURE_NOW':
         await captureNow('manual', undefined, await recoverRecordingSession(undefined, true));
         sendResponse(await getState());
@@ -2825,11 +2885,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const reason = message.reason || 'click';
         const allowed =
           reason === 'manual-hotkey' ||
-          (reason === 'scrolled' ? state.settings.captureOnScroll : state.settings.captureOnClick);
+          (reason === 'scrolled' || reason === 'modal-scrolled'
+            ? state.settings.captureOnScroll
+            : state.settings.captureOnClick);
         const tabId = sender.tab?.id;
         if (state.recording && allowed && tabId !== undefined && (await isRecordedTab(tabId))) {
           await adoptActiveTab(tabId);
-          if (!state.paused) await captureNow(reason, message.label);
+          if (!state.paused) await captureNow(reason, message.label, undefined, message.modal);
         }
         sendResponse({ ok: true });
         break;

@@ -5,6 +5,9 @@ const toggleEl = document.getElementById('toggle');
 const pauseResumeEl = document.getElementById('pauseResume');
 const captureNowEl = document.getElementById('captureNow');
 const captureLaterEl = document.getElementById('captureLater');
+const saveFlowEl = document.getElementById('saveFlow');
+const saveAndOpenEl = document.getElementById('saveAndOpen');
+const startNewRecordingEl = document.getElementById('startNewRecording');
 const exportPdfNowEl = document.getElementById('exportPdfNow');
 const captureListEl = document.getElementById('captureList');
 const settingsEl = document.querySelector('.settings');
@@ -38,6 +41,7 @@ let selectionUpdateChain = Promise.resolve();
 let captureListLimit = CAPTURE_LIST_PAGE_SIZE;
 let renderedCaptureListKey = null;
 let renderedState = null;
+let saveShortcutTimer = 0;
 
 const controls = {
   captureMode: document.getElementById('captureMode'),
@@ -317,6 +321,9 @@ function render(state) {
   pauseResumeEl.textContent = paused ? 'Continue recording' : 'Pause recording';
   captureNowEl.disabled = !recording || paused || Boolean(state?.fullPageProgress?.active);
   captureLaterEl.disabled = !recording || paused;
+  saveFlowEl.disabled = !recording || !state?.captures?.length;
+  saveAndOpenEl.disabled = !recording || !state?.captures?.length;
+  startNewRecordingEl.disabled = !recording;
   exportPdfNowEl.disabled = !recording || !state?.captures?.length;
   updateResumeCaptureButton(state);
 
@@ -386,6 +393,30 @@ async function exportPdfNow(pdfFilename) {
   statusEl.textContent = 'Writing checkpoint PDF\u2026';
   render(await send('EXPORT_PDF_NOW', {
     pdfFilename,
+    excludedSequences: excludedCaptureSequenceList()
+  }));
+}
+
+async function saveFlow(reveal = false) {
+  const state = await send('GET_STATE');
+  render(state);
+  if (!state.recording || !state.captures.length) return;
+  statusEl.textContent = reveal ? 'Saving flow and opening the file location...' : 'Saving flow in the background...';
+  statusEl.className = 'status recording';
+  render(await send('SAVE_FLOW', {
+    reveal,
+    excludedSequences: excludedCaptureSequenceList()
+  }));
+}
+
+async function startNewRecording() {
+  const state = await send('GET_STATE');
+  render(state);
+  if (!state.recording) return;
+  statusEl.textContent = 'Saving the current flow and starting a new recording...';
+  statusEl.className = 'status recording';
+  render(await send('START_NEW_RECORDING', {
+    settings: readSettings(),
     excludedSequences: excludedCaptureSequenceList()
   }));
 }
@@ -486,6 +517,10 @@ captureNowEl.addEventListener('click', async () => {
   render(await send('CAPTURE_NOW'));
 });
 
+saveFlowEl.addEventListener('click', () => saveFlow(false).catch(showRuntimeError));
+saveAndOpenEl.addEventListener('click', () => saveFlow(true).catch(showRuntimeError));
+startNewRecordingEl.addEventListener('click', () => startNewRecording().catch(showRuntimeError));
+
 exportPdfNowEl.addEventListener('click', async () => {
   const state = await send('GET_STATE');
   render(state);
@@ -512,6 +547,53 @@ captureLaterEl.addEventListener('click', async () => {
   render(await send('CAPTURE_LATER'));
   statusEl.textContent = 'Capturing in 5s \u2014 click into DevTools now\u2026';
   window.close();
+});
+
+function isPlainControlShortcut(event, key) {
+  return (
+    event.ctrlKey &&
+    !event.altKey &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    event.key?.toLowerCase() === key
+  );
+}
+
+function preventShortcut(event) {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+document.addEventListener('keydown', (event) => {
+  if (standalonePopup || !renderedState?.recording || awaitingChoice) return;
+  if (isPlainControlShortcut(event, 'o') && saveShortcutTimer) {
+    preventShortcut(event);
+    if (!event.repeat) {
+      clearTimeout(saveShortcutTimer);
+      saveShortcutTimer = 0;
+      saveFlow(true).catch(showRuntimeError);
+    }
+    return;
+  }
+  if (isPlainControlShortcut(event, 's')) {
+    preventShortcut(event);
+    if (!event.repeat) {
+      clearTimeout(saveShortcutTimer);
+      saveShortcutTimer = setTimeout(() => {
+        saveShortcutTimer = 0;
+        saveFlow(false).catch(showRuntimeError);
+      }, 450);
+    }
+    return;
+  }
+  if (isPlainControlShortcut(event, 'n')) {
+    preventShortcut(event);
+    if (!event.repeat) {
+      clearTimeout(saveShortcutTimer);
+      saveShortcutTimer = 0;
+      startNewRecording().catch(showRuntimeError);
+    }
+  }
 });
 
 for (const control of Object.values(controls)) {

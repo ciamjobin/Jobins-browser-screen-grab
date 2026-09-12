@@ -212,9 +212,13 @@ function createChrome() {
   });
   const injectedFiles = [];
   const downloadRequests = [];
+  const offscreenMessages = [];
+  const exportRequests = [];
+  const revealedDownloads = [];
   const tabMessages = [];
   let captureError = null;
   let captureCount = 0;
+  let nextExportWindowId = 1000;
 
   const chrome = {
     storage: { local: storage },
@@ -228,7 +232,9 @@ function createChrome() {
         return downloadRequests.length;
       },
       async setUiOptions() {},
-      async show() {},
+      async show(downloadId) {
+        revealedDownloads.push(downloadId);
+      },
       async showDefaultFolder() {}
     },
     offscreen: {
@@ -246,6 +252,7 @@ function createChrome() {
         if (message.target !== 'offscreen') throw new Error(`Unexpected runtime message: ${message.type}`);
         if (message.type === 'OFFSCREEN_PING') return { ok: true };
         if (message.type === 'OFFSCREEN_PROCESS') {
+          offscreenMessages.push(message);
           return {
             pngDataUrl: message.wantPng ? message.dataUrl : null,
             jpeg: message.wantJpeg ? { base64: 'cHJvYmU=', width: 1, height: 1 } : null
@@ -278,7 +285,19 @@ function createChrome() {
         return 'data:image/png;base64,cHJvYmU=';
       }
     },
-    windows: { onRemoved: createEvent() },
+    windows: {
+      onRemoved: createEvent(),
+      async create(options) {
+        const win = { id: nextExportWindowId++ };
+        exportRequests.push(options);
+        setTimeout(() => {
+          const listener = chrome.runtime.onMessage.listeners.at(-1);
+          listener?.({ type: 'PDF_DONE', downloadId: 5000 + exportRequests.length }, {}, () => {});
+        }, 0);
+        return win;
+      },
+      async remove() {}
+    },
     webNavigation: {
       onCompleted: createEvent(),
       onHistoryStateUpdated: createEvent(),
@@ -297,8 +316,11 @@ function createChrome() {
     chrome,
     captureCount: () => captureCount,
     downloadRequests,
+    exportRequests,
     injectedFiles,
     liveTab,
+    offscreenMessages,
+    revealedDownloads,
     sessionId,
     tabMessages,
     setCaptureError(error) {
@@ -403,6 +425,24 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
     assert.equal(afterClick.captures.length, 42);
     assert.equal(fixture.captureCount(), 2);
 
+    const modal = {
+      left: 120,
+      top: 90,
+      width: 760,
+      height: 480,
+      viewportWidth: 1280,
+      viewportHeight: 720,
+      compact: false
+    };
+    const modalScrollResult = await sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'modal-scrolled', label: 'Terms 50% down', modal },
+      { tab: fixture.liveTab }
+    );
+    assert.deepEqual(modalScrollResult, { ok: true });
+    assert.equal(fixture.captureCount(), 3);
+    assert.deepEqual(fixture.offscreenMessages.at(-1).modal, modal);
+
     const stopped = await sendMessage(messageListener, { type: 'STOP', keepFiles: true });
     assert.equal(stopped.recording, false);
     assert.equal(fixture.downloadRequests.length, 1);
@@ -414,6 +454,64 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
     assert.ok(manifest.debugLog.some((line) => line.includes('CAPTURE_SKIPPED manual')));
   } finally {
     console.error = originalConsoleError;
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('saves a flow without stopping and starts a separate recording without deleting the previous flow', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { savePdf: true } });
+    const captured = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    const previousSessionId = captured.sessionId;
+    assert.equal(captured.recording, true);
+    assert.equal(fixture.captureCount(), 1);
+
+    const saved = await sendMessage(
+      messageListener,
+      { type: 'SAVE_FLOW' },
+      { tab: fixture.liveTab }
+    );
+    assert.equal(saved.recording, true);
+    assert.equal(saved.sessionId, previousSessionId);
+    assert.equal(fixture.exportRequests.length, 1);
+    assert.match(
+      new URL(fixture.exportRequests[0].url, 'https://extension.test').searchParams.get('filename'),
+      new RegExp(`flow-captures/${previousSessionId}/`)
+    );
+    assert.equal(fixture.revealedDownloads.length, 0);
+
+    await sendMessage(
+      messageListener,
+      { type: 'SAVE_FLOW', reveal: true },
+      { tab: fixture.liveTab }
+    );
+    assert.equal(fixture.exportRequests.length, 2);
+    assert.deepEqual(fixture.revealedDownloads, [5002]);
+
+    const fresh = await sendMessage(
+      messageListener,
+      { type: 'START_NEW_RECORDING' },
+      { tab: fixture.liveTab }
+    );
+    assert.equal(fresh.recording, true);
+    assert.notEqual(fresh.sessionId, previousSessionId);
+    assert.equal(fresh.sequence, 1);
+    assert.equal(fresh.captures.length, 1);
+    assert.equal(fixture.captureCount(), 2);
+    assert.equal(fixture.exportRequests.length, 3);
+    assert.ok(
+      fixture.downloadRequests.some((request) =>
+        request.filename === `flow-captures/${previousSessionId}/flow-manifest.json`
+      )
+    );
+  } finally {
     globalThis.chrome = originalChrome;
   }
 });
