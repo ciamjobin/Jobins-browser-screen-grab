@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { saveCaptureFolder } from '../flow-screenshot-extension/capture-folder.js';
 
 let backgroundImportSequence = 0;
 
@@ -46,6 +47,138 @@ function createStorage(values) {
   };
 }
 
+function createIndexedDb() {
+  const stores = new Map();
+  return {
+    open() {
+      const request = { error: null };
+      queueMicrotask(() => {
+        const database = {
+          objectStoreNames: {
+            contains(name) {
+              return stores.has(name);
+            }
+          },
+          createObjectStore(name) {
+            if (!stores.has(name)) stores.set(name, new Map());
+          },
+          transaction(name, mode = 'readonly') {
+            const values = stores.get(name);
+            const transaction = {
+              error: null,
+              objectStore() {
+                return {
+                  get(key) {
+                    const read = { error: null };
+                    queueMicrotask(() => {
+                      read.result = values.get(key);
+                      read.onsuccess?.();
+                    });
+                    return read;
+                  },
+                  put(value, key) {
+                    values.set(key, value);
+                  }
+                };
+              }
+            };
+            if (mode === 'readwrite') queueMicrotask(() => transaction.oncomplete?.());
+            return transaction;
+          },
+          close() {}
+        };
+        request.result = database;
+        if (!stores.has('folders')) request.onupgradeneeded?.();
+        request.onsuccess?.();
+      });
+      return request;
+    }
+  };
+}
+
+function createResumeFolder() {
+  const imageName = '001_2026-09-12_10-00-00-000_Previous_step.png';
+  const manifest = JSON.stringify({
+    sessionId: 'session_before_crash',
+    screenshots: [{
+      sequence: 1,
+      title: 'Previous step',
+      url: 'https://example.test/previous',
+      reason: 'click',
+      mode: 'tab',
+      capturedAt: '2026-09-12T10:00:00.000Z',
+      filename: `flow-captures/session_before_crash/${imageName}`
+    }]
+  });
+  const files = new Map([
+    [imageName, { contents: Uint8Array.from([112, 114, 111, 98, 101]), type: 'image/png' }],
+    ['flow-manifest.json', { contents: manifest, type: 'application/json' }]
+  ]);
+  const written = new Map();
+  let permission = 'granted';
+
+  const bytesFor = async (contents) => {
+    if (typeof contents === 'string') return new TextEncoder().encode(contents);
+    if (contents instanceof Uint8Array) return contents;
+    if (contents instanceof ArrayBuffer) return new Uint8Array(contents);
+    return new Uint8Array(await contents.arrayBuffer());
+  };
+  const fileHandle = (name) => ({
+    kind: 'file',
+    name,
+    async getFile() {
+      const stored = files.get(name);
+      if (!stored) throw new Error(`No file named ${name}`);
+      const bytes = await bytesFor(stored.contents);
+      return {
+        name,
+        type: stored.type,
+        lastModified: Date.parse('2026-09-12T10:00:00.000Z'),
+        async arrayBuffer() {
+          return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        },
+        async text() {
+          return new TextDecoder().decode(bytes);
+        }
+      };
+    },
+    async createWritable() {
+      return {
+        async write(contents) {
+          written.set(name, contents);
+        },
+        async close() {},
+        async abort() {}
+      };
+    }
+  });
+  return {
+    written,
+    directoryHandle: {
+      kind: 'directory',
+      name: 'session_before_crash',
+      async queryPermission() {
+        return permission;
+      },
+      async *values() {
+        for (const name of files.keys()) yield fileHandle(name);
+      },
+      async getFileHandle(name, options = {}) {
+        if (!files.has(name) && !options.create) throw new Error(`No file named ${name}`);
+        if (!files.has(name)) files.set(name, { contents: new Uint8Array(), type: 'application/octet-stream' });
+        return fileHandle(name);
+      },
+      async removeEntry(name) {
+        files.delete(name);
+        written.delete(name);
+      }
+    },
+    setPermission(value) {
+      permission = value;
+    }
+  };
+}
+
 function createChrome() {
   const sessionId = 'session_before_crash';
   const liveTab = {
@@ -79,6 +212,7 @@ function createChrome() {
   });
   const injectedFiles = [];
   const downloadRequests = [];
+  const tabMessages = [];
   let captureError = null;
   let captureCount = 0;
 
@@ -111,7 +245,12 @@ function createChrome() {
       async sendMessage(message) {
         if (message.target !== 'offscreen') throw new Error(`Unexpected runtime message: ${message.type}`);
         if (message.type === 'OFFSCREEN_PING') return { ok: true };
-        if (message.type === 'OFFSCREEN_PROCESS') return { pngDataUrl: message.dataUrl };
+        if (message.type === 'OFFSCREEN_PROCESS') {
+          return {
+            pngDataUrl: message.wantPng ? message.dataUrl : null,
+            jpeg: message.wantJpeg ? { base64: 'cHJvYmU=', width: 1, height: 1 } : null
+          };
+        }
         throw new Error(`Unexpected offscreen message: ${message.type}`);
       }
     },
@@ -128,7 +267,8 @@ function createChrome() {
       async query() {
         return [{ ...liveTab }];
       },
-      async sendMessage() {
+      async sendMessage(tabId, message) {
+        tabMessages.push({ tabId, message });
         return {};
       },
       async captureVisibleTab(windowId) {
@@ -160,8 +300,12 @@ function createChrome() {
     injectedFiles,
     liveTab,
     sessionId,
+    tabMessages,
     setCaptureError(error) {
       captureError = error;
+    },
+    setStorage(patch) {
+      return storage.set(patch);
     },
     storageSnapshot: () => storage.snapshot()
   };
@@ -201,6 +345,24 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
     assert.equal(recovered.captureGeneration, 5);
     assert.equal(recovered.captures.length, 40);
     assert.deepEqual(fixture.injectedFiles, ['page-hook.js', 'content.js']);
+    assert.deepEqual(fixture.tabMessages.at(-1), {
+      tabId: fixture.liveTab.id,
+      message: { type: 'API_HOOK_CONFIG', enabled: false }
+    });
+
+    const apiMode = await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { captureMode: 'api' } });
+    assert.equal(apiMode.settings.captureApi, true);
+    assert.deepEqual(fixture.tabMessages.at(-1), {
+      tabId: fixture.liveTab.id,
+      message: { type: 'API_HOOK_CONFIG', enabled: true }
+    });
+
+    const tabMode = await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { captureMode: 'tab' } });
+    assert.equal(tabMode.settings.captureApi, false);
+    assert.deepEqual(fixture.tabMessages.at(-1), {
+      tabId: fixture.liveTab.id,
+      message: { type: 'API_HOOK_CONFIG', enabled: false }
+    });
 
     const paused = await sendMessage(messageListener, { type: 'SET_PAUSED', paused: true });
     assert.equal(paused.paused, true);
@@ -253,5 +415,83 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
   } finally {
     console.error = originalConsoleError;
     globalThis.chrome = originalChrome;
+  }
+});
+
+test('resumes a selected screenshot folder and writes the combined flow there', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalIndexedDb = globalThis.indexedDB;
+  const originalConsoleError = console.error;
+  const fixture = createChrome();
+  const folder = createResumeFolder();
+  const consoleErrors = [];
+  globalThis.chrome = fixture.chrome;
+  globalThis.indexedDB = createIndexedDb();
+  console.error = (...args) => consoleErrors.push(args.join(' '));
+
+  try {
+    await fixture.setStorage({
+      flowRecorderState: {
+        recording: false,
+        settings: {
+          captureMode: 'tab',
+          captureOnClick: true,
+          captureOnScroll: true,
+          captureApi: false,
+          stampTimestamp: false,
+          fullPage: false,
+          savePng: false,
+          savePdf: false
+        }
+      }
+    });
+    await saveCaptureFolder(folder.directoryHandle);
+    await loadBackground();
+
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const resumed = await sendMessage(messageListener, {
+      type: 'RESUME_FROM_FOLDER',
+      settings: { captureMode: 'tab', fullPage: false, savePng: false, savePdf: false }
+    });
+
+    assert.equal(resumed.recording, true);
+    assert.equal(resumed.sequence, 2);
+    assert.equal(resumed.captures.length, 2);
+    assert.equal(resumed.captures[0].title, 'Previous step');
+    assert.match(resumed.captures[1].filename, /^002_/);
+    assert.equal(fixture.downloadRequests.length, 0);
+    assert.ok([...folder.written.keys()].some((name) => /^002_.*\.png$/.test(name)));
+
+    folder.setPermission('denied');
+    await loadBackground();
+    const restartedMessageListener = fixture.chrome.runtime.onMessage.listeners.at(-1);
+    const unavailable = await sendMessage(restartedMessageListener, { type: 'GET_STATE' });
+    assert.equal(unavailable.sequence, 2);
+    assert.equal(unavailable.folderAccessNeeded, true);
+    assert.match(unavailable.lastError, /Reconnect capture folder/);
+    assert.equal(consoleErrors.length, 0);
+
+    folder.setPermission('granted');
+    const reconnected = await sendMessage(restartedMessageListener, { type: 'RECONNECT_CAPTURE_FOLDER' });
+    assert.equal(reconnected.recording, true);
+    assert.equal(reconnected.sequence, 2);
+    assert.equal(reconnected.folderAccessNeeded, false);
+    assert.equal(reconnected.lastError, null);
+
+    const capturedAfterReconnect = await sendMessage(restartedMessageListener, { type: 'CAPTURE_NOW' });
+    assert.equal(capturedAfterReconnect.sequence, 3);
+    assert.equal(capturedAfterReconnect.folderAccessNeeded, false);
+
+    const stopped = await sendMessage(restartedMessageListener, { type: 'STOP', keepFiles: true });
+    assert.equal(stopped.recording, false);
+    assert.equal(fixture.downloadRequests.length, 0);
+    assert.ok([...folder.written.keys()].some((name) => name.endsWith('.pdf')));
+    const manifest = JSON.parse(folder.written.get('flow-manifest.json'));
+    assert.equal(manifest.screenshotCount, 3);
+    assert.deepEqual(manifest.screenshots.map((capture) => capture.sequence), [1, 2, 3]);
+  } finally {
+    console.error = originalConsoleError;
+    globalThis.chrome = originalChrome;
+    globalThis.indexedDB = originalIndexedDb;
   }
 });

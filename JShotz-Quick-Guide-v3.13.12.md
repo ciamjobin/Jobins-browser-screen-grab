@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.13.10**
+**Version 3.13.12**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF — handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -13,7 +13,8 @@ documenting a process, a support case, or a step-by-step walkthrough.
    `popup.html` directly from its folder; it needs the browser extension runtime to record.
 2. Choose a **Capture source**:
    - **Tab viewport only** — screenshots of the page you're on.
-   - **API + Screenshot** — same, plus a table of the page's network calls under each shot.
+    - **API + Screenshot** — same, plus a table of the page's network calls under each shot. JShotz
+       observes page network calls only while this source is selected.
    - **Screen / window** — share your whole screen, a window, or a tab (the only option that
      can show DevTools or other apps).
 3. Click **Start recording**.
@@ -29,6 +30,10 @@ You can change the capture source at any time without stopping the recording.
 If Chrome restarts during an active recording, return to the restored page and open the JShotz
 popup. The recording reconnects to that live tab and preserves the existing screenshots, numbering,
 and session folder.
+
+If a browser or extension crash leaves only an earlier screenshot folder, use **Resume capture from
+folder**. JShotz loads that folder's screenshots, starts at the next number, and includes the old
+and new screenshots in its checkpoint and final PDFs.
 
 If Chrome says JShotz needs access after a redirect, open the JShotz popup on the current page and
 continue recording. For flows that move between websites, set JShotz **Site access** to **On all
@@ -94,15 +99,20 @@ appear in **Export PDF so far** and the PDF created when you stop the recording.
 
 ---
 
-## Make a PDF from saved screenshots
+## Resume an interrupted capture
 
-1. Click **Create PDF from saved screenshots** in the popup.
-2. Select the folder containing your PNG or JPEG screenshots.
-3. Clear any images you do not want. JShotz orders files naturally by their folder path and name.
-4. Enter a PDF name and click **Generate PDF**.
+1. Open the page where you want to continue the flow.
+2. Click **Resume capture from folder** in the popup.
+3. Choose the earlier session's screenshot folder in the native folder dialog and allow read/write
+   access.
+4. JShotz refreshes the **Screenshots** list with the earlier files and immediately captures the
+   current page as the next screenshot.
 
-This is independent of recording, so it can turn a previous JShotz session or another folder of
-screenshots into a new PDF.
+New PNG files, checkpoint PDFs, the final PDF, and the refreshed `flow-manifest.json` are written
+to that same selected folder. No browser tab is opened for this action. It is available in Chrome
+and Edge; Firefox can record normally but cannot write directly into an arbitrary existing folder.
+If Chrome or Edge asks for folder access again after a restart, the button becomes **Reconnect
+capture folder**. Choose the same folder to continue without resetting the current flow.
 
 ---
 
@@ -123,8 +133,8 @@ you do not want in the PDF. **Select all** is checked while every frame is inclu
 when any individual frame is removed. The choice remains for the current recording if the popup
 closes and is reopened.
 
-The same selection list appears after choosing a folder in **Create PDF from saved screenshots**.
-Only the checked PNG or JPEG files are included in that PDF.
+After resuming a folder, the same selection list contains the earlier and newly captured screenshots.
+Only checked screenshots are included in the checkpoint and final PDFs.
 
 ---
 
@@ -139,6 +149,9 @@ Downloads/flow-captures/session_<date-time>/
 This includes your screenshots, the PDF, and a technical `debugLog` inside
 `flow-manifest.json` for troubleshooting. The log is stored in the extension background while
 you record, so it never interrupts a recording with a separate download prompt.
+
+When you resume from a folder, JShotz writes new files directly beside the earlier screenshots in
+the folder you selected instead of creating a new Downloads session folder.
 
 ---
 

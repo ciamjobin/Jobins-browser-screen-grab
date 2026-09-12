@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.13.10**
+**Version 3.13.12**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as a
 sequence of timestamped, watermarked screenshots and exports them as a PDF, with an optional
@@ -13,6 +13,8 @@ tickets, and step-by-step evidence of what happened in a browser session.
 
 - Record ordinary web pages. Browsers protect internal pages such as `chrome://` and extension
   store pages, so JShotz cannot inject its click and scroll capture helpers there.
+- JShotz observes page fetch/XHR calls only during an **API + Screenshot** recording. Tab viewport
+  and Screen/window modes leave site networking untouched.
 - Keep the browser tab focused when using the manual `Ctrl+Alt+Q` shortcut.
 - Treat **API + Screenshot** recordings as sensitive evidence. Request URLs, payloads, and
   responses can contain credentials, personal data, or other information that should not be
@@ -23,14 +25,14 @@ tickets, and step-by-step evidence of what happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.13.10-chrome-edge.zip`.
+1. Unzip `JShotz-3.13.12-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.13.10-firefox.zip`.
+1. Unzip `JShotz-3.13.12-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -55,7 +57,8 @@ Click the JShotz icon to open the popup. It has three parts:
   or an error message.
 - **Settings** — capture source and behavior options (locked once recording starts, except the
   capture source, which can be changed mid-recording).
-- **Actions** — Start/Stop, Pause/Continue, Capture now, Capture in 5s, Export PDF so far.
+- **Actions** — Start/Stop, Pause/Continue, Capture now, Capture in 5s, Export PDF so far, and
+  Resume capture from folder.
 - **Screenshots list** — a live list of what's been captured so far in the current session and
   checkboxes that choose the screenshots included in a PDF.
 
@@ -149,13 +152,27 @@ the screenshots currently checked in the **Screenshots** list, without stopping.
 final "Stop recording" export does that. The recording keeps going afterward, and the final
 PDF (on Stop) uses the screenshots selected at that time.
 
-### Create PDF from saved screenshots
+### Resume capture from folder
 
-If you have a folder of previously saved PNG or JPEG images (from a session, or from anywhere),
-click **Create PDF from saved screenshots** in the popup to pick that folder. JShotz orders the
-compatible files naturally by folder path and name. Every image starts checked in the displayed
-**Screenshots** list; clear unwanted files, enter a PDF name, then generate a fresh PDF from the
-remaining checked files. This workflow is independent of any active recording.
+Use this action when a browser or extension crash leaves a prior set of screenshots but the active
+recording cannot be recovered automatically:
+
+1. Open the page where the flow should continue.
+2. In the idle popup, click **Resume capture from folder**.
+3. Choose the exact earlier screenshot folder in the native folder dialog and grant read/write
+  access.
+
+JShotz immediately reloads the **Screenshots** list from that folder and captures the current page
+with the next sequence number. The earlier and new screenshots are selected for **Export PDF so
+far** and the final **Stop recording** PDF. New PNGs, PDFs, and `flow-manifest.json` are written
+directly into the selected folder, and JShotz does not open a browser tab for this action.
+
+This workflow needs Chrome or Edge's native File System Access API. Firefox can record normally,
+but cannot resume into an arbitrary existing folder.
+
+After a browser restart, Chrome or Edge can require the folder permission again. JShotz changes
+the action to **Reconnect capture folder**; choose the same folder and the existing recording,
+screenshots, and sequence number continue unchanged.
 
 ---
 
@@ -218,8 +235,10 @@ when the session started:
 - With **Save PDF on stop** enabled, choosing **Yes, keep** creates the selected PDF after you
   enter its file name.
 - With that PDF option disabled, keeping a session retains its available captured files but does
-  not create a final PDF automatically. You can later use **Create PDF from saved screenshots**
-  to make one from a folder of PNG or JPEG images.
+  not create a final PDF automatically.
+
+When resuming a selected folder, JShotz enables both PNG and final-PDF saving so the older and new
+screenshots stay together in that folder.
 
 The generated PDF uses the page title as the heading for each captured step. Timestamp banners
 appear only when **Stamp clock + time zone on each shot** was enabled. API tables appear only on
@@ -266,6 +285,10 @@ Downloads/
     Pausing does not create another folder. When you click **Continue recording**, new screenshots
     keep the next number and are written beside the screenshots already shown in the list.
 
+  When you use **Resume capture from folder**, the selected existing folder becomes the working
+  folder. JShotz writes the new PNGs, checkpoint PDF, final PDF, and updated `flow-manifest.json`
+  there instead of creating a new Downloads session folder.
+
 ---
 
 ## 9. The debug log
@@ -294,6 +317,8 @@ extension storage until you start a new recording.
 - A horizontally-scrolling element on a page (e.g. a carousel) is captured exactly as it
   appears at the time — whole-page capture only extends vertically.
 - Reloading or updating JShotz requires refreshing any already-open recording tabs before use.
+- Resume capture from folder requires Chrome or Edge; Firefox does not provide writable native
+  folder handles to extensions.
 
 ---
 

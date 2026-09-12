@@ -6,6 +6,14 @@
 if (window.__jshotzContentReady) return;
 window.__jshotzContentReady = true;
 
+const API_CAPTURE_ATTRIBUTE = 'data-jshotz-api-capture';
+const API_CAPTURE_EVENT = 'jshotz-api-capture-change';
+
+function setApiCaptureEnabled(enabled) {
+  document.documentElement.setAttribute(API_CAPTURE_ATTRIBUTE, enabled ? '1' : '0');
+  document.documentElement.dispatchEvent(new Event(API_CAPTURE_EVENT));
+}
+
 const INTERACTIVE_SELECTOR = [
   'button',
   '[role="button"]',
@@ -459,6 +467,11 @@ function showCountdown(seconds) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'API_HOOK_CONFIG') {
+    setApiCaptureEnabled(Boolean(message.enabled));
+    sendResponse({ ok: true });
+    return false;
+  }
   if (message?.type === 'SHOW_COUNTDOWN') showCountdown(message.seconds);
   if (message?.type === 'FULL_PAGE_PROGRESS') showFullPageProgress(message.progress);
   if (message?.type === 'FULL_PAGE_PROGRESS_VISIBILITY') {
@@ -468,4 +481,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'FULL_PAGE_PROGRESS_CLEAR') clearFullPageProgress();
   return false;
 });
+
+sendRuntimeMessage({ type: 'API_HOOK_CONFIG_REQUEST' });
 })();

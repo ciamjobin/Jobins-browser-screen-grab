@@ -1,3 +1,5 @@
+import { requestReadWritePermission, saveCaptureFolder } from './capture-folder.js';
+
 const statusEl = document.getElementById('status');
 const toggleEl = document.getElementById('toggle');
 const pauseResumeEl = document.getElementById('pauseResume');
@@ -20,6 +22,7 @@ const fullPageProgressLabelEl = document.getElementById('fullPageProgressLabel')
 const fullPageProgressPercentEl = document.getElementById('fullPageProgressPercent');
 const fullPageProgressBarEl = document.getElementById('fullPageProgressBar');
 const fullPageProgressTrackEl = fullPageProgressBarEl.parentElement;
+const resumeCaptureFromFolderEl = document.getElementById('resumeCaptureFromFolder');
 const extensionOnlyButtons = [...document.querySelectorAll('button')];
 const CAPTURE_LIST_PAGE_SIZE = 50;
 
@@ -34,6 +37,7 @@ let currentSettings = {};
 let selectionUpdateChain = Promise.resolve();
 let captureListLimit = CAPTURE_LIST_PAGE_SIZE;
 let renderedCaptureListKey = null;
+let renderedState = null;
 
 const controls = {
   captureMode: document.getElementById('captureMode'),
@@ -246,7 +250,20 @@ function renderFullPageProgress(progress) {
   fullPageProgressTrackEl.setAttribute('aria-valuenow', String(percent));
 }
 
+function canReconnectCaptureFolder(state) {
+  return Boolean(state?.recording && state?.outputFolder?.name && state?.folderAccessNeeded);
+}
+
+function updateResumeCaptureButton(state) {
+  const reconnecting = canReconnectCaptureFolder(state);
+  resumeCaptureFromFolderEl.textContent = reconnecting
+    ? 'Reconnect capture folder'
+    : 'Resume capture from folder';
+  resumeCaptureFromFolderEl.disabled = Boolean(state?.recording) && !reconnecting;
+}
+
 function render(state) {
+  renderedState = state ?? null;
   const recording = Boolean(state?.recording);
   const paused = recording && Boolean(state?.paused);
   const settings = state?.settings ?? {};
@@ -292,6 +309,7 @@ function render(state) {
   captureNowEl.disabled = !recording || paused || Boolean(state?.fullPageProgress?.active);
   captureLaterEl.disabled = !recording || paused;
   exportPdfNowEl.disabled = !recording || !state?.captures?.length;
+  updateResumeCaptureButton(state);
 
   renderCaptures(currentCaptures);
 }
@@ -407,8 +425,52 @@ document.getElementById('deleteConfirmNo').addEventListener('click', () => {
   confirmEl.hidden = false;
 });
 
-document.getElementById('createPdfLater').addEventListener('click', () => {
-  chrome.tabs.create({ url: chrome.runtime.getURL('pdf-import.html') });
+resumeCaptureFromFolderEl.addEventListener('click', async () => {
+  if (typeof window.showDirectoryPicker !== 'function') {
+    statusEl.textContent = 'Resume from a folder is available in Chrome or Edge.';
+    statusEl.className = 'status error';
+    return;
+  }
+
+  resumeCaptureFromFolderEl.disabled = true;
+  const reconnecting = canReconnectCaptureFolder(renderedState);
+  statusEl.textContent = 'Choose the folder containing the earlier screenshots.';
+  statusEl.className = 'status idle';
+  try {
+    const directoryHandle = await window.showDirectoryPicker({
+      id: 'jshotz-resume-capture',
+      mode: 'readwrite',
+      startIn: 'downloads'
+    });
+    if (!(await requestReadWritePermission(directoryHandle))) {
+      throw new Error('JShotz needs permission to read and add screenshots in that folder.');
+    }
+    await saveCaptureFolder(directoryHandle);
+    const state = await send(
+      reconnecting ? 'RECONNECT_CAPTURE_FOLDER' : 'RESUME_FROM_FOLDER',
+      reconnecting ? {} : { settings: readSettings() }
+    );
+    if (state.recording && !reconnecting) {
+      captureSelectionSessionId = null;
+      knownCaptureSequences = new Set();
+      selectedCaptureSequences = new Set();
+    }
+    render(state);
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      statusEl.textContent = 'Folder selection cancelled.';
+      statusEl.className = 'status idle';
+    } else {
+      statusEl.textContent = error?.message || 'Could not resume from that folder.';
+      statusEl.className = 'status error';
+    }
+  } finally {
+    if (!standalonePopup) {
+      const state = await send('GET_STATE').catch(() => null);
+      renderedState = state;
+      updateResumeCaptureButton(state);
+    }
+  }
 });
 
 captureNowEl.addEventListener('click', async () => {

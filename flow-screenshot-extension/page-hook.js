@@ -63,95 +63,140 @@
     );
   }
 
-  const originalFetch = window.fetch;
-  window.fetch = async function (input, init) {
-    const options = init || {};
-    const url = typeof input === 'string' ? input : input?.url;
-    const method = String(options.method || input?.method || 'GET').toUpperCase();
-    const requestHeaders = headersToText(options.headers || input?.headers);
-    const payload =
-      typeof options.body === 'string' ? trim(options.body) : options.body ? '(non-text body)' : '(no request body)';
+  const API_CAPTURE_ATTRIBUTE = 'data-jshotz-api-capture';
+  const API_CAPTURE_EVENT = 'jshotz-api-capture-change';
+  let originalFetch;
+  let wrappedFetch;
+  let originalOpen;
+  let wrappedOpen;
+  let originalSend;
+  let wrappedSend;
+  let originalSetRequestHeader;
+  let wrappedSetRequestHeader;
 
-    let response;
-    try {
-      response = await originalFetch.apply(this, arguments);
-    } catch (error) {
-      post({
-        outcome: 'failure',
-        url,
-        method,
-        status: 0,
-        requestHeaders,
-        payload,
-        responseHeaders: '(none)',
-        body: `Request failed: ${error.message}`
-      });
-      throw error;
-    }
+  function installApiHooks() {
+    if (wrappedFetch || typeof window.fetch !== 'function') return;
 
-    try {
-      const body = await response.clone().text();
-      post({
-        outcome: response.ok ? 'success' : 'failure',
-        url,
-        method,
-        status: response.status,
-        requestHeaders,
-        payload,
-        responseHeaders: headersToText(response.headers),
-        body: trim(body)
-      });
-    } catch {
-      /* Streamed or already-consumed bodies cannot be cloned. */
-    }
+    originalFetch = window.fetch;
+    wrappedFetch = async function (input, init) {
+      const options = init || {};
+      const url = typeof input === 'string' ? input : input?.url;
+      const method = String(options.method || input?.method || 'GET').toUpperCase();
+      const requestHeaders = headersToText(options.headers || input?.headers);
+      const payload =
+        typeof options.body === 'string' ? trim(options.body) : options.body ? '(non-text body)' : '(no request body)';
 
-    return response;
-  };
-
-  const open = XMLHttpRequest.prototype.open;
-  const send = XMLHttpRequest.prototype.send;
-  const setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
-
-  XMLHttpRequest.prototype.open = function (method, url) {
-    this.__flowRecorder = { method: String(method || 'GET').toUpperCase(), url: String(url || ''), headers: [] };
-    return open.apply(this, arguments);
-  };
-
-  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-    this.__flowRecorder?.headers.push(`${name}: ${value}`);
-    return setRequestHeader.apply(this, arguments);
-  };
-
-  XMLHttpRequest.prototype.send = function (body) {
-    const info = this.__flowRecorder;
-    if (info) {
-      info.payload = typeof body === 'string' ? trim(body) : body ? '(non-text body)' : '(no request body)';
-
-      this.addEventListener('loadend', () => {
-        let text;
-        try {
-          text =
-            this.responseType === '' || this.responseType === 'text'
-              ? this.responseText
-              : `(${this.responseType} response)`;
-        } catch {
-          text = '(response body unavailable)';
-        }
-
+      let response;
+      try {
+        response = await originalFetch.apply(this, arguments);
+      } catch (error) {
         post({
-          outcome: this.status >= 200 && this.status < 300 ? 'success' : 'failure',
-          url: info.url,
-          method: info.method,
-          status: this.status,
-          requestHeaders: info.headers.join('\n') || '(none)',
-          payload: info.payload,
-          responseHeaders: this.getAllResponseHeaders() || '(none)',
-          body: this.status === 0 ? 'Request failed before a response was received.' : trim(text)
+          outcome: 'failure',
+          url,
+          method,
+          status: 0,
+          requestHeaders,
+          payload,
+          responseHeaders: '(none)',
+          body: `Request failed: ${error.message}`
         });
-      });
+        throw error;
+      }
+
+      try {
+        const body = await response.clone().text();
+        post({
+          outcome: response.ok ? 'success' : 'failure',
+          url,
+          method,
+          status: response.status,
+          requestHeaders,
+          payload,
+          responseHeaders: headersToText(response.headers),
+          body: trim(body)
+        });
+      } catch {
+        /* Streamed or already-consumed bodies cannot be cloned. */
+      }
+
+      return response;
+    };
+    window.fetch = wrappedFetch;
+
+    originalOpen = XMLHttpRequest.prototype.open;
+    originalSend = XMLHttpRequest.prototype.send;
+    originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+    wrappedOpen = function (method, url) {
+      this.__flowRecorder = { method: String(method || 'GET').toUpperCase(), url: String(url || ''), headers: [] };
+      return originalOpen.apply(this, arguments);
+    };
+    wrappedSetRequestHeader = function (name, value) {
+      this.__flowRecorder?.headers.push(`${name}: ${value}`);
+      return originalSetRequestHeader.apply(this, arguments);
+    };
+    wrappedSend = function (body) {
+      const info = this.__flowRecorder;
+      if (info) {
+        info.payload = typeof body === 'string' ? trim(body) : body ? '(non-text body)' : '(no request body)';
+
+        this.addEventListener('loadend', () => {
+          let text;
+          try {
+            text =
+              this.responseType === '' || this.responseType === 'text'
+                ? this.responseText
+                : `(${this.responseType} response)`;
+          } catch {
+            text = '(response body unavailable)';
+          }
+
+          post({
+            outcome: this.status >= 200 && this.status < 300 ? 'success' : 'failure',
+            url: info.url,
+            method: info.method,
+            status: this.status,
+            requestHeaders: info.headers.join('\n') || '(none)',
+            payload: info.payload,
+            responseHeaders: this.getAllResponseHeaders() || '(none)',
+            body: this.status === 0 ? 'Request failed before a response was received.' : trim(text)
+          });
+        });
+      }
+      return originalSend.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.open = wrappedOpen;
+    XMLHttpRequest.prototype.setRequestHeader = wrappedSetRequestHeader;
+    XMLHttpRequest.prototype.send = wrappedSend;
+  }
+
+  function removeApiHooks() {
+    if (!wrappedFetch) return;
+    if (window.fetch === wrappedFetch) window.fetch = originalFetch;
+    if (XMLHttpRequest.prototype.open === wrappedOpen) XMLHttpRequest.prototype.open = originalOpen;
+    if (XMLHttpRequest.prototype.send === wrappedSend) XMLHttpRequest.prototype.send = originalSend;
+    if (XMLHttpRequest.prototype.setRequestHeader === wrappedSetRequestHeader) {
+      XMLHttpRequest.prototype.setRequestHeader = originalSetRequestHeader;
     }
-    return send.apply(this, arguments);
-  };
+    originalFetch = null;
+    wrappedFetch = null;
+    originalOpen = null;
+    wrappedOpen = null;
+    originalSend = null;
+    wrappedSend = null;
+    originalSetRequestHeader = null;
+    wrappedSetRequestHeader = null;
+  }
+
+  function refreshApiHooks() {
+    if (document.documentElement.getAttribute(API_CAPTURE_ATTRIBUTE) === '1') {
+      installApiHooks();
+    } else {
+      removeApiHooks();
+    }
+  }
+
+  document.documentElement.addEventListener(API_CAPTURE_EVENT, refreshApiHooks);
+  refreshApiHooks();
 
   // The DOM is shared with the isolated world, so this is a reliable "hook installed" flag.
   document.documentElement.setAttribute('data-flow-recorder-hook', '1');

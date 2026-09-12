@@ -34,6 +34,7 @@ for (const [name, manifest] of [['chrome-edge', chromium], ['firefox', firefox]]
     ...(manifest.background?.scripts || []),
     manifest.background?.service_worker,
     manifest.action?.default_popup,
+    'capture-folder.js',
     'pdf-import.html',
     'pdf-import.js',
     ...Object.values(manifest.icons || {}),

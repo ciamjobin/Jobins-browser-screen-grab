@@ -1,3 +1,12 @@
+import {
+  getSavedCaptureFolder,
+  hasReadWritePermission,
+  imageFileToDataUrl,
+  removeCaptureFolderFiles,
+  scanCaptureFolder,
+  writeCaptureFolderFile
+} from './capture-folder.js';
+
 const STATE_KEY = 'flowRecorderState';
 const PDF_EXCLUSIONS_KEY = 'flowRecorderPdfExcludedSequences';
 const SESSION_CONTROL_KEY = 'flowRecorderSessionControl';
@@ -72,6 +81,9 @@ const defaultState = {
   trackedTabIds: [],
   trackedWindowIds: [],
   downloadIds: [],
+  outputFolder: null,
+  folderWrittenFiles: [],
+  folderAccessNeeded: false,
   apiSeen: 0,
   apiHookReady: false,
   streamActive: false,
@@ -198,12 +210,14 @@ function clearSessionTracking() {
   return trackingUpdateChain;
 }
 
-function trackSessionTab(state, tab) {
+async function trackSessionTab(state, tab) {
   if (!state.sessionId || !Number.isSafeInteger(tab?.id)) return Promise.resolve();
-  return updateSessionTracking(state.sessionId, (tracking) => ({
+  const tracking = await updateSessionTracking(state.sessionId, (tracking) => ({
     tabIds: [...tracking.tabIds, tab.id],
     windowIds: [...tracking.windowIds, tab.windowId]
   }));
+  await configureApiHookForTab(tab.id, state.settings.captureApi);
+  return tracking;
 }
 
 function untrackSessionTab(state, tabId) {
@@ -497,12 +511,25 @@ async function captureNow(reason, label, requestedState) {
         }
         return;
       }
+      if (needsFolderReconnect(error)) {
+        logLine(`FOLDER_ACCESS_NEEDED ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
+        await flushLog();
+        const state = await getState();
+        await clearFullPageProgress(state.tabId);
+        if (state.recording) {
+          await setState({ folderAccessNeeded: true, lastError: error.message });
+        }
+        return;
+      }
       logLine(`ERROR ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
       await flushLog();
       console.error('Capture failed:', error);
       const state = await getState();
       await clearFullPageProgress(state.tabId);
-      await setState({ lastError: `Capture failed: ${error.message}` });
+      await setState({
+        folderAccessNeeded: needsFolderReconnect(error),
+        lastError: `Capture failed: ${error.message}`
+      });
     });
   return captureChain;
 }
@@ -1468,6 +1495,36 @@ async function clearStoredFrames() {
   if (keys.length) await chrome.storage.local.remove(keys);
 }
 
+function savesToSelectedFolder(state) {
+  return Boolean(state.outputFolder?.name);
+}
+
+const FOLDER_PERMISSION_ERROR = 'JSHOTZ_FOLDER_PERMISSION_REQUIRED';
+
+function folderPermissionError() {
+  const error = new Error(
+    'The selected capture folder needs permission again. Click "Reconnect capture folder" to continue.'
+  );
+  error.code = FOLDER_PERMISSION_ERROR;
+  return error;
+}
+
+function needsFolderReconnect(error) {
+  return error?.code === FOLDER_PERMISSION_ERROR;
+}
+
+async function writableCaptureFolder() {
+  const directoryHandle = await getSavedCaptureFolder();
+  if (!directoryHandle || !(await hasReadWritePermission(directoryHandle))) {
+    throw folderPermissionError();
+  }
+  return directoryHandle;
+}
+
+async function writeSelectedCaptureFolderFile(name, contents) {
+  await writeCaptureFolderFile(await writableCaptureFolder(), name, contents);
+}
+
 async function cleanupCaptureResources() {
   await closeScreenWindow().catch(() => {});
   await closeOffscreen().catch(() => {});
@@ -1702,13 +1759,21 @@ async function persistCapture({
   const jpeg = processed.jpeg;
 
   const slug = sanitize(label ? `${title}-${label}` : title);
-  const filename =
-    `flow-captures/${state.sessionId}/` +
-    `${String(sequence).padStart(3, '0')}_${fileTimestamp(capturedAt)}_${slug}.png`;
+  const imageFileName = `${String(sequence).padStart(3, '0')}_${fileTimestamp(capturedAt)}_${slug}.png`;
+  const filename = savesToSelectedFolder(state)
+    ? imageFileName
+    : `flow-captures/${state.sessionId}/${imageFileName}`;
 
   if (settings.savePng) {
-    const downloadId = await chrome.downloads.download({ url: pngDataUrl, filename, saveAs: false });
-    await setState({ downloadIds: [...(await getState()).downloadIds, downloadId] });
+    if (savesToSelectedFolder(state)) {
+      const pngBlob = await (await fetch(pngDataUrl)).blob();
+      await writeSelectedCaptureFolderFile(filename, pngBlob);
+      const latest = await getState();
+      await setState({ folderWrittenFiles: [...latest.folderWrittenFiles, filename] });
+    } else {
+      const downloadId = await chrome.downloads.download({ url: pngDataUrl, filename, saveAs: false });
+      await setState({ downloadIds: [...(await getState()).downloadIds, downloadId] });
+    }
   }
 
   if (settings.savePdf && jpeg) {
@@ -1865,6 +1930,44 @@ async function exportPdfInWindow(filename, excludedSequences) {
   return result;
 }
 
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+async function storedFrames() {
+  const stored = await chrome.storage.local.get(null);
+  const frames = Object.entries(stored)
+    .filter(([key]) => key.startsWith(FRAME_PREFIX))
+    .map(([, frame]) => frame)
+    .sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
+  if (!frames.length && Array.isArray(stored[FRAMES_KEY])) frames.push(...stored[FRAMES_KEY]);
+  return frames;
+}
+
+async function exportPdfToSelectedFolder(filename, excludedSequences) {
+  const excluded = new Set(normalizeSequenceList(excludedSequences));
+  const frames = (await storedFrames()).filter((frame) => !excluded.has(Number(frame.sequence)));
+  if (!frames.length) return { error: 'No selected screenshots are available for the PDF.' };
+
+  const { buildPdf } = await import('./pdf.js');
+  const bytes = buildPdf(
+    frames.map((frame) => ({
+      title: frame.title,
+      url: frame.url || '(URL not recorded)',
+      time: frame.time || '(time not recorded)',
+      apiRows: frame.apiRows || [],
+      width: frame.width,
+      height: frame.height,
+      jpeg: base64ToBytes(frame.base64)
+    }))
+  );
+  await writeSelectedCaptureFolderFile(filename, bytes);
+  return { ok: true };
+}
+
 // Switches capture source mid-recording without stopping. The mode itself is committed to storage
 // immediately and never blocks on anything - a previous version awaited the screen-share picker
 // (which only resolves once the user picks a source, sometimes tens of seconds later) before
@@ -1886,6 +1989,7 @@ async function switchCaptureMode(newMode) {
     streamActive: newMode === 'screen' ? false : state.streamActive,
     settings: { ...state.settings, captureMode: newMode, captureApi: newMode === 'api' }
   });
+  await configureApiHooks(next.trackedTabIds, next.settings.captureApi);
 
   if (newMode === 'screen') {
     // The switch may have been triggered from a different tab (one the recording opened, DevTools,
@@ -1926,7 +2030,18 @@ const RECORDING_SCRIPT_TARGETS = [
   { files: ['content.js'], world: 'ISOLATED' }
 ];
 
-async function injectRecordingScripts(tabId) {
+async function configureApiHookForTab(tabId, enabled) {
+  if (!Number.isSafeInteger(tabId)) return;
+  await chrome.tabs
+    .sendMessage(tabId, { type: 'API_HOOK_CONFIG', enabled: Boolean(enabled) })
+    .catch(() => {});
+}
+
+async function configureApiHooks(tabIds, enabled) {
+  await Promise.all(normalizeIdList(tabIds).map((tabId) => configureApiHookForTab(tabId, enabled)));
+}
+
+async function injectRecordingScripts(tabId, captureApi = false) {
   if (!Number.isSafeInteger(tabId)) return;
   for (const script of RECORDING_SCRIPT_TARGETS) {
     await chrome.scripting
@@ -1935,6 +2050,7 @@ async function injectRecordingScripts(tabId) {
         /* Restricted pages (chrome://, Web Store) cannot be instrumented. */
       });
   }
+  await configureApiHookForTab(tabId, captureApi);
 }
 
 async function findRecoveryTab(preferredTabId) {
@@ -1946,6 +2062,29 @@ async function findRecoveryTab(preferredTabId) {
   if (lastFocused) return lastFocused;
   const [anyActive] = await chrome.tabs.query({ active: true }).catch(() => []);
   return anyActive || null;
+}
+
+async function refreshRecoveredFolderAccess(state) {
+  if (!savesToSelectedFolder(state) || state.folderAccessNeeded) return state;
+
+  try {
+    const directoryHandle = await getSavedCaptureFolder();
+    if (
+      directoryHandle?.name === state.outputFolder.name &&
+      (await hasReadWritePermission(directoryHandle))
+    ) {
+      return state;
+    }
+  } catch {
+    // The reconnect action gives the user a fresh native folder grant.
+  }
+
+  const next = await setState({
+    folderAccessNeeded: true,
+    lastError: folderPermissionError().message
+  });
+  logLine(`FOLDER_ACCESS_NEEDED folder=${state.outputFolder.name}`);
+  return next;
 }
 
 // Chrome preserves extension storage across a browser restart, but tab and window IDs belong to
@@ -1969,7 +2108,7 @@ async function recoverRecordingSession(preferredTabId, force = false) {
         : await chrome.tabs.get(state.tabId).catch(() => null);
       if (currentTab) {
         recoveredSessionId = state.sessionId;
-        return state;
+        return refreshRecoveredFolderAccess(state);
       }
 
       const tab = await findRecoveryTab(preferredTabId);
@@ -1996,11 +2135,11 @@ async function recoverRecordingSession(preferredTabId, force = false) {
         fullPageProgress: null,
         lastError: null
       });
-      await injectRecordingScripts(tab.id);
+      await injectRecordingScripts(tab.id, state.settings.captureApi);
       sessionRecoveryPending = false;
       recoveredSessionId = state.sessionId;
       logLine(`SESSION_RECOVERED tabId=${tab.id} url=${shortUrl(tab.url || '')}`);
-      return getState();
+      return refreshRecoveredFolderAccess(await getState());
     });
   return sessionRecoveryChain;
 }
@@ -2056,6 +2195,9 @@ async function startRecording(tab, settings) {
     trackedTabIds: [tab.id],
     trackedWindowIds: [tab.windowId],
     downloadIds: [],
+    outputFolder: null,
+    folderWrittenFiles: [],
+    folderAccessNeeded: false,
     apiSeen: 0,
     apiHookReady: false,
     streamActive,
@@ -2067,12 +2209,156 @@ async function startRecording(tab, settings) {
   recoveredSessionId = sessionId;
 
   // The declared content scripts only load on navigation, so seed the already-open page.
-  await injectRecordingScripts(tab.id);
+  await injectRecordingScripts(tab.id, merged.captureApi);
 
   await updateBadge(state);
   logLine(`SESSION_START mode=${merged.captureMode} url=${shortUrl(tab.url || '')}`);
   await captureNow('start');
   return getState();
+}
+
+async function restoreFolderFrames(captures) {
+  for (const { fileHandle, entry } of captures) {
+    let dataUrl = await imageFileToDataUrl(fileHandle);
+    try {
+      const processed = await askOffscreen('OFFSCREEN_PROCESS', {
+        dataUrl,
+        stampText: null,
+        watermarkText: null,
+        titleBar: null,
+        wantPng: false,
+        wantJpeg: true,
+        apiRows: []
+      });
+      if (processed?.error || !processed?.jpeg) {
+        throw new Error(processed?.error || `Could not load ${fileHandle.name}.`);
+      }
+      await storeFrame({
+        sequence: entry.sequence,
+        title: entry.title,
+        url: entry.url,
+        time: `${entry.capturedAt}  |  ${entry.reason}  |  resumed folder`,
+        apiRows: [],
+        base64: processed.jpeg.base64,
+        width: processed.jpeg.width,
+        height: processed.jpeg.height
+      });
+    } finally {
+      dataUrl = null;
+    }
+  }
+}
+
+async function resumeRecordingFromFolder(tab, settings) {
+  const folder = await writableCaptureFolder();
+  const restored = await scanCaptureFolder(folder);
+  if (!restored.captures.length) {
+    return setState({
+      folderAccessNeeded: false,
+      lastError: 'No PNG or JPEG screenshots were found in the selected folder.'
+    });
+  }
+
+  const sessionId = String(restored.sessionId || '').trim() || `resumed_${fileTimestamp(new Date())}`;
+  const merged = {
+    ...defaultState.settings,
+    ...(await getState()).settings,
+    ...settings,
+    captureMode: settings?.captureMode || 'tab',
+    savePng: true,
+    savePdf: true
+  };
+  merged.captureApi = merged.captureMode === 'api';
+  let streamActive = false;
+
+  await chrome.storage.local.remove(LOG_KEY).catch(() => {});
+  await chrome.storage.local.remove(PDF_EXCLUSIONS_KEY).catch(() => {});
+  await chrome.storage.local.remove(SESSION_CONTROL_KEY).catch(() => {});
+  await clearSessionTracking();
+  await clearStoredFrames();
+  await setState({ lastError: null });
+  await setDownloadUi(false);
+  apiQueue = [];
+  lastRawCaptureHash = '';
+  lastTabTitle = tab.title || '';
+
+  try {
+    await ensureOffscreen();
+    if (merged.captureMode === 'screen') {
+      const result = await openScreenWindow();
+      if (result.error) throw new Error(result.error);
+      streamActive = true;
+    }
+    await restoreFolderFrames(restored.captures);
+  } catch (error) {
+    await closeScreenWindow();
+    await closeOffscreen();
+    await clearStoredFrames();
+    await setDownloadUi(true);
+    return setState({
+      recording: false,
+      streamActive: false,
+      outputFolder: null,
+      folderWrittenFiles: [],
+      folderAccessNeeded: false,
+      lastError: error.message
+    });
+  }
+
+  await chrome.storage.local.set({
+    [SESSION_CONTROL_KEY]: { sessionId, paused: false, captureGeneration: 0 }
+  });
+  await replaceSessionTracking(sessionId, [tab.id], [tab.windowId]);
+  const state = await setState({
+    recording: true,
+    paused: false,
+    captureGeneration: 0,
+    tabId: tab.id,
+    windowId: tab.windowId,
+    sessionId,
+    sequence: restored.nextSequence - 1,
+    captures: restored.captures.map(({ entry }) => entry).slice(-300),
+    pdfExcludedSequences: [],
+    trackedTabIds: [tab.id],
+    trackedWindowIds: [tab.windowId],
+    downloadIds: [],
+    outputFolder: { name: restored.folderName },
+    folderWrittenFiles: [],
+    folderAccessNeeded: false,
+    apiSeen: 0,
+    apiHookReady: false,
+    streamActive,
+    fullPageProgress: null,
+    lastError: null,
+    settings: merged
+  });
+  sessionRecoveryPending = false;
+  recoveredSessionId = sessionId;
+
+  await injectRecordingScripts(tab.id, merged.captureApi);
+  await updateBadge(state);
+  logLine(`SESSION_RESUMED folder=${restored.folderName} captures=${restored.captures.length}`);
+  await captureNow('start');
+  return getState();
+}
+
+async function reconnectCaptureFolder() {
+  const state = await recoverRecordingSession();
+  if (!state.recording || !savesToSelectedFolder(state)) {
+    return setState({ lastError: 'There is no folder-backed recording to reconnect.' });
+  }
+
+  const directoryHandle = await writableCaptureFolder();
+  if (directoryHandle.name !== state.outputFolder.name) {
+    return setState({
+      folderAccessNeeded: true,
+      lastError: `Choose the original "${state.outputFolder.name}" capture folder to continue.`
+    });
+  }
+
+  const next = await setState({ folderAccessNeeded: false, lastError: null });
+  logLine(`FOLDER_RECONNECTED folder=${directoryHandle.name}`);
+  return next;
 }
 
 async function deleteSessionDownloads(ids) {
@@ -2117,10 +2403,10 @@ async function exportPdfNow(requestedPdfFilename, excludedSequences) {
     : normalizeSequenceList(state.pdfExcludedSequences);
   logLine(`PDF_EXPORT checkpoint excluded=${excluded.length} captures=${state.captures.length}`);
 
-  const result = await exportPdfInWindow(
-    `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, `${state.sessionId}_checkpoint`)}`,
-    excluded
-  );
+  const checkpointName = pdfFilename(requestedPdfFilename, `${state.sessionId}_checkpoint`);
+  const result = savesToSelectedFolder(state)
+    ? await exportPdfToSelectedFolder(checkpointName, excluded)
+    : await exportPdfInWindow(`flow-captures/${state.sessionId}/${checkpointName}`, excluded);
   await flushLog();
   if (result.error) {
     return setState({ lastError: `PDF export failed: ${result.error}` });
@@ -2160,21 +2446,32 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
   await captureChain.catch(() => {});
   const state = await getState();
   logLine(`SESSION_END keepFiles=${keepFiles} captures=${state.captures.length}`);
+  await configureApiHooks(state.trackedTabIds, false);
   const excluded = Array.isArray(excludedSequences)
     ? normalizeSequenceList(excludedSequences)
     : normalizeSequenceList(state.pdfExcludedSequences);
+  const savedToFolder = savesToSelectedFolder(state);
+  const deletedFileCount = savedToFolder ? state.folderWrittenFiles.length : state.downloadIds.length;
   let lastError = null;
   let revealId = state.downloadIds[state.downloadIds.length - 1];
 
   if (!keepFiles) {
-    await deleteSessionDownloads(state.downloadIds);
+    if (savedToFolder) {
+      try {
+        await removeCaptureFolderFiles(await writableCaptureFolder(), state.folderWrittenFiles);
+      } catch (error) {
+        lastError = `Could not remove new screenshots: ${error.message}`;
+      }
+    } else {
+      await deleteSessionDownloads(state.downloadIds);
+    }
   } else {
     if (state.settings.savePdf && state.captures.length) {
       logLine(`PDF_EXPORT final excluded=${excluded.length} captures=${state.captures.length}`);
-      const result = await exportPdfInWindow(
-        `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, state.sessionId)}`,
-        excluded
-      );
+      const savedPdfName = pdfFilename(requestedPdfFilename, state.sessionId);
+      const result = savedToFolder
+        ? await exportPdfToSelectedFolder(savedPdfName, excluded)
+        : await exportPdfInWindow(`flow-captures/${state.sessionId}/${savedPdfName}`, excluded);
       if (result.error) {
         lastError = `PDF export failed: ${result.error}`;
         console.error(lastError);
@@ -2197,11 +2494,15 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
       const manifestUrl =
         'data:application/json;base64,' +
         btoa(unescape(encodeURIComponent(JSON.stringify(manifest, null, 2))));
-      await chrome.downloads.download({
-        url: manifestUrl,
-        filename: `flow-captures/${state.sessionId}/flow-manifest.json`,
-        saveAs: false
-      }).then((id) => { revealId = id; });
+      if (savedToFolder) {
+        await writeSelectedCaptureFolderFile('flow-manifest.json', JSON.stringify(manifest, null, 2));
+      } else {
+        await chrome.downloads.download({
+          url: manifestUrl,
+          filename: `flow-captures/${state.sessionId}/flow-manifest.json`,
+          saveAs: false
+        }).then((id) => { revealId = id; });
+      }
     }
   }
 
@@ -2209,7 +2510,7 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
 
   // The shelf is suppressed during recording, so opening the folder is the only cue that files landed.
   await flushLog();
-  if (keepFiles && state.captures.length) await revealSavedFiles(revealId);
+  if (keepFiles && state.captures.length && !savedToFolder) await revealSavedFiles(revealId);
 
   const next = await setState({
     recording: false,
@@ -2220,8 +2521,11 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
     streamActive: false,
     fullPageProgress: null,
     downloadIds: [],
+    outputFolder: null,
+    folderWrittenFiles: [],
+    folderAccessNeeded: false,
     lastError:
-      lastError ?? (keepFiles ? null : `Deleted ${state.downloadIds.length} file(s) from this session.`)
+      lastError ?? (keepFiles ? null : `Deleted ${deletedFileCount} file(s) from this session.`)
   });
   await updateBadge(next);
   return next;
@@ -2386,10 +2690,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           sendResponse(await startRecording(tab, message.settings));
         } catch (error) {
-          sendResponse(await setState({ recording: false, lastError: error.message }));
+          sendResponse(await setState({ recording: false, folderAccessNeeded: false, lastError: error.message }));
         }
         break;
       }
+
+      case 'RESUME_FROM_FOLDER': {
+        const current = await getState();
+        if (current.recording) {
+          sendResponse(await recoverRecordingSession());
+          return;
+        }
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab) {
+          sendResponse(await setState({ lastError: 'No active tab found.' }));
+          return;
+        }
+        try {
+          sendResponse(await resumeRecordingFromFolder(tab, message.settings));
+        } catch (error) {
+          sendResponse(await setState({
+            recording: false,
+            outputFolder: null,
+            folderWrittenFiles: [],
+            folderAccessNeeded: false,
+            lastError: error.message
+          }));
+        }
+        break;
+      }
+
+      case 'RECONNECT_CAPTURE_FOLDER':
+        try {
+          sendResponse(await reconnectCaptureFolder());
+        } catch (error) {
+          sendResponse(await setState({
+            folderAccessNeeded: true,
+            lastError: error.message
+          }));
+        }
+        break;
 
       case 'SET_PAUSED':
         try {
@@ -2419,7 +2759,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse(await stopRecording(message.keepFiles !== false, message.pdfFilename, message.excludedSequences));
         } catch (error) {
           await cleanupCaptureResources();
-          sendResponse(await setState({ recording: false, lastError: error.message }));
+          sendResponse(await setState({
+            recording: false,
+            folderAccessNeeded: needsFolderReconnect(error),
+            lastError: error.message
+          }));
         }
         break;
 
@@ -2427,7 +2771,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           sendResponse(await exportPdfNow(message.pdfFilename, message.excludedSequences));
         } catch (error) {
-          sendResponse(await setState({ lastError: `PDF export failed: ${error.message}` }));
+          sendResponse(await setState({
+            folderAccessNeeded: needsFolderReconnect(error),
+            lastError: `PDF export failed: ${error.message}`
+          }));
         }
         break;
 
@@ -2476,6 +2823,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (state.recording && (await isRecordedTab(sender.tab?.id)) && !state.apiHookReady) {
           await setState({ apiHookReady: true });
         }
+        sendResponse({ ok: true });
+        break;
+      }
+
+      case 'API_HOOK_CONFIG_REQUEST': {
+        const state = await recoverRecordingSession(sender.tab?.id);
+        const enabled = Boolean(
+          state.recording &&
+            state.settings.captureApi &&
+            Number.isSafeInteger(sender.tab?.id) &&
+            state.trackedTabIds.includes(sender.tab.id)
+        );
+        await configureApiHookForTab(sender.tab?.id, enabled);
         sendResponse({ ok: true });
         break;
       }
