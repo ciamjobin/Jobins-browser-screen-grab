@@ -471,24 +471,39 @@ test('resumes a selected screenshot folder and writes the combined flow there', 
     assert.match(unavailable.lastError, /Reconnect capture folder/);
     assert.equal(consoleErrors.length, 0);
 
+    const downloadedWhileDisconnected = await sendMessage(restartedMessageListener, { type: 'CAPTURE_NOW' });
+    assert.equal(downloadedWhileDisconnected.recording, true);
+    assert.equal(downloadedWhileDisconnected.sequence, 3);
+    assert.equal(downloadedWhileDisconnected.folderAccessNeeded, true);
+    assert.equal(downloadedWhileDisconnected.lastError, null);
+    assert.equal(fixture.downloadRequests.length, 1);
+    assert.match(fixture.downloadRequests[0].filename, /\/003_.*\.png$/);
+
+    const secondDownloadedCapture = await sendMessage(restartedMessageListener, { type: 'CAPTURE_NOW' });
+    assert.equal(secondDownloadedCapture.recording, true);
+    assert.equal(secondDownloadedCapture.sequence, 4);
+    assert.equal(secondDownloadedCapture.folderAccessNeeded, true);
+    assert.equal(fixture.downloadRequests.length, 2);
+    assert.match(fixture.downloadRequests[1].filename, /\/004_.*\.png$/);
+
     folder.setPermission('granted');
     const reconnected = await sendMessage(restartedMessageListener, { type: 'RECONNECT_CAPTURE_FOLDER' });
     assert.equal(reconnected.recording, true);
-    assert.equal(reconnected.sequence, 2);
+    assert.equal(reconnected.sequence, 4);
     assert.equal(reconnected.folderAccessNeeded, false);
     assert.equal(reconnected.lastError, null);
 
     const capturedAfterReconnect = await sendMessage(restartedMessageListener, { type: 'CAPTURE_NOW' });
-    assert.equal(capturedAfterReconnect.sequence, 3);
+    assert.equal(capturedAfterReconnect.sequence, 5);
     assert.equal(capturedAfterReconnect.folderAccessNeeded, false);
 
     const stopped = await sendMessage(restartedMessageListener, { type: 'STOP', keepFiles: true });
     assert.equal(stopped.recording, false);
-    assert.equal(fixture.downloadRequests.length, 0);
+    assert.equal(fixture.downloadRequests.length, 2);
     assert.ok([...folder.written.keys()].some((name) => name.endsWith('.pdf')));
     const manifest = JSON.parse(folder.written.get('flow-manifest.json'));
-    assert.equal(manifest.screenshotCount, 3);
-    assert.deepEqual(manifest.screenshots.map((capture) => capture.sequence), [1, 2, 3]);
+    assert.equal(manifest.screenshotCount, 5);
+    assert.deepEqual(manifest.screenshots.map((capture) => capture.sequence), [1, 2, 3, 4, 5]);
   } finally {
     console.error = originalConsoleError;
     globalThis.chrome = originalChrome;

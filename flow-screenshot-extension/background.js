@@ -1495,8 +1495,12 @@ async function clearStoredFrames() {
   if (keys.length) await chrome.storage.local.remove(keys);
 }
 
-function savesToSelectedFolder(state) {
+function hasSelectedCaptureFolder(state) {
   return Boolean(state.outputFolder?.name);
+}
+
+function savesToSelectedFolder(state) {
+  return hasSelectedCaptureFolder(state) && !state.folderAccessNeeded;
 }
 
 const FOLDER_PERMISSION_ERROR = 'JSHOTZ_FOLDER_PERMISSION_REQUIRED';
@@ -1760,16 +1764,29 @@ async function persistCapture({
 
   const slug = sanitize(label ? `${title}-${label}` : title);
   const imageFileName = `${String(sequence).padStart(3, '0')}_${fileTimestamp(capturedAt)}_${slug}.png`;
-  const filename = savesToSelectedFolder(state)
+  const downloadsFilename = `flow-captures/${state.sessionId}/${imageFileName}`;
+  let filename = savesToSelectedFolder(state)
     ? imageFileName
-    : `flow-captures/${state.sessionId}/${imageFileName}`;
+    : downloadsFilename;
 
   if (settings.savePng) {
     if (savesToSelectedFolder(state)) {
       const pngBlob = await (await fetch(pngDataUrl)).blob();
-      await writeSelectedCaptureFolderFile(filename, pngBlob);
-      const latest = await getState();
-      await setState({ folderWrittenFiles: [...latest.folderWrittenFiles, filename] });
+      try {
+        await writeSelectedCaptureFolderFile(filename, pngBlob);
+        const latest = await getState();
+        await setState({ folderWrittenFiles: [...latest.folderWrittenFiles, filename] });
+      } catch (error) {
+        filename = downloadsFilename;
+        const downloadId = await chrome.downloads.download({ url: pngDataUrl, filename, saveAs: false });
+        const latest = await getState();
+        await setState({
+          downloadIds: [...latest.downloadIds, downloadId],
+          folderAccessNeeded: true,
+          lastError: null
+        });
+        logLine(`FOLDER_FALLBACK #${sequence} ${error.message}`);
+      }
     } else {
       const downloadId = await chrome.downloads.download({ url: pngDataUrl, filename, saveAs: false });
       await setState({ downloadIds: [...(await getState()).downloadIds, downloadId] });
@@ -2344,7 +2361,7 @@ async function resumeRecordingFromFolder(tab, settings) {
 
 async function reconnectCaptureFolder() {
   const state = await recoverRecordingSession();
-  if (!state.recording || !savesToSelectedFolder(state)) {
+  if (!state.recording || !hasSelectedCaptureFolder(state)) {
     return setState({ lastError: 'There is no folder-backed recording to reconnect.' });
   }
 

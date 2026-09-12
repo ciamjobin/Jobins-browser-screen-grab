@@ -254,6 +254,13 @@ function canReconnectCaptureFolder(state) {
   return Boolean(state?.recording && state?.outputFolder?.name && state?.folderAccessNeeded);
 }
 
+function isFolderReconnectNotice(state) {
+  return Boolean(
+    canReconnectCaptureFolder(state) &&
+      /^The selected capture folder needs permission again\./.test(String(state?.lastError || ''))
+  );
+}
+
 function updateResumeCaptureButton(state) {
   const reconnecting = canReconnectCaptureFolder(state);
   resumeCaptureFromFolderEl.textContent = reconnecting
@@ -285,7 +292,8 @@ function render(state) {
   settingsEl.classList.toggle('locked', recording);
   shortcutHintEl.hidden = controls.captureMode.value !== 'screen';
 
-  const problem = state?.error || state?.lastError;
+  const reconnectingFolder = canReconnectCaptureFolder(state);
+  const problem = state?.error || (isFolderReconnectNotice(state) ? null : state?.lastError);
   if (problem) {
     statusEl.textContent = problem;
     statusEl.className = 'status error';
@@ -294,7 +302,8 @@ function render(state) {
     statusEl.className = 'status paused';
   } else if (recording) {
     const api = settings.captureApi ? ` \u00b7 ${state.apiSeen} API call(s)` : '';
-    statusEl.textContent = `Recording \u00b7 ${state.sequence} screenshot(s)${api}`;
+    const folderFallback = reconnectingFolder ? ' \u00b7 saving in Downloads' : '';
+    statusEl.textContent = `Recording \u00b7 ${state.sequence} screenshot(s)${api}${folderFallback}`;
     statusEl.className = 'status recording';
   } else {
     statusEl.textContent = 'Idle';
