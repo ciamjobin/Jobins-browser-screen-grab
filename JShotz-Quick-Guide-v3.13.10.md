@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.13.9**
+**Version 3.13.10**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF — handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -29,6 +29,10 @@ You can change the capture source at any time without stopping the recording.
 If Chrome restarts during an active recording, return to the restored page and open the JShotz
 popup. The recording reconnects to that live tab and preserves the existing screenshots, numbering,
 and session folder.
+
+If Chrome says JShotz needs access after a redirect, open the JShotz popup on the current page and
+continue recording. For flows that move between websites, set JShotz **Site access** to **On all
+sites** in Chrome's extension details.
 
 ---
 

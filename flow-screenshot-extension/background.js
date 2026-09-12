@@ -485,6 +485,18 @@ async function captureNow(reason, label, requestedState) {
       }
     })
     .catch(async (error) => {
+      if (isTabAccessDenied(error)) {
+        logLine(`CAPTURE_SKIPPED ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
+        await flushLog();
+        const state = await getState();
+        await clearFullPageProgress(state.tabId);
+        if (state.recording) {
+          await setState({
+            lastError: 'Capture skipped: JShotz needs access to the current page. Open the JShotz popup on that page, then continue recording.'
+          });
+        }
+        return;
+      }
       logLine(`ERROR ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
       await flushLog();
       console.error('Capture failed:', error);
@@ -512,6 +524,15 @@ async function scheduleDelayedCapture(tabId, requestedState) {
 // A short retry recovers it; without one, a whole capture is lost or a stitch frame silently dropped.
 const CAPTURE_RETRY_DELAYS_MS = [150, 400, 900];
 
+function isTabAccessDenied(error) {
+  const message = String(error?.message || error || '');
+  return (
+    /activeTab['"]?\s+permission is not in effect/i.test(message) ||
+    /must request permission to access this host/i.test(message) ||
+    /cannot access contents of url/i.test(message)
+  );
+}
+
 async function captureVisibleTabWithRetry(windowId) {
   let lastError = null;
   for (let attempt = 0; attempt <= CAPTURE_RETRY_DELAYS_MS.length; attempt += 1) {
@@ -519,6 +540,8 @@ async function captureVisibleTabWithRetry(windowId) {
       return await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
     } catch (error) {
       lastError = error;
+      // Retrying cannot restore a revoked activeTab grant or a denied host permission.
+      if (isTabAccessDenied(error)) break;
       const wait = CAPTURE_RETRY_DELAYS_MS[attempt];
       if (wait === undefined) break;
       await delay(wait);
@@ -1715,7 +1738,8 @@ async function persistCapture({
 
   const next = await setState({
     sequence,
-    captures: [...state.captures, entry].slice(-300)
+    captures: [...state.captures, entry].slice(-300),
+    lastError: null
   });
   await updateBadge(next);
   logLine(

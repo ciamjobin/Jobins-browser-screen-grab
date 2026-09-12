@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.13.9**
+**Version 3.13.10**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as a
 sequence of timestamped, watermarked screenshots and exports them as a PDF, with an optional
@@ -23,14 +23,14 @@ tickets, and step-by-step evidence of what happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.13.9-chrome-edge.zip`.
+1. Unzip `JShotz-3.13.10-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.13.9-firefox.zip`.
+1. Unzip `JShotz-3.13.10-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -239,6 +239,11 @@ screenshots captured in **API + Screenshot** mode.
   **Capture now** is temporarily disabled while that work is in progress.
 - If a page does not record clicks or scrolling, confirm that it is an ordinary website rather
   than a browser-protected page, then refresh the tab and start a new recording.
+- If JShotz says **Capture skipped: JShotz needs access to the current page**, Chrome has revoked
+  its temporary tab access, commonly after a cross-site redirect. Open the JShotz popup in the
+  current tab, then continue recording. For automatic capture across websites, open JShotz's
+  extension details and set **Site access** to **On all sites**. The skipped-capture detail stays
+  in the final manifest's `debugLog`; it does not create a separate download.
 
 ---
 

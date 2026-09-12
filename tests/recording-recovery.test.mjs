@@ -3,6 +3,13 @@ import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
+let backgroundImportSequence = 0;
+
+async function loadBackground() {
+  backgroundImportSequence += 1;
+  await import(`${pathToFileURL(resolve('flow-screenshot-extension/background.js')).href}?test=${backgroundImportSequence}`);
+}
+
 function createEvent() {
   const listeners = [];
   return {
@@ -72,6 +79,7 @@ function createChrome() {
   });
   const injectedFiles = [];
   const downloadRequests = [];
+  let captureError = null;
   let captureCount = 0;
 
   const chrome = {
@@ -120,8 +128,12 @@ function createChrome() {
       async query() {
         return [{ ...liveTab }];
       },
+      async sendMessage() {
+        return {};
+      },
       async captureVisibleTab(windowId) {
         assert.equal(windowId, liveTab.windowId);
+        if (captureError) throw captureError;
         captureCount += 1;
         return 'data:image/png;base64,cHJvYmU=';
       }
@@ -148,6 +160,9 @@ function createChrome() {
     injectedFiles,
     liveTab,
     sessionId,
+    setCaptureError(error) {
+      captureError = error;
+    },
     storageSnapshot: () => storage.snapshot()
   };
 }
@@ -168,11 +183,14 @@ function sendMessage(listener, message, sender = {}) {
 
 test('recovers a recording after stale tab IDs, then pauses, continues, and captures', async () => {
   const originalChrome = globalThis.chrome;
+  const originalConsoleError = console.error;
   const fixture = createChrome();
+  const consoleErrors = [];
   globalThis.chrome = fixture.chrome;
+  console.error = (...args) => consoleErrors.push(args.join(' '));
 
   try {
-    await import(`${pathToFileURL(resolve('flow-screenshot-extension/background.js')).href}?recovery-test=${Date.now()}`);
+    await loadBackground();
 
     fixture.chrome.runtime.onStartup.listeners[0]();
     const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
@@ -195,9 +213,21 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
     assert.ok(debugLog.some((line) => line.includes('SESSION_PAUSED')));
     assert.ok(debugLog.some((line) => line.includes('SESSION_CONTINUED')));
 
+    fixture.setCaptureError(new Error("The 'activeTab' permission is not in effect because this extension has not been invoked."));
+    const skipped = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    assert.equal(skipped.recording, true);
+    assert.equal(skipped.sequence, 40);
+    assert.match(skipped.lastError, /^Capture skipped: JShotz needs access to the current page\./);
+    assert.equal(fixture.captureCount(), 0);
+    assert.equal(fixture.downloadRequests.length, 0);
+    assert.equal(consoleErrors.length, 0);
+    assert.ok(fixture.storageSnapshot().flowRecorderLog.some((line) => line.includes('CAPTURE_SKIPPED manual')));
+
+    fixture.setCaptureError(null);
     const captured = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
     assert.equal(captured.sequence, 41);
     assert.equal(captured.captures.length, 41);
+    assert.equal(captured.lastError, null);
     assert.equal(fixture.captureCount(), 1);
 
     const clickResult = await sendMessage(
@@ -219,7 +249,9 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
     const manifest = JSON.parse(Buffer.from(fixture.downloadRequests[0].url.split(',')[1], 'base64').toString('utf8'));
     assert.ok(manifest.debugLog.some((line) => line.includes('SESSION_PAUSED')));
     assert.ok(manifest.debugLog.some((line) => line.includes('SESSION_CONTINUED')));
+    assert.ok(manifest.debugLog.some((line) => line.includes('CAPTURE_SKIPPED manual')));
   } finally {
+    console.error = originalConsoleError;
     globalThis.chrome = originalChrome;
   }
 });
