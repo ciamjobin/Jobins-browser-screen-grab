@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.13.8**
+**Version 3.13.9**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF — handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -132,8 +132,9 @@ Everything is saved under your Downloads folder:
 Downloads/flow-captures/session_<date-time>/
 ```
 
-This includes your screenshots, the PDF, and a short technical log used only for
-troubleshooting if something needs a closer look.
+This includes your screenshots, the PDF, and a technical `debugLog` inside
+`flow-manifest.json` for troubleshooting. The log is stored in the extension background while
+you record, so it never interrupts a recording with a separate download prompt.
 
 ---
 

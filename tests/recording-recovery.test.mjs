@@ -32,6 +32,9 @@ function createStorage(values) {
     },
     async remove(keys) {
       for (const key of Array.isArray(keys) ? keys : [keys]) delete data[key];
+    },
+    snapshot() {
+      return structuredClone(data);
     }
   };
 }
@@ -68,6 +71,7 @@ function createChrome() {
     flowRecorderSessionTracking: { sessionId, tabIds: [99], windowIds: [100] }
   });
   const injectedFiles = [];
+  const downloadRequests = [];
   let captureCount = 0;
 
   const chrome = {
@@ -75,6 +79,15 @@ function createChrome() {
     action: {
       async setBadgeBackgroundColor() {},
       async setBadgeText() {}
+    },
+    downloads: {
+      async download(options) {
+        downloadRequests.push(options);
+        return downloadRequests.length;
+      },
+      async setUiOptions() {},
+      async show() {},
+      async showDefaultFolder() {}
     },
     offscreen: {
       async hasDocument() {
@@ -128,7 +141,15 @@ function createChrome() {
     }
   };
 
-  return { chrome, captureCount: () => captureCount, injectedFiles, liveTab, sessionId };
+  return {
+    chrome,
+    captureCount: () => captureCount,
+    downloadRequests,
+    injectedFiles,
+    liveTab,
+    sessionId,
+    storageSnapshot: () => storage.snapshot()
+  };
 }
 
 function sendMessage(listener, message, sender = {}) {
@@ -165,8 +186,14 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
 
     const paused = await sendMessage(messageListener, { type: 'SET_PAUSED', paused: true });
     assert.equal(paused.paused, true);
+    assert.equal(paused.lastError, null);
     const continued = await sendMessage(messageListener, { type: 'SET_PAUSED', paused: false });
     assert.equal(continued.paused, false);
+    assert.equal(continued.lastError, null);
+    assert.equal(fixture.downloadRequests.length, 0);
+    const debugLog = fixture.storageSnapshot().flowRecorderLog;
+    assert.ok(debugLog.some((line) => line.includes('SESSION_PAUSED')));
+    assert.ok(debugLog.some((line) => line.includes('SESSION_CONTINUED')));
 
     const captured = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
     assert.equal(captured.sequence, 41);
@@ -183,6 +210,15 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
     assert.equal(afterClick.sequence, 42);
     assert.equal(afterClick.captures.length, 42);
     assert.equal(fixture.captureCount(), 2);
+
+    const stopped = await sendMessage(messageListener, { type: 'STOP', keepFiles: true });
+    assert.equal(stopped.recording, false);
+    assert.equal(fixture.downloadRequests.length, 1);
+    assert.equal(fixture.downloadRequests[0].filename.endsWith('/flow-manifest.json'), true);
+    assert.equal(fixture.downloadRequests.some((request) => request.filename.endsWith('/debug-log.txt')), false);
+    const manifest = JSON.parse(Buffer.from(fixture.downloadRequests[0].url.split(',')[1], 'base64').toString('utf8'));
+    assert.ok(manifest.debugLog.some((line) => line.includes('SESSION_PAUSED')));
+    assert.ok(manifest.debugLog.some((line) => line.includes('SESSION_CONTINUED')));
   } finally {
     globalThis.chrome = originalChrome;
   }

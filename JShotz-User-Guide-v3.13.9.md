@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.13.8**
+**Version 3.13.9**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as a
 sequence of timestamped, watermarked screenshots and exports them as a PDF, with an optional
@@ -23,14 +23,14 @@ tickets, and step-by-step evidence of what happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.13.8-chrome-edge.zip`.
+1. Unzip `JShotz-3.13.9-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.13.8-firefox.zip`.
+1. Unzip `JShotz-3.13.9-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -253,10 +253,9 @@ Downloads/
       001_<timestamp>_<label>.png
       002_<timestamp>_<label>.png
       ...
-      flow-manifest.json        (list of every capture: time, reason, URL, mode)
+      flow-manifest.json        (list of every capture plus diagnostic debugLog)
       session_<timestamp>.pdf   (if "Save PDF" was on)
       session_<timestamp>_checkpoint.pdf   (if you used "Export PDF so far")
-      debug-log.txt             (diagnostic log, see below)
 ```
 
     Pausing does not create another folder. When you click **Continue recording**, new screenshots
@@ -266,14 +265,17 @@ Downloads/
 
 ## 9. The debug log
 
-Every session writes a `debug-log.txt` alongside the screenshots. It's not shown in the UI, but
-it's useful if something looks wrong and needs troubleshooting: it lists every capture attempt
-with its trigger, capture mode, success/failure, and timing, plus mode switches and errors. If
-you ever need help diagnosing an issue, this file (or the relevant lines from it) is the most
-useful thing to share.
+JShotz keeps the newest 1,000 diagnostic lines in background extension storage while recording.
+This prevents a separate diagnostic-file download or save prompt from interrupting pause,
+continue, capture, mode-switch, checkpoint-export, or error handling. When you keep a session,
+the same entries are included as `debugLog` in `flow-manifest.json` beside the screenshots.
 
-The log survives even if you choose "delete all" for a session's screenshots, so it's still
-available afterward if something needs investigating.
+The log lists capture triggers, mode, success/failure, timing, mode switches, recovery events,
+and errors. If you ever need help diagnosing an issue, share the relevant `debugLog` lines from
+the final manifest.
+
+If you choose "delete all," no diagnostic file is downloaded. The in-progress log remains in
+extension storage until you start a new recording.
 
 ---
 
@@ -294,6 +296,6 @@ available afterward if something needs investigating.
 
 If something isn't working as expected:
 1. Note the approximate time and what you were doing (which button, which page).
-2. Open `debug-log.txt` from that session's folder and find the matching lines.
+2. Open `flow-manifest.json` from that session's folder and find the matching `debugLog` lines.
 3. Share the page URL (or a general description if it's private), the log excerpt, and — if
    relevant — the screenshot in question.

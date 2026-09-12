@@ -27,10 +27,11 @@ const CAPTURE_COUNTDOWN_MS = 5000;
 // from what actually happened, not guessed at. Storage is the only source of truth (not an in-memory
 // array): the service worker can be evicted and restarted mid-recording (MV3 idles it after periods
 // with no activity), which would silently reset a plain variable and lose everything logged before
-// that point - exactly what produced a near-empty log despite 43 captures having happened. Written
-// out as a file at natural checkpoints (a PDF export, stopping, mode switches), rather than after
-// every single action - repeatedly re-downloading the same file was surfacing a Save As prompt.
+// that point - exactly what produced a near-empty log despite 43 captures having happened. It stays
+// in background storage during a recording and is included in the final session manifest, so a
+// diagnostic log never interrupts the user with a browser download prompt.
 const LOG_KEY = 'flowRecorderLog';
+const MAX_LOG_LINES = 1000;
 let logChain = Promise.resolve();
 
 function logLine(text) {
@@ -40,27 +41,21 @@ function logLine(text) {
       const stored = await chrome.storage.local.get(LOG_KEY);
       const log = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY] : [];
       log.push(line);
+      if (log.length > MAX_LOG_LINES) log.splice(0, log.length - MAX_LOG_LINES);
       await chrome.storage.local.set({ [LOG_KEY]: log });
     })
     .catch(() => {});
 }
 
-async function writeLogFile() {
-  const state = await getState();
-  if (!state.sessionId) return;
+async function flushLog() {
+  await logChain.catch(() => {});
+}
+
+async function readDebugLog() {
+  await flushLog();
   const stored = await chrome.storage.local.get(LOG_KEY);
   const log = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY] : [];
-  if (!log.length) return;
-  const text = log.join('\n') + '\n';
-  const url = 'data:text/plain;base64,' + btoa(unescape(encodeURIComponent(text)));
-  await chrome.downloads
-    .download({
-      url,
-      filename: `flow-captures/${state.sessionId}/debug-log.txt`,
-      saveAs: false,
-      conflictAction: 'overwrite'
-    })
-    .catch(() => {});
+  return log;
 }
 
 
@@ -491,7 +486,7 @@ async function captureNow(reason, label, requestedState) {
     })
     .catch(async (error) => {
       logLine(`ERROR ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
-      await writeLogFile().catch(() => {});
+      await flushLog();
       console.error('Capture failed:', error);
       const state = await getState();
       await clearFullPageProgress(state.tabId);
@@ -1857,9 +1852,8 @@ async function switchCaptureMode(newMode) {
   const state = await getState();
   const previousMode = state.settings.captureMode;
   logLine(`MODE_SWITCH ${previousMode} -> ${newMode}`);
-  // Written immediately (not just at the usual checkpoints) so a mode switch that is followed by a
-  // crash - the riskiest single moment in a recording - still leaves a log on disk up to this point.
-  await writeLogFile().catch(() => {});
+  // Persist immediately so a mode switch followed by a crash still leaves diagnostics available.
+  await flushLog();
   if (previousMode === 'screen' && newMode !== 'screen') {
     await closeScreenWindow();
   }
@@ -1881,7 +1875,7 @@ async function switchCaptureMode(newMode) {
       .then(async (result) => {
         if (result.error) {
           logLine(`MODE_SWITCH ${previousMode} -> screen failed: ${result.error}`);
-          await writeLogFile().catch(() => {});
+          await flushLog();
           await setState({ lastError: `Could not switch to Screen/window mode: ${result.error}` });
           return;
         }
@@ -1889,13 +1883,13 @@ async function switchCaptureMode(newMode) {
         const latest = await getState();
         if (latest.settings.captureMode === 'screen') {
           logLine('MODE_SWITCH screen share ready');
-          await writeLogFile().catch(() => {});
+          await flushLog();
           await setState({ streamActive: true });
         }
       })
       .catch(async (error) => {
         logLine(`MODE_SWITCH ${previousMode} -> screen failed: ${error.message}`);
-        await writeLogFile().catch(() => {});
+        await flushLog();
         await setState({ lastError: `Could not switch to Screen/window mode: ${error.message}` });
       });
   }
@@ -2103,7 +2097,7 @@ async function exportPdfNow(requestedPdfFilename, excludedSequences) {
     `flow-captures/${state.sessionId}/${pdfFilename(requestedPdfFilename, `${state.sessionId}_checkpoint`)}`,
     excluded
   );
-  await writeLogFile().catch(() => {});
+  await flushLog();
   if (result.error) {
     return setState({ lastError: `PDF export failed: ${result.error}` });
   }
@@ -2130,7 +2124,7 @@ async function setRecordingPaused(paused) {
 
   const next = await setState({ lastError: null });
   await updateBadge(next);
-  await writeLogFile().catch(() => {});
+  await flushLog();
   return next;
 }
 
@@ -2151,26 +2145,6 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
   if (!keepFiles) {
     await deleteSessionDownloads(state.downloadIds);
   } else {
-    if (state.captures.length) {
-      const manifest = {
-        sessionId: state.sessionId,
-        startedAt: state.captures[0]?.capturedAt ?? null,
-        endedAt: new Date().toISOString(),
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        captureMode: state.settings.captureMode,
-        screenshotCount: state.captures.length,
-        screenshots: state.captures
-      };
-      const manifestUrl =
-        'data:application/json;base64,' +
-        btoa(unescape(encodeURIComponent(JSON.stringify(manifest, null, 2))));
-      await chrome.downloads.download({
-        url: manifestUrl,
-        filename: `flow-captures/${state.sessionId}/flow-manifest.json`,
-        saveAs: false
-      }).then((id) => { revealId = id; });
-    }
-
     if (state.settings.savePdf && state.captures.length) {
       logLine(`PDF_EXPORT final excluded=${excluded.length} captures=${state.captures.length}`);
       const result = await exportPdfInWindow(
@@ -2184,12 +2158,33 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
         revealId = result.downloadId;
       }
     }
+
+    if (state.captures.length) {
+      const manifest = {
+        sessionId: state.sessionId,
+        startedAt: state.captures[0]?.capturedAt ?? null,
+        endedAt: new Date().toISOString(),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        captureMode: state.settings.captureMode,
+        screenshotCount: state.captures.length,
+        screenshots: state.captures,
+        debugLog: await readDebugLog()
+      };
+      const manifestUrl =
+        'data:application/json;base64,' +
+        btoa(unescape(encodeURIComponent(JSON.stringify(manifest, null, 2))));
+      await chrome.downloads.download({
+        url: manifestUrl,
+        filename: `flow-captures/${state.sessionId}/flow-manifest.json`,
+        saveAs: false
+      }).then((id) => { revealId = id; });
+    }
   }
 
   await cleanupCaptureResources();
 
   // The shelf is suppressed during recording, so opening the folder is the only cue that files landed.
-  await writeLogFile().catch(() => {});
+  await flushLog();
   if (keepFiles && state.captures.length) await revealSavedFiles(revealId);
 
   const next = await setState({
