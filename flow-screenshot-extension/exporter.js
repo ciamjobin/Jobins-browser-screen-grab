@@ -1,3 +1,4 @@
+import { buildDocx } from './docx.js';
 import { buildPdf } from './pdf.js';
 
 const FRAMES_KEY = 'flowRecorderFrames';
@@ -11,6 +12,15 @@ function base64ToBytes(base64) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+function dataUrl(bytes, mimeType) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return `data:${mimeType};base64,${btoa(binary)}`;
 }
 
 function waitForDownload(downloadId) {
@@ -52,15 +62,48 @@ function sequencesFromParams(params, key) {
   );
 }
 
+function outputFilesFromParams(params) {
+  const encoded = params.get('outputs');
+  if (!encoded) {
+    const filename = params.get('filename');
+    return filename ? [{ format: 'pdf', filename }] : [];
+  }
+
+  try {
+    const outputs = JSON.parse(encoded);
+    if (!Array.isArray(outputs)) return [];
+    return outputs.filter(
+      (output) =>
+        output &&
+        (output.format === 'pdf' || output.format === 'docx') &&
+        typeof output.filename === 'string' &&
+        output.filename.trim()
+    );
+  } catch {
+    return [];
+  }
+}
+
+function buildOutput(format, pages) {
+  return format === 'docx' ? buildDocx(pages) : buildPdf(pages);
+}
+
+function outputMimeType(format) {
+  return format === 'docx'
+    ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    : 'application/pdf';
+}
+
 // A real extension page is required here: offscreen documents expose only chrome.runtime,
 // and service workers cannot create blob URLs.
 async function run() {
   const params = new URLSearchParams(location.search);
-  const filename = params.get('filename');
+  const outputFiles = outputFilesFromParams(params);
   const selectedSequences = sequencesFromParams(params, 'selected');
   const excludedSequences = sequencesFromParams(params, 'excluded');
 
   try {
+    if (!outputFiles.length) throw new Error('Choose PDF, Word, or both before saving.');
     const stored = await chrome.storage.local.get(null);
     const frames = Object.entries(stored)
       .filter(([key]) => key.startsWith(FRAME_PREFIX))
@@ -75,38 +118,46 @@ async function run() {
     if (!includedFrames.length) {
       throw new Error(
         selectedSequences || excludedSequences
-          ? 'No selected screenshots are available for the PDF.'
-          : 'No frames were captured, so no PDF was written.'
+          ? 'No selected screenshots are available for the requested output.'
+          : 'No frames were captured, so no output was written.'
       );
     }
 
     stateEl.textContent = `Assembling ${includedFrames.length} page(s)\u2026`;
-
-    const bytes = buildPdf(
-      includedFrames.map((frame) => ({
-        title: frame.title,
-        apiRows: frame.apiRows || [],
-        ...fieldsFor(frame),
-        width: frame.width,
-        height: frame.height,
-        jpeg: base64ToBytes(frame.base64)
-      }))
-    );
-
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
-    const downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
-    const outcome = await waitForDownload(downloadId);
-    URL.revokeObjectURL(url);
-
-    if (outcome !== 'complete') throw new Error(`PDF download ${outcome}.`);
+    const pages = includedFrames.map((frame) => ({
+      title: frame.title,
+      note: frame.note,
+      apiRows: frame.apiRows || [],
+      ...fieldsFor(frame),
+      width: frame.width,
+      height: frame.height,
+      jpeg: base64ToBytes(frame.base64)
+    }));
+    const downloadIds = [];
+    for (const output of outputFiles) {
+      const bytes = buildOutput(output.format, pages);
+      const downloadId = await chrome.downloads.download({
+        url: dataUrl(bytes, outputMimeType(output.format)),
+        filename: output.filename,
+        saveAs: false
+      });
+      const outcome = await waitForDownload(downloadId);
+      if (outcome !== 'complete') throw new Error(`${output.format.toUpperCase()} download ${outcome}.`);
+      downloadIds.push(downloadId);
+    }
 
     stateEl.textContent = `Saved ${includedFrames.length} page(s).`;
     // The background closes this window once it sees the message, avoiding a close/message race.
-    chrome.runtime.sendMessage({ type: 'PDF_DONE', pageCount: includedFrames.length, downloadId });
+    chrome.runtime.sendMessage({
+      type: 'OUTPUT_DONE',
+      pageCount: includedFrames.length,
+      downloadIds,
+      savedOutputFilenames: outputFiles.map((output) => output.filename)
+    });
   } catch (error) {
     stateEl.textContent = error.message;
     stateEl.className = 'status error';
-    chrome.runtime.sendMessage({ type: 'PDF_DONE', error: error.message });
+    chrome.runtime.sendMessage({ type: 'OUTPUT_DONE', error: error.message });
   }
 }
 

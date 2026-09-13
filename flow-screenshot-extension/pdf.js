@@ -190,6 +190,12 @@ function apiTableOps(table, bottom, heading) {
 const URL_HEADING = 'URL of the page';
 const TIME_HEADING = 'Time of action';
 
+function pageHeading(page) {
+  const title = String(page.title || 'Untitled page').trim() || 'Untitled page';
+  const note = String(page.note || '').trim().slice(0, 50);
+  return note ? `${title} [${note}]` : title;
+}
+
 // Helvetica metrics are unavailable here, so approximate the rule width from the glyph count.
 function underline(text, y) {
   const width = text.length * META_SIZE * 0.55;
@@ -201,8 +207,8 @@ function contentStream(page, table, drawImage) {
 
   if (!drawImage) {
     const title = page.apiRows?.length && table?.firstPage
-      ? page.title || 'Untitled page'
-      : `${page.title || 'Untitled page'} | API calls (continued)`;
+      ? pageHeading(page)
+      : `${pageHeading(page)} | API calls (continued)`;
     const heading = table?.firstPage ? 'API calls in this step' : 'API calls (continued)';
     return [
       `BT /F1 ${TITLE_SIZE} Tf 0 0 0 rg 1 0 0 1 ${MARGIN} ${titleY} Tm ${pdfText(title, 110)} Tj ET`,
@@ -219,7 +225,7 @@ function contentStream(page, table, drawImage) {
   const box = layoutImage(page.width, page.height, timeY - 12, imageBottom);
 
   return [
-    `BT /F1 ${TITLE_SIZE} Tf 1 0 0 1 ${MARGIN} ${titleY} Tm ${pdfText(page.title || 'Untitled page', 95)} Tj ET`,
+    `BT /F1 ${TITLE_SIZE} Tf 1 0 0 1 ${MARGIN} ${titleY} Tm ${pdfText(pageHeading(page), 95)} Tj ET`,
 
     `BT /F1 ${META_SIZE} Tf 1 0 0 1 ${MARGIN} ${urlHeadingY} Tm ${pdfText(URL_HEADING, 40)} Tj ET`,
     underline(URL_HEADING, urlHeadingY - 2.5),

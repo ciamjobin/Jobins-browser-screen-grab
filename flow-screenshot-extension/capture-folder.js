@@ -68,6 +68,17 @@ export async function requestReadWritePermission(directoryHandle) {
     (await directoryHandle.requestPermission(options)) === 'granted';
 }
 
+// Call this directly from a click handler. Awaiting queryPermission() first can lose the transient
+// activation required for requestPermission() after a persisted folder handle becomes promptable.
+export async function requestReadWritePermissionFromUserGesture(directoryHandle) {
+  if (!directoryHandle) return false;
+  if (typeof directoryHandle.requestPermission === 'function') {
+    const permissionRequest = directoryHandle.requestPermission({ mode: 'readwrite' });
+    return (await permissionRequest) === 'granted';
+  }
+  return hasReadWritePermission(directoryHandle);
+}
+
 export async function hasReadWritePermission(directoryHandle) {
   if (!directoryHandle) return false;
   if (typeof directoryHandle.queryPermission !== 'function') return true;
@@ -156,6 +167,7 @@ export async function scanCaptureFolder(directoryHandle) {
         label: saved?.label || null,
         url: saved?.url || '',
         title: saved?.title || titleFromFileName(fileHandle.name, sequence),
+        note: typeof saved?.note === 'string' ? saved.note.trim().slice(0, 50) : '',
         mode: saved?.mode || 'folder',
         apiCalls: Number.isSafeInteger(saved?.apiCalls) ? saved.apiCalls : 0,
         capturedAt: saved?.capturedAt || capturedAtFromFile(file),

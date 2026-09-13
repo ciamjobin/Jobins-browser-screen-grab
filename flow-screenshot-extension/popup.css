@@ -92,6 +92,30 @@ h2 {
   color: #a15c00;
 }
 
+.toast {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  left: 14px;
+  z-index: 10;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border: 1px solid #2e7d32;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(31, 41, 51, 0.24);
+  color: #1b5e20;
+  background: #edf7ed;
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.toast.error {
+  border-color: #c62828;
+  color: #9f1717;
+  background: #fdecea;
+}
+
 .full-page-progress {
   margin: -4px 0 12px;
   padding: 8px 10px;
@@ -161,6 +185,23 @@ h2 {
 #saveAndOpen,
 #startNewRecording,
 #exportPdfNow {
+  grid-column: 1 / -1;
+}
+
+#mainActions.awaiting-stop-choice > :not(#toggle):not(#confirm) {
+  display: none;
+}
+
+#confirm {
+  grid-column: 1 / -1;
+}
+
+#confirm .actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#keepNo {
   grid-column: 1 / -1;
 }
 
@@ -300,6 +341,20 @@ button.danger:hover:not(:disabled) {
   font-weight: 600;
 }
 
+.output-formats {
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  border: 1px solid #cbd2d9;
+  border-radius: 3px;
+}
+
+.output-formats legend {
+  padding: 0 3px;
+  color: #52606d;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .later-pdf {
   margin-top: 8px;
 }
@@ -364,4 +419,14 @@ button.danger:hover:not(:disabled) {
   display: block;
   color: #7b8794;
   font-variant-numeric: tabular-nums;
+}
+
+.capture-note {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 5px;
+  padding: 4px 5px;
+  border: 1px solid #cbd2d9;
+  border-radius: 3px;
+  font-size: 11px;
 }

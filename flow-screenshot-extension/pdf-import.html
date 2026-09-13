@@ -2,11 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Create PDF - JShotz</title>
+    <title>Create document - JShotz</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body class="pdf-import">
-    <h1>JShotz PDF builder</h1>
+    <h1>JShotz document builder</h1>
     <p class="note">Select the folder containing the saved screenshots.</p>
 
     <label class="field">
@@ -26,12 +26,18 @@
     </div>
 
     <label class="field">
-      <span>PDF file name</span>
-      <input id="pdfFilename" type="text" value="JShotz-screenshots.pdf" autocomplete="off" />
+      <span>File name</span>
+      <input id="outputFilename" type="text" value="JShotz-screenshots" autocomplete="off" />
     </label>
 
+    <fieldset class="output-formats">
+      <legend>Output formats</legend>
+      <label class="check"><input id="outputPdf" type="checkbox" checked /> PDF (.pdf)</label>
+      <label class="check"><input id="outputDocx" type="checkbox" /> Word (.docx)</label>
+    </fieldset>
+
     <p id="fileSummary" class="status idle">No screenshots selected.</p>
-    <button id="generatePdf" class="primary" disabled>Generate PDF</button>
+    <button id="generatePdf" class="primary" disabled>Generate document</button>
   
     <script type="module" src="pdf-import.js"></script>
   </body>

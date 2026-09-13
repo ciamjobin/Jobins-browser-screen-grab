@@ -34,6 +34,13 @@ class FakeElement {
     }
   }
 
+  remove() {
+    if (!this.parentElement) return;
+    const index = this.parentElement.children.indexOf(this);
+    if (index >= 0) this.parentElement.children.splice(index, 1);
+    this.parentElement = null;
+  }
+
   getAttribute(name) {
     return this.attributes.get(name) ?? null;
   }
@@ -74,9 +81,11 @@ class FakeElement {
       const part = rawSelector.trim();
       const role = /^\[role="([^"]+)"\]$/.exec(part);
       const type = /^(?:input)?\[type="([^"]+)"\]$/.exec(part);
+      const attribute = /^\[([^=\]]+)="([^"]+)"\]$/.exec(part);
       if (part === '*') return true;
       if (role) return this.getAttribute('role') === role[1];
       if (type) return this.tagName === 'INPUT' && this.getAttribute('type') === type[1];
+      if (attribute) return this.getAttribute(attribute[1]) === attribute[2];
       if (part === '[type="submit"]') return this.getAttribute('type') === 'submit';
       if (part === 'a[href]') return this.tagName === 'A' && this.hasAttribute('href');
       return this.tagName === part.toUpperCase();
@@ -109,7 +118,7 @@ function createEventTarget() {
   };
 }
 
-function createContentEnvironment() {
+function createContentEnvironment({ sendMessageResult = { ok: true } } = {}) {
   const documentEvents = createEventTarget();
   const windowEvents = createEventTarget();
   const rootEvents = createEventTarget();
@@ -125,7 +134,7 @@ function createContentEnvironment() {
     body,
     activeElement: null,
     createElement: (tagName) => new FakeElement(tagName),
-    getElementById: () => null,
+    getElementById: (id) => allElements().find((element) => element.id === id) || null,
     querySelector: (selector) => allElements().find((element) => element.matches(selector)) || null,
     querySelectorAll: (selector) => allElements().filter((element) => element.matches(selector))
   };
@@ -156,7 +165,9 @@ function createContentEnvironment() {
         this.disconnected = false;
         mutationObservers.push(this);
       }
-      observe() {}
+      observe(_target, options) {
+        this.options = options;
+      }
       disconnect() {
         this.disconnected = true;
       }
@@ -165,7 +176,7 @@ function createContentEnvironment() {
       runtime: {
         sendMessage(message) {
           sent.push(message);
-          return Promise.resolve({ ok: true });
+          return Promise.resolve(sendMessageResult);
         },
         onMessage: { addListener() {} }
       }
@@ -195,6 +206,13 @@ function createContentEnvironment() {
     notifyMutations() {
       for (const observer of mutationObservers) {
         if (!observer.disconnected) observer.callback([]);
+      }
+    },
+    notifyAttributeMutation(attributeName) {
+      for (const observer of mutationObservers) {
+        if (!observer.disconnected && observer.options?.attributeFilter?.includes(attributeName)) {
+          observer.callback([{ type: 'attributes', attributeName }]);
+        }
       }
     },
     runTimers() {
@@ -309,6 +327,108 @@ test('captures a fixed modal once and only records intentional modal actions', a
   assert.equal(environment.captures().at(-1).label, 'Comments edited');
 });
 
+test('treats an aria-modal window as a modal capture surface', async () => {
+  const environment = createContentEnvironment();
+  const { body, document, window } = environment;
+  const dialog = new FakeElement('section', {
+    attributes: { 'aria-modal': 'true' },
+    parent: body,
+    text: 'Confirm payment',
+    rect: { left: 260, top: 160, width: 760, height: 400 }
+  });
+  const action = new FakeElement('button', { parent: dialog, text: 'Confirm' });
+
+  environment.notifyMutations();
+  environment.runTimers();
+  assert.equal(environment.captures().at(-1).reason, 'dialog-opened');
+  assert.equal(environment.captures().at(-1).label, 'Confirm payment');
+
+  window.scrollY = 900;
+  document.dispatch('scroll', { target: document });
+  environment.runTimers();
+  assert.equal(environment.captures().length, 1);
+
+  window.dispatch('click', { target: action });
+  environment.runTimers();
+  await environment.flush();
+  assert.equal(environment.captures().length, 2);
+  assert.equal(environment.captures().at(-1).reason, 'modal-click');
+});
+
+test('detects an existing element when aria-modal is enabled', () => {
+  const environment = createContentEnvironment();
+  const { body } = environment;
+  const dialog = new FakeElement('section', {
+    parent: body,
+    text: 'Review submission',
+    rect: { left: 260, top: 160, width: 760, height: 400 }
+  });
+
+  dialog.setAttribute('aria-modal', 'true');
+  environment.notifyAttributeMutation('aria-modal');
+  environment.runTimers();
+
+  assert.equal(environment.captures().length, 1);
+  assert.equal(environment.captures()[0].reason, 'dialog-opened');
+});
+
+test('does not capture the underlying click while an asynchronously opened modal appears', async () => {
+  const environment = createContentEnvironment();
+  const { body, window } = environment;
+  const trigger = new FakeElement('button', { parent: body, text: 'Review terms' });
+
+  window.dispatch('click', { target: trigger });
+  new FakeElement('div', {
+    attributes: { role: 'dialog' },
+    parent: body,
+    text: 'Terms of service',
+    rect: { left: 220, top: 120, width: 840, height: 460 }
+  });
+  environment.notifyMutations();
+  environment.runTimers();
+  await environment.flush();
+
+  assert.deepEqual(environment.captures().map((capture) => capture.reason), ['dialog-opened']);
+});
+
+test('does not recapture a re-rendered modal but captures a distinct modal', () => {
+  const environment = createContentEnvironment();
+  const { body } = environment;
+  const original = new FakeElement('div', {
+    attributes: { role: 'dialog' },
+    parent: body,
+    text: 'Edit profile',
+    rect: { left: 240, top: 150, width: 800, height: 440 }
+  });
+
+  environment.notifyMutations();
+  environment.runTimers();
+  assert.equal(environment.captures().length, 1);
+
+  original.setAttribute('hidden', '');
+  const replacement = new FakeElement('div', {
+    attributes: { role: 'dialog' },
+    parent: body,
+    text: 'Edit profile',
+    rect: { left: 240, top: 150, width: 800, height: 440 }
+  });
+  environment.notifyMutations();
+  environment.runTimers();
+  assert.equal(environment.captures().length, 1);
+
+  replacement.setAttribute('hidden', '');
+  new FakeElement('div', {
+    attributes: { role: 'dialog', 'aria-label': 'Confirm discard' },
+    parent: body,
+    text: 'Discard changes?',
+    rect: { left: 240, top: 150, width: 800, height: 440 }
+  });
+  environment.notifyMutations();
+  environment.runTimers();
+  assert.equal(environment.captures().length, 2);
+  assert.equal(environment.captures().at(-1).label, 'Confirm discard');
+});
+
 test('captures scrolling only inside a large scrollable modal', () => {
   const environment = createContentEnvironment();
   const { body, document, window } = environment;
@@ -341,18 +461,18 @@ test('captures scrolling only inside a large scrollable modal', () => {
   assert.equal(capture.modal.compact, false);
 });
 
-test('does not zoom a short modal with a scrollbar or capture its scroll', () => {
+test('does not capture scrolls from an ordinary modal with a scrollbar', () => {
   const environment = createContentEnvironment();
   const { body, document } = environment;
   const dialog = new FakeElement('div', {
     attributes: { role: 'dialog' },
     parent: body,
-    text: 'Short terms',
-    rect: { left: 360, top: 240, width: 560, height: 220 }
+    text: 'Standard terms',
+    rect: { left: 280, top: 160, width: 720, height: 480 }
   });
-  dialog.clientHeight = 180;
-  dialog.scrollHeight = 900;
-  dialog.scrollTop = 480;
+  dialog.clientHeight = 440;
+  dialog.scrollHeight = 1600;
+  dialog.scrollTop = 700;
   dialog.style.overflowY = 'auto';
 
   environment.notifyMutations();
@@ -384,12 +504,12 @@ test('drops a pending page-scroll capture when a modal opens', () => {
   assert.deepEqual(environment.captures().map((capture) => capture.reason), ['dialog-opened']);
 });
 
-test('sends save and new-recording requests for recorder hotkeys', () => {
+test('opens the appropriate output dialog for recorder hotkeys', () => {
   const environment = createContentEnvironment();
-  const keyboardEvent = (key) => ({
+  const keyboardEvent = (key, { altKey = false } = {}) => ({
     key,
     ctrlKey: true,
-    altKey: false,
+    altKey,
     shiftKey: false,
     metaKey: false,
     repeat: false,
@@ -405,24 +525,21 @@ test('sends save and new-recording requests for recorder hotkeys', () => {
 
   const save = keyboardEvent('s');
   environment.window.dispatch('keydown', save);
-  environment.runTimers();
   assert.equal(save.prevented, true);
   assert.equal(save.stopped, true);
-  assert.equal(environment.sent.at(-1).type, 'SAVE_FLOW');
-  assert.equal(environment.sent.at(-1).reveal, undefined);
+  assert.equal(environment.sent.at(-1).type, 'OPEN_OUTPUT_DIALOG');
+  assert.equal(environment.sent.at(-1).mode, 'checkpoint');
 
-  const saveChord = keyboardEvent('s');
-  const open = keyboardEvent('o');
-  environment.window.dispatch('keydown', saveChord);
-  environment.window.dispatch('keydown', open);
-  environment.runTimers();
-  assert.equal(open.prevented, true);
-  assert.equal(environment.sent.at(-1).type, 'SAVE_FLOW');
-  assert.equal(environment.sent.at(-1).reveal, true);
-  assert.equal(environment.sent.filter((message) => message.type === 'SAVE_FLOW').length, 2);
+  const finalSave = keyboardEvent('s', { altKey: true });
+  environment.window.dispatch('keydown', finalSave);
+  assert.equal(finalSave.prevented, true);
+  assert.equal(finalSave.stopped, true);
+  assert.equal(environment.sent.at(-1).type, 'OPEN_OUTPUT_DIALOG');
+  assert.equal(environment.sent.at(-1).mode, 'final');
 
   const startNew = keyboardEvent('n');
   environment.window.dispatch('keydown', startNew);
   assert.equal(startNew.prevented, true);
-  assert.equal(environment.sent.at(-1).type, 'START_NEW_RECORDING');
+  assert.equal(environment.sent.at(-1).type, 'OPEN_OUTPUT_DIALOG');
+  assert.equal(environment.sent.at(-1).mode, 'new-recording');
 });

@@ -19,6 +19,8 @@ const sourceManifest = JSON.parse(await readFile(path.join(SRC, 'manifest.json')
 const version = sourceManifest.version;
 const packageName = sourceManifest.name.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
 
+await run(process.execPath, ['tools/generate-guide-pdfs.mjs']);
+
 await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
 
@@ -48,6 +50,22 @@ for (const [target, config] of Object.entries(TARGETS)) {
   const files = await readdir(stage);
   console.log(`${target.padEnd(12)} ${files.length} files -> ${path.basename(zip)}`);
 }
+
+const teamReleaseFiles = [
+  path.resolve(OUT, `${packageName}-${version}-chrome-edge.zip`),
+  path.resolve(OUT, `${packageName}-${version}-firefox.zip`),
+  path.resolve(`JShotz-Quick-Guide-v${version}.pdf`),
+  path.resolve(`JShotz-User-Guide-v${version}.pdf`)
+];
+for (const file of teamReleaseFiles) await readFile(file);
+
+const teamReleaseZip = path.resolve(OUT, `${packageName}-${version}-team-release.zip`);
+await run('powershell', [
+  '-NoProfile',
+  '-Command',
+  `Compress-Archive -LiteralPath ${teamReleaseFiles.map((file) => `'${file}'`).join(',')} -DestinationPath '${teamReleaseZip}' -CompressionLevel Optimal -Force`
+]);
+console.log(`${'team release'.padEnd(12)} ${teamReleaseFiles.length} files -> ${path.basename(teamReleaseZip)}`);
 
 await writeFile(path.join(OUT, 'VERSION'), `${version}\n`);
 console.log(`\nBuilt version ${version} into ${OUT}/`);

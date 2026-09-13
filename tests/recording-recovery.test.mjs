@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { saveCaptureFolder } from '../flow-screenshot-extension/capture-folder.js';
+import {
+  requestReadWritePermissionFromUserGesture,
+  saveCaptureFolder
+} from '../flow-screenshot-extension/capture-folder.js';
 
 let backgroundImportSequence = 0;
 
@@ -96,13 +99,14 @@ function createIndexedDb() {
   };
 }
 
-function createResumeFolder() {
+function createResumeFolder({ withPreviousCapture = true } = {}) {
   const imageName = '001_2026-09-12_10-00-00-000_Previous_step.png';
   const manifest = JSON.stringify({
     sessionId: 'session_before_crash',
     screenshots: [{
       sequence: 1,
       title: 'Previous step',
+      note: 'Restored note',
       url: 'https://example.test/previous',
       reason: 'click',
       mode: 'tab',
@@ -110,12 +114,14 @@ function createResumeFolder() {
       filename: `flow-captures/session_before_crash/${imageName}`
     }]
   });
-  const files = new Map([
-    [imageName, { contents: Uint8Array.from([112, 114, 111, 98, 101]), type: 'image/png' }],
-    ['flow-manifest.json', { contents: manifest, type: 'application/json' }]
-  ]);
+  const files = new Map();
+  if (withPreviousCapture) {
+    files.set(imageName, { contents: Uint8Array.from([112, 114, 111, 98, 101]), type: 'image/png' });
+    files.set('flow-manifest.json', { contents: manifest, type: 'application/json' });
+  }
   const written = new Map();
   let permission = 'granted';
+  let reportedPermission = null;
 
   const bytesFor = async (contents) => {
     if (typeof contents === 'string') return new TextEncoder().encode(contents);
@@ -143,6 +149,11 @@ function createResumeFolder() {
       };
     },
     async createWritable() {
+      if (permission !== 'granted') {
+        const error = new Error('Permission denied');
+        error.name = 'NotAllowedError';
+        throw error;
+      }
       return {
         async write(contents) {
           written.set(name, contents);
@@ -158,6 +169,11 @@ function createResumeFolder() {
       kind: 'directory',
       name: 'session_before_crash',
       async queryPermission() {
+        return reportedPermission ?? permission;
+      },
+      async requestPermission() {
+        permission = 'granted';
+        reportedPermission = null;
         return permission;
       },
       async *values() {
@@ -175,9 +191,32 @@ function createResumeFolder() {
     },
     setPermission(value) {
       permission = value;
+    },
+    setReportedPermission(value) {
+      reportedPermission = value;
     }
   };
 }
+
+test('requests folder write permission immediately from a user gesture', async () => {
+  let queryCalls = 0;
+  let requestCalls = 0;
+  const directoryHandle = {
+    async queryPermission() {
+      queryCalls += 1;
+      return 'prompt';
+    },
+    requestPermission(options) {
+      requestCalls += 1;
+      assert.deepEqual(options, { mode: 'readwrite' });
+      return Promise.resolve('granted');
+    }
+  };
+
+  assert.equal(await requestReadWritePermissionFromUserGesture(directoryHandle), true);
+  assert.equal(requestCalls, 1);
+  assert.equal(queryCalls, 0);
+});
 
 function createChrome() {
   const sessionId = 'session_before_crash';
@@ -480,6 +519,7 @@ test('saves a flow without stopping and starts a separate recording without dele
     );
     assert.equal(saved.recording, true);
     assert.equal(saved.sessionId, previousSessionId);
+    assert.match(saved.savedPdfFilename, new RegExp(`^${previousSessionId}_checkpoint_.*\\.pdf$`));
     assert.equal(fixture.exportRequests.length, 1);
     assert.match(
       new URL(fixture.exportRequests[0].url, 'https://extension.test').searchParams.get('filename'),
@@ -511,6 +551,32 @@ test('saves a flow without stopping and starts a separate recording without dele
         request.filename === `flow-captures/${previousSessionId}/flow-manifest.json`
       )
     );
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('stops a recording without creating a PDF when requested', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { savePdf: true } });
+    await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+
+    const stopped = await sendMessage(messageListener, {
+      type: 'STOP',
+      keepFiles: true,
+      createPdf: false
+    });
+
+    assert.equal(stopped.recording, false);
+    assert.equal(fixture.exportRequests.length, 0);
+    assert.ok(fixture.downloadRequests.some((request) => request.filename.endsWith('/flow-manifest.json')));
   } finally {
     globalThis.chrome = originalChrome;
   }
@@ -556,6 +622,7 @@ test('resumes a selected screenshot folder and writes the combined flow there', 
     assert.equal(resumed.sequence, 2);
     assert.equal(resumed.captures.length, 2);
     assert.equal(resumed.captures[0].title, 'Previous step');
+    assert.equal(resumed.captures[0].note, 'Restored note');
     assert.match(resumed.captures[1].filename, /^002_/);
     assert.equal(fixture.downloadRequests.length, 0);
     assert.ok([...folder.written.keys()].some((name) => /^002_.*\.png$/.test(name)));
@@ -565,8 +632,8 @@ test('resumes a selected screenshot folder and writes the combined flow there', 
     const restartedMessageListener = fixture.chrome.runtime.onMessage.listeners.at(-1);
     const unavailable = await sendMessage(restartedMessageListener, { type: 'GET_STATE' });
     assert.equal(unavailable.sequence, 2);
-    assert.equal(unavailable.folderAccessNeeded, true);
-    assert.match(unavailable.lastError, /Reconnect capture folder/);
+    assert.equal(unavailable.folderAccessNeeded, false);
+    assert.equal(unavailable.lastError, null);
     assert.equal(consoleErrors.length, 0);
 
     const downloadedWhileDisconnected = await sendMessage(restartedMessageListener, { type: 'CAPTURE_NOW' });
@@ -606,5 +673,254 @@ test('resumes a selected screenshot folder and writes the combined flow there', 
     console.error = originalConsoleError;
     globalThis.chrome = originalChrome;
     globalThis.indexedDB = originalIndexedDb;
+  }
+});
+
+test('uses an empty selected folder for a new folder-backed recording', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalIndexedDb = globalThis.indexedDB;
+  const fixture = createChrome();
+  const folder = createResumeFolder({ withPreviousCapture: false });
+  globalThis.chrome = fixture.chrome;
+  globalThis.indexedDB = createIndexedDb();
+
+  try {
+    await fixture.setStorage({
+      flowRecorderState: {
+        recording: false,
+        settings: {
+          captureMode: 'tab',
+          captureOnClick: true,
+          captureOnScroll: true,
+          captureApi: false,
+          stampTimestamp: false,
+          fullPage: false,
+          savePng: false,
+          savePdf: false
+        }
+      }
+    });
+    await saveCaptureFolder(folder.directoryHandle);
+    await loadBackground();
+
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const started = await sendMessage(messageListener, {
+      type: 'RESUME_FROM_FOLDER',
+      settings: { captureMode: 'tab', fullPage: false, savePng: false, savePdf: false }
+    });
+
+    assert.equal(started.recording, true);
+    assert.equal(started.outputFolder.name, 'session_before_crash');
+    assert.equal(started.folderAccessNeeded, false);
+    assert.equal(
+      started.notice,
+      'No previous screenshots found in selected folder, JShotz is still capturing the current flows to the selected folder.'
+    );
+    assert.equal(started.sequence, 1);
+    assert.ok([...folder.written.keys()].some((name) => /^001_.*\.png$/.test(name)));
+  } finally {
+    globalThis.chrome = originalChrome;
+    globalThis.indexedDB = originalIndexedDb;
+  }
+});
+
+test('reconnects an active recording to an empty selected capture folder', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalIndexedDb = globalThis.indexedDB;
+  const fixture = createChrome();
+  const folder = createResumeFolder({ withPreviousCapture: false });
+  globalThis.chrome = fixture.chrome;
+  globalThis.indexedDB = createIndexedDb();
+
+  try {
+    await fixture.setStorage({
+      flowRecorderState: {
+        recording: true,
+        tabId: fixture.liveTab.id,
+        windowId: fixture.liveTab.windowId,
+        sessionId: fixture.sessionId,
+        sequence: 0,
+        captures: [],
+        outputFolder: { name: folder.directoryHandle.name },
+        folderAccessNeeded: true,
+        settings: {
+          captureMode: 'tab',
+          captureOnClick: true,
+          captureOnScroll: true,
+          captureApi: false,
+          stampTimestamp: false,
+          fullPage: false,
+          savePng: true,
+          savePdf: true
+        }
+      }
+    });
+    await saveCaptureFolder(folder.directoryHandle);
+    await loadBackground();
+
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const reconnected = await sendMessage(messageListener, { type: 'RECONNECT_CAPTURE_FOLDER' });
+
+    assert.equal(reconnected.recording, true);
+    assert.equal(reconnected.folderAccessNeeded, false);
+    assert.equal(reconnected.lastError, null);
+    assert.equal(
+      reconnected.notice,
+      'No previous screenshots found in selected folder, JShotz is still capturing the current flows to the selected folder.'
+    );
+
+    const captured = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    assert.equal(captured.sequence, 1);
+    assert.ok([...folder.written.keys()].some((name) => /^001_.*\.png$/.test(name)));
+
+    folder.setReportedPermission('prompt');
+    const saved = await sendMessage(messageListener, { type: 'SAVE_FLOW' });
+    assert.equal(saved.lastError, null);
+    assert.equal(saved.folderAccessNeeded, false);
+    assert.match(saved.savedPdfFilename, /^session_before_crash_checkpoint_.*\.pdf$/);
+    assert.ok([...folder.written.keys()].some((name) => /_checkpoint_.*\.pdf$/.test(name)));
+    assert.equal(fixture.exportRequests.length, 0);
+
+    folder.setPermission('denied');
+    const denied = await sendMessage(messageListener, { type: 'SAVE_FLOW' });
+    assert.equal(denied.folderAccessNeeded, true);
+    assert.match(denied.lastError, /^PDF export failed: The selected capture folder needs permission again\./);
+
+    assert.equal(await requestReadWritePermissionFromUserGesture(folder.directoryHandle), true);
+    const savedAfterRenewal = await sendMessage(messageListener, { type: 'SAVE_FLOW' });
+    assert.equal(savedAfterRenewal.lastError, null);
+    assert.equal(savedAfterRenewal.folderAccessNeeded, false);
+    assert.ok(folder.written.has(savedAfterRenewal.savedPdfFilename));
+    assert.equal(fixture.exportRequests.length, 0);
+  } finally {
+    globalThis.chrome = originalChrome;
+    globalThis.indexedDB = originalIndexedDb;
+  }
+});
+
+test('stops and saves custom-named PDF and Word documents together in the selected folder', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalIndexedDb = globalThis.indexedDB;
+  const fixture = createChrome();
+  const folder = createResumeFolder({ withPreviousCapture: false });
+  globalThis.chrome = fixture.chrome;
+  globalThis.indexedDB = createIndexedDb();
+
+  try {
+    await fixture.setStorage({
+      flowRecorderState: {
+        recording: true,
+        tabId: fixture.liveTab.id,
+        windowId: fixture.liveTab.windowId,
+        sessionId: fixture.sessionId,
+        sequence: 1,
+        captures: [{ sequence: 1, title: 'Recovered page', note: 'Check the confirmation' }],
+        outputFolder: { name: folder.directoryHandle.name },
+        settings: {
+          captureMode: 'tab',
+          captureOnClick: true,
+          captureOnScroll: true,
+          captureApi: false,
+          stampTimestamp: false,
+          fullPage: false,
+          savePng: true,
+          savePdf: true
+        }
+      },
+      'flowRecorderFrames:1': {
+        sequence: 1,
+        title: 'Recovered page',
+        note: 'Check the confirmation',
+        url: 'https://example.test/recovered',
+        time: '2026-09-13 10:00 UTC',
+        base64: 'cHJvYmU=',
+        width: 1,
+        height: 1
+      }
+    });
+    await saveCaptureFolder(folder.directoryHandle);
+    await loadBackground();
+
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const saved = await sendMessage(messageListener, {
+      type: 'STOP',
+      keepFiles: true,
+      outputFilename: 'review-package',
+      outputFormats: ['pdf', 'docx']
+    });
+
+    assert.equal(saved.recording, false);
+    assert.deepEqual(saved.savedOutputFilenames, ['review-package.pdf', 'review-package.docx']);
+    assert.equal(saved.savedPdfFilename, 'review-package.pdf');
+    assert.ok(folder.written.has('review-package.pdf'));
+    assert.ok(folder.written.has('review-package.docx'));
+    assert.equal(fixture.exportRequests.length, 0);
+  } finally {
+    globalThis.chrome = originalChrome;
+    globalThis.indexedDB = originalIndexedDb;
+  }
+});
+
+test('opens a final-save output dialog without ending the recording', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+
+    const state = await sendMessage(messageListener, { type: 'OPEN_OUTPUT_DIALOG', mode: 'final' });
+
+    assert.equal(state.recording, true);
+    assert.match(
+      new URL(fixture.exportRequests.at(-1).url, 'https://extension.test').pathname,
+      /output-dialog\.html$/
+    );
+    assert.equal(
+      new URL(fixture.exportRequests.at(-1).url, 'https://extension.test').searchParams.get('mode'),
+      'final'
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('persists a 50-character screenshot note with its capture frame', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const captured = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    const sequence = captured.sequence;
+    const note = 'Verify that the confirmation message is visible.';
+
+    const noted = await sendMessage(messageListener, {
+      type: 'SET_CAPTURE_NOTE',
+      sessionId: captured.sessionId,
+      sequence,
+      note
+    });
+
+    assert.equal(noted.captures.find((capture) => capture.sequence === sequence)?.note, note);
+    assert.equal(fixture.storageSnapshot()[`flowRecorderFrames:${sequence}`]?.note, note);
+
+    const rejected = await sendMessage(messageListener, {
+      type: 'SET_CAPTURE_NOTE',
+      sessionId: captured.sessionId,
+      sequence,
+      note: 'x'.repeat(51)
+    });
+    assert.match(rejected.lastError, /50 characters or fewer/);
+    assert.equal(
+      fixture.storageSnapshot()[`flowRecorderFrames:${sequence}`]?.note,
+      note
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
   }
 });

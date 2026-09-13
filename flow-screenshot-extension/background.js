@@ -1,11 +1,13 @@
 import {
   getSavedCaptureFolder,
-  hasReadWritePermission,
   imageFileToDataUrl,
   removeCaptureFolderFiles,
   scanCaptureFolder,
   writeCaptureFolderFile
 } from './capture-folder.js';
+import { handlers as localImageWorkerHandlers } from './image-worker.js';
+import { buildDocx } from './docx.js';
+import { buildPdf } from './pdf.js';
 
 const STATE_KEY = 'flowRecorderState';
 const PDF_EXCLUSIONS_KEY = 'flowRecorderPdfExcludedSequences';
@@ -30,6 +32,8 @@ let apiHeaderRecords = [];
 
 const API_HEADER_TTL_MS = 120000;
 const CAPTURE_COUNTDOWN_MS = 5000;
+const EMPTY_CAPTURE_FOLDER_NOTICE =
+  'No previous screenshots found in selected folder, JShotz is still capturing the current flows to the selected folder.';
 
 // A per-session debug log, cleared at the start of each new recording, mirroring capture attempts,
 // timings, errors and mode switches - so "screenshot #N at time T had a problem" can be answered
@@ -349,11 +353,9 @@ async function updateBadge(state) {
 // Chromium runs the background as a DOM-less service worker and needs an offscreen document for
 // canvas work. Firefox runs it as an event page that already has a DOM, so it renders in place.
 const HAS_OFFSCREEN = typeof chrome.offscreen !== 'undefined';
-let imageWorker = null;
 
-async function localImageWorker() {
-  imageWorker ??= await import('./image-worker.js');
-  return imageWorker;
+function localImageWorker() {
+  return { handlers: localImageWorkerHandlers };
 }
 
 async function ensureOffscreen() {
@@ -653,7 +655,7 @@ async function getPageHeading(tabId) {
         };
 
         // A dialog's own heading describes the current step better than the page behind it.
-        const dialog = [...document.querySelectorAll('dialog[open], [role="dialog"], [role="alertdialog"]')]
+        const dialog = [...document.querySelectorAll('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]')]
           .filter(visible)
           .pop();
         const scope = dialog || document;
@@ -1517,16 +1519,32 @@ function needsFolderReconnect(error) {
   return error?.code === FOLDER_PERMISSION_ERROR;
 }
 
+function normalizeFolderAccessError(error) {
+  if (needsFolderReconnect(error)) return error;
+  if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') {
+    return folderPermissionError();
+  }
+  return error;
+}
+
 async function writableCaptureFolder() {
   const directoryHandle = await getSavedCaptureFolder();
-  if (!directoryHandle || !(await hasReadWritePermission(directoryHandle))) {
-    throw folderPermissionError();
-  }
+  if (!directoryHandle) throw folderPermissionError();
+  return directoryHandle;
+}
+
+async function writableSelectedCaptureFolder(state) {
+  const directoryHandle = await writableCaptureFolder();
+  if (directoryHandle.name !== state.outputFolder?.name) throw folderPermissionError();
   return directoryHandle;
 }
 
 async function writeSelectedCaptureFolderFile(name, contents) {
-  await writeCaptureFolderFile(await writableCaptureFolder(), name, contents);
+  try {
+    await writeCaptureFolderFile(await writableCaptureFolder(), name, contents);
+  } catch (error) {
+    throw normalizeFolderAccessError(error);
+  }
 }
 
 async function cleanupCaptureResources() {
@@ -1740,7 +1758,7 @@ async function persistCapture({
     watermarkText,
     titleBar: titleBar ? { title, url } : null,
     wantPng: settings.savePng,
-    wantJpeg: settings.savePdf,
+    wantJpeg: true,
     apiRows,
     jpegQuality,
     modal
@@ -1797,10 +1815,11 @@ async function persistCapture({
     }
   }
 
-  if (settings.savePdf && jpeg) {
+  if (jpeg) {
     await storeFrame({
       sequence,
       title,
+      note: '',
       url,
       time: `${stampText(capturedAt)}  |  ${reason}${label ? ` "${label}"` : ''}  |  ${mode} mode`,
       apiRows,
@@ -1816,6 +1835,7 @@ async function persistCapture({
     label: label || null,
     url,
     title,
+    note: '',
     mode,
     apiCalls: apiRows.length,
     capturedAt: capturedAt.toISOString(),
@@ -1911,9 +1931,12 @@ async function queueApiCall({
 /* ---------------------------------------------------------------- lifecycle */
 
 // Neither the service worker (no blob URLs) nor an offscreen document (chrome.runtime only)
-// can write the PDF, so a short-lived extension page does it.
-async function exportPdfInWindow(filename, excludedSequences) {
-  const params = new URLSearchParams({ filename });
+// can write browser downloads, so a short-lived extension page does it.
+async function exportOutputsInWindow(outputFiles, excludedSequences) {
+  const params = new URLSearchParams({
+    filename: outputFiles[0]?.filename || '',
+    outputs: JSON.stringify(outputFiles)
+  });
   if (Array.isArray(excludedSequences)) {
     params.set('excluded', normalizeSequenceList(excludedSequences).join(','));
   }
@@ -1934,14 +1957,21 @@ async function exportPdfInWindow(filename, excludedSequences) {
       resolve(value);
     };
     const onMessage = (message) => {
-      if (message?.type === 'PDF_DONE') {
-        finish(message.error ? { error: message.error } : { ok: true, downloadId: message.downloadId });
+      if (message?.type === 'OUTPUT_DONE' || message?.type === 'PDF_DONE') {
+        const downloadIds = normalizeIdList(
+          Array.isArray(message.downloadIds)
+            ? message.downloadIds
+            : typeof message.downloadId === 'number'
+              ? [message.downloadId]
+              : []
+        );
+        finish(message.error ? { error: message.error } : { ok: true, downloadIds });
       }
     };
     const onRemoved = (windowId) => {
-      if (windowId === win.id) finish({ error: 'The PDF window was closed early.' });
+      if (windowId === win.id) finish({ error: 'The output window was closed early.' });
     };
-    const timer = setTimeout(() => finish({ error: 'Timed out while writing the PDF.' }), 120000);
+    const timer = setTimeout(() => finish({ error: 'Timed out while writing output files.' }), 120000);
 
     chrome.runtime.onMessage.addListener(onMessage);
     chrome.windows.onRemoved.addListener(onRemoved);
@@ -1968,24 +1998,67 @@ async function storedFrames() {
   return frames;
 }
 
-async function exportPdfToSelectedFolder(filename, excludedSequences) {
+function captureNote(value) {
+  if (typeof value !== 'string') return null;
+  const note = value.trim();
+  return note.length <= 50 ? note : null;
+}
+
+async function setCaptureNote(sessionId, sequence, value) {
+  const state = await getState();
+  if (!state.recording || sessionId !== state.sessionId) return state;
+
+  const normalizedSequence = Number(sequence);
+  const note = captureNote(value);
+  if (!Number.isSafeInteger(normalizedSequence) || normalizedSequence < 1) {
+    return setState({ lastError: 'That screenshot is not available for a note.' });
+  }
+  if (note === null) {
+    return setState({ lastError: 'Screenshot notes must be 50 characters or fewer.' });
+  }
+
+  const index = state.captures.findIndex((capture) => capture.sequence === normalizedSequence);
+  if (index < 0) return setState({ lastError: 'That screenshot is not available for a note.' });
+
+  const captures = [...state.captures];
+  captures[index] = { ...captures[index], note };
+  const key = `${FRAME_PREFIX}${normalizedSequence}`;
+  const stored = await chrome.storage.local.get(key);
+  const frame = stored[key];
+  if (frame) await chrome.storage.local.set({ [key]: { ...frame, note } });
+  return setState({ captures, lastError: null });
+}
+
+function outputPages(frames) {
+  return frames.map((frame) => ({
+    title: frame.title,
+    note: frame.note,
+    url: frame.url || '(URL not recorded)',
+    time: frame.time || '(time not recorded)',
+    apiRows: frame.apiRows || [],
+    width: frame.width,
+    height: frame.height,
+    jpeg: base64ToBytes(frame.base64)
+  }));
+}
+
+function outputBytes(format, pages) {
+  return format === 'docx' ? buildDocx(pages) : buildPdf(pages);
+}
+
+async function exportOutputsToSelectedFolder(directoryHandle, outputFiles, excludedSequences) {
   const excluded = new Set(normalizeSequenceList(excludedSequences));
   const frames = (await storedFrames()).filter((frame) => !excluded.has(Number(frame.sequence)));
-  if (!frames.length) return { error: 'No selected screenshots are available for the PDF.' };
+  if (!frames.length) return { error: 'No selected screenshots are available for the selected output.' };
 
-  const { buildPdf } = await import('./pdf.js');
-  const bytes = buildPdf(
-    frames.map((frame) => ({
-      title: frame.title,
-      url: frame.url || '(URL not recorded)',
-      time: frame.time || '(time not recorded)',
-      apiRows: frame.apiRows || [],
-      width: frame.width,
-      height: frame.height,
-      jpeg: base64ToBytes(frame.base64)
-    }))
-  );
-  await writeSelectedCaptureFolderFile(filename, bytes);
+  const pages = outputPages(frames);
+  try {
+    for (const output of outputFiles) {
+      await writeCaptureFolderFile(directoryHandle, output.filename, outputBytes(output.format, pages));
+    }
+  } catch (error) {
+    throw normalizeFolderAccessError(error);
+  }
   return { ok: true };
 }
 
@@ -2090,12 +2163,7 @@ async function refreshRecoveredFolderAccess(state) {
 
   try {
     const directoryHandle = await getSavedCaptureFolder();
-    if (
-      directoryHandle?.name === state.outputFolder.name &&
-      (await hasReadWritePermission(directoryHandle))
-    ) {
-      return state;
-    }
+    if (directoryHandle?.name === state.outputFolder.name) return state;
   } catch {
     // The reconnect action gives the user a fresh native folder grant.
   }
@@ -2165,7 +2233,7 @@ async function recoverRecordingSession(preferredTabId, force = false) {
   return sessionRecoveryChain;
 }
 
-async function startRecording(tab, settings) {
+async function startRecording(tab, settings, outputFolderName = null) {
   const sessionId = `session_${fileTimestamp(new Date())}`;
   await chrome.storage.local.remove(LOG_KEY).catch(() => {});
   await chrome.storage.local.remove(PDF_EXCLUSIONS_KEY).catch(() => {});
@@ -2183,9 +2251,7 @@ async function startRecording(tab, settings) {
   let streamActive = false;
 
   try {
-    if (merged.captureMode === 'screen' || merged.savePdf) {
-      await ensureOffscreen();
-    }
+    await ensureOffscreen();
 
     if (merged.captureMode === 'screen') {
       const result = await openScreenWindow();
@@ -2216,7 +2282,7 @@ async function startRecording(tab, settings) {
     trackedTabIds: [tab.id],
     trackedWindowIds: [tab.windowId],
     downloadIds: [],
-    outputFolder: null,
+    outputFolder: outputFolderName ? { name: outputFolderName } : null,
     folderWrittenFiles: [],
     folderAccessNeeded: false,
     apiSeen: 0,
@@ -2233,7 +2299,9 @@ async function startRecording(tab, settings) {
   await injectRecordingScripts(tab.id, merged.captureApi);
 
   await updateBadge(state);
-  logLine(`SESSION_START mode=${merged.captureMode} url=${shortUrl(tab.url || '')}`);
+  logLine(
+    `SESSION_START mode=${merged.captureMode}${outputFolderName ? ` folder=${outputFolderName}` : ''} url=${shortUrl(tab.url || '')}`
+  );
   await captureNow('start');
   return getState();
 }
@@ -2257,6 +2325,7 @@ async function restoreFolderFrames(captures) {
       await storeFrame({
         sequence: entry.sequence,
         title: entry.title,
+        note: entry.note || '',
         url: entry.url,
         time: `${entry.capturedAt}  |  ${entry.reason}  |  resumed folder`,
         apiRows: [],
@@ -2274,10 +2343,8 @@ async function resumeRecordingFromFolder(tab, settings) {
   const folder = await writableCaptureFolder();
   const restored = await scanCaptureFolder(folder);
   if (!restored.captures.length) {
-    return setState({
-      folderAccessNeeded: false,
-      lastError: 'No PNG or JPEG screenshots were found in the selected folder.'
-    });
+    const started = await startRecording(tab, { ...settings, savePng: true }, restored.folderName);
+    return { ...started, notice: EMPTY_CAPTURE_FOLDER_NOTICE };
   }
 
   const sessionId = String(restored.sessionId || '').trim() || `resumed_${fileTimestamp(new Date())}`;
@@ -2377,9 +2444,12 @@ async function reconnectCaptureFolder() {
     });
   }
 
+  const restored = await scanCaptureFolder(directoryHandle).catch(() => null);
   const next = await setState({ folderAccessNeeded: false, lastError: null });
   logLine(`FOLDER_RECONNECTED folder=${directoryHandle.name}`);
-  return next;
+  return restored && !restored.captures.length
+    ? { ...next, notice: EMPTY_CAPTURE_FOLDER_NOTICE }
+    : next;
 }
 
 async function deleteSessionDownloads(ids) {
@@ -2391,9 +2461,53 @@ async function deleteSessionDownloads(ids) {
   }
 }
 
-function pdfFilename(value, sessionId) {
-  const base = String(value || `${sessionId}.pdf`).replace(/\.pdf$/i, '');
-  return `${sanitize(base, 120)}.pdf`;
+function normalizeOutputFormats(value, settings = {}) {
+  if (Array.isArray(value)) {
+    const formats = new Set(value.map((format) => String(format).toLowerCase()));
+    return { pdf: formats.has('pdf'), docx: formats.has('docx') };
+  }
+  if (value && typeof value === 'object') {
+    return { pdf: value.pdf === true, docx: value.docx === true };
+  }
+  return { pdf: settings.savePdf !== false, docx: false };
+}
+
+function hasOutputFormat(formats) {
+  return formats.pdf || formats.docx;
+}
+
+function outputLabel(formats) {
+  if (formats.pdf && formats.docx) return 'output files';
+  return formats.docx ? 'Word document' : 'PDF';
+}
+
+function requestedOutputLabel(value) {
+  const formats = normalizeOutputFormats(value, { savePdf: true });
+  return hasOutputFormat(formats) ? outputLabel(formats) : 'output files';
+}
+
+function outputFilenameBase(value, fallback) {
+  const base = String(value || fallback)
+    .trim()
+    .replace(/\.(?:pdf|docx)$/i, '');
+  return sanitize(base, 120) || sanitize(fallback, 120);
+}
+
+function outputFilesFor(value, fallback, formats) {
+  const base = outputFilenameBase(value, fallback);
+  return [
+    ...(formats.pdf ? [{ format: 'pdf', filename: `${base}.pdf` }] : []),
+    ...(formats.docx ? [{ format: 'docx', filename: `${base}.docx` }] : [])
+  ];
+}
+
+function savedOutputFields(outputFiles) {
+  const savedOutputFilenames = outputFiles.map((output) => output.filename);
+  const savedPdfFilename = outputFiles.find((output) => output.format === 'pdf')?.filename;
+  return {
+    savedOutputFilenames,
+    ...(savedPdfFilename ? { savedPdfFilename } : {})
+  };
 }
 
 async function revealSavedFiles(downloadId) {
@@ -2408,11 +2522,11 @@ async function revealSavedFiles(downloadId) {
   }
 }
 
-// Writes a PDF from whatever has been captured so far without stopping the recording - a checkpoint
+// Writes selected document formats from whatever has been captured so far without stopping the recording - a checkpoint
 // the user can hand off or review while the same session keeps adding to the same numbered sequence.
 // Unlike the final export, the folder is not opened here - only the final save should interrupt the
 // user, since this can happen many times over the course of one recording.
-async function exportPdfNow(requestedPdfFilename, excludedSequences, reveal = false) {
+async function exportOutputNow(requestedOutputFilename, outputFormats, excludedSequences, reveal = false) {
   if (apiQueue.length) await captureNow('final-api-calls');
   await captureChain.catch(() => {});
 
@@ -2422,31 +2536,53 @@ async function exportPdfNow(requestedPdfFilename, excludedSequences, reveal = fa
   const excluded = Array.isArray(excludedSequences)
     ? normalizeSequenceList(excludedSequences)
     : normalizeSequenceList(state.pdfExcludedSequences);
-  logLine(`PDF_EXPORT checkpoint excluded=${excluded.length} captures=${state.captures.length}`);
+  const formats = normalizeOutputFormats(outputFormats, state.settings);
+  if (!hasOutputFormat(formats)) {
+    return setState({ lastError: 'Choose PDF, Word, or both before saving.' });
+  }
+  logLine(`OUTPUT_EXPORT checkpoint formats=${Object.entries(formats).filter(([, enabled]) => enabled).map(([format]) => format).join(',')} excluded=${excluded.length} captures=${state.captures.length}`);
 
-  const checkpointName = pdfFilename(requestedPdfFilename, `${state.sessionId}_checkpoint`);
-  const result = savesToSelectedFolder(state)
-    ? await exportPdfToSelectedFolder(checkpointName, excluded)
-    : await exportPdfInWindow(`flow-captures/${state.sessionId}/${checkpointName}`, excluded);
+  const outputFiles = outputFilesFor(
+    requestedOutputFilename,
+    `${state.sessionId}_checkpoint`,
+    formats
+  );
+  const selectedFolder = hasSelectedCaptureFolder(state)
+    ? await writableSelectedCaptureFolder(state)
+    : null;
+  const result = selectedFolder
+    ? await exportOutputsToSelectedFolder(selectedFolder, outputFiles, excluded)
+    : await exportOutputsInWindow(
+      outputFiles.map((output) => ({
+        ...output,
+        filename: `flow-captures/${state.sessionId}/${output.filename}`
+      })),
+      excluded
+    );
   await flushLog();
   if (result.error) {
-    return setState({ lastError: `PDF export failed: ${result.error}` });
+    return setState({ lastError: `${outputLabel(formats)} export failed: ${result.error}` });
   }
-  if (reveal && !savesToSelectedFolder(state) && typeof result.downloadId === 'number') {
-    await revealSavedFiles(result.downloadId);
+  const revealId = result.downloadIds?.at(-1);
+  if (reveal && !selectedFolder && typeof revealId === 'number') {
+    await revealSavedFiles(revealId);
   }
-  return setState({ lastError: null });
+  return {
+    ...(await setState({ lastError: null, ...(selectedFolder ? { folderAccessNeeded: false } : {}) })),
+    ...savedOutputFields(outputFiles)
+  };
 }
 
-function checkpointPdfFilename(sessionId) {
-  return pdfFilename(undefined, `${sessionId}_checkpoint_${fileTimestamp(new Date())}`);
+function checkpointOutputFilename(sessionId) {
+  return `${sessionId}_checkpoint_${fileTimestamp(new Date())}`;
 }
 
-async function saveFlow(reveal, requestedPdfFilename, excludedSequences) {
+async function saveFlow(reveal, requestedOutputFilename, excludedSequences, outputFormats) {
   const state = await recoverRecordingSession(undefined, true);
   if (!state.recording) return setState({ lastError: 'Not currently recording.' });
-  return exportPdfNow(
-    requestedPdfFilename || checkpointPdfFilename(state.sessionId),
+  return exportOutputNow(
+    requestedOutputFilename || checkpointOutputFilename(state.sessionId),
+    outputFormats,
     excludedSequences,
     reveal
   );
@@ -2476,27 +2612,35 @@ async function setRecordingPaused(paused) {
   return next;
 }
 
-async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSequences, reveal = true) {
+async function stopRecording(
+  keepFiles = true,
+  requestedOutputFilename,
+  excludedSequences,
+  reveal = true,
+  createPdf = true,
+  outputFormats
+) {
   // Anything still queued would be lost, so give it a final frame to sit under.
   if (keepFiles && apiQueue.length) {
     await captureNow('final-api-calls');
   }
   await captureChain.catch(() => {});
   const state = await getState();
-  logLine(`SESSION_END keepFiles=${keepFiles} captures=${state.captures.length}`);
+  logLine(`SESSION_END keepFiles=${keepFiles} createPdf=${createPdf} captures=${state.captures.length}`);
   await configureApiHooks(state.trackedTabIds, false);
   const excluded = Array.isArray(excludedSequences)
     ? normalizeSequenceList(excludedSequences)
     : normalizeSequenceList(state.pdfExcludedSequences);
-  const savedToFolder = savesToSelectedFolder(state);
+  const savedToFolder = hasSelectedCaptureFolder(state);
   const deletedFileCount = savedToFolder ? state.folderWrittenFiles.length : state.downloadIds.length;
   let lastError = null;
   let revealId = state.downloadIds[state.downloadIds.length - 1];
+  let outputFiles = [];
 
   if (!keepFiles) {
     if (savedToFolder) {
       try {
-        await removeCaptureFolderFiles(await writableCaptureFolder(), state.folderWrittenFiles);
+        await removeCaptureFolderFiles(await writableSelectedCaptureFolder(state), state.folderWrittenFiles);
       } catch (error) {
         lastError = `Could not remove new screenshots: ${error.message}`;
       }
@@ -2504,17 +2648,25 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
       await deleteSessionDownloads(state.downloadIds);
     }
   } else {
-    if (state.settings.savePdf && state.captures.length) {
-      logLine(`PDF_EXPORT final excluded=${excluded.length} captures=${state.captures.length}`);
-      const savedPdfName = pdfFilename(requestedPdfFilename, state.sessionId);
+    const formats = normalizeOutputFormats(outputFormats, state.settings);
+    if (createPdf && hasOutputFormat(formats) && state.captures.length) {
+      logLine(`OUTPUT_EXPORT final formats=${Object.entries(formats).filter(([, enabled]) => enabled).map(([format]) => format).join(',')} excluded=${excluded.length} captures=${state.captures.length}`);
+      outputFiles = outputFilesFor(requestedOutputFilename, state.sessionId, formats);
       const result = savedToFolder
-        ? await exportPdfToSelectedFolder(savedPdfName, excluded)
-        : await exportPdfInWindow(`flow-captures/${state.sessionId}/${savedPdfName}`, excluded);
+        ? await exportOutputsToSelectedFolder(await writableSelectedCaptureFolder(state), outputFiles, excluded)
+        : await exportOutputsInWindow(
+          outputFiles.map((output) => ({
+            ...output,
+            filename: `flow-captures/${state.sessionId}/${output.filename}`
+          })),
+          excluded
+        );
       if (result.error) {
-        lastError = `PDF export failed: ${result.error}`;
+        lastError = `${outputLabel(formats)} export failed: ${result.error}`;
         console.error(lastError);
-      } else if (typeof result.downloadId === 'number') {
-        revealId = result.downloadId;
+        outputFiles = [];
+      } else if (typeof result.downloadIds?.at(-1) === 'number') {
+        revealId = result.downloadIds.at(-1);
       }
     }
 
@@ -2533,7 +2685,11 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
         'data:application/json;base64,' +
         btoa(unescape(encodeURIComponent(JSON.stringify(manifest, null, 2))));
       if (savedToFolder) {
-        await writeSelectedCaptureFolderFile('flow-manifest.json', JSON.stringify(manifest, null, 2));
+        await writeCaptureFolderFile(
+          await writableSelectedCaptureFolder(state),
+          'flow-manifest.json',
+          JSON.stringify(manifest, null, 2)
+        );
       } else {
         await chrome.downloads.download({
           url: manifestUrl,
@@ -2566,19 +2722,54 @@ async function stopRecording(keepFiles = true, requestedPdfFilename, excludedSeq
       lastError ?? (keepFiles ? null : `Deleted ${deletedFileCount} file(s) from this session.`)
   });
   await updateBadge(next);
-  return next;
+  return outputFiles.length ? { ...next, ...savedOutputFields(outputFiles) } : next;
 }
 
-async function startNewRecording(tab, settings, excludedSequences) {
+async function startNewRecording(tab, settings, excludedSequences, requestedOutputFilename, outputFormats) {
   const state = await recoverRecordingSession(undefined, true);
   const nextSettings = { ...state.settings, ...settings };
+  let previousOutput = null;
   if (state.recording) {
     if (!state.paused) await setRecordingPaused(true);
     // Finish the old flow first, but do not reveal its folder: Ctrl+N is intended to keep users
     // working in the current tab while the next session starts in its own capture folder.
-    await stopRecording(true, undefined, excludedSequences, false);
+    previousOutput = await stopRecording(
+      true,
+      requestedOutputFilename,
+      excludedSequences,
+      false,
+      true,
+      outputFormats
+    );
   }
-  return startRecording(tab, nextSettings);
+  const started = await startRecording(tab, nextSettings);
+  return previousOutput?.savedOutputFilenames
+    ? {
+        ...started,
+        ...savedOutputFields(previousOutput.savedOutputFilenames.map((filename) => ({
+          format: /\.docx$/i.test(filename) ? 'docx' : 'pdf',
+          filename
+        })))
+      }
+    : started;
+}
+
+async function openOutputDialog(mode) {
+  const state = await recoverRecordingSession(undefined, true);
+  if (!state.recording) return setState({ lastError: 'Not currently recording.' });
+  if (!state.captures.length) return setState({ lastError: 'Nothing captured yet.' });
+
+  const acceptedMode = ['checkpoint', 'final', 'new-recording'].includes(mode)
+    ? mode
+    : 'checkpoint';
+  await chrome.windows.create({
+    url: `output-dialog.html?mode=${encodeURIComponent(acceptedMode)}`,
+    type: 'popup',
+    width: 390,
+    height: 320,
+    focused: true
+  });
+  return state;
 }
 
 /* ---------------------------------------------------------------- listeners */
@@ -2723,6 +2914,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
 
       case 'PDF_DONE':
+      case 'OUTPUT_DONE':
         sendResponse({ ok: true });
         break;
 
@@ -2804,9 +2996,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
 
+      case 'SET_CAPTURE_NOTE':
+        try {
+          sendResponse(await setCaptureNote(message.sessionId, message.sequence, message.note));
+        } catch (error) {
+          sendResponse(await setState({ lastError: error.message }));
+        }
+        break;
+
+      case 'OPEN_OUTPUT_DIALOG':
+        try {
+          sendResponse(await openOutputDialog(message.mode));
+        } catch (error) {
+          sendResponse(await setState({ lastError: error.message }));
+        }
+        break;
+
       case 'STOP':
         try {
-          sendResponse(await stopRecording(message.keepFiles !== false, message.pdfFilename, message.excludedSequences));
+          sendResponse(
+            await stopRecording(
+              message.keepFiles !== false,
+              message.outputFilename || message.pdfFilename,
+              message.excludedSequences,
+              true,
+              message.createPdf !== false,
+              message.outputFormats
+            )
+          );
         } catch (error) {
           await cleanupCaptureResources();
           sendResponse(await setState({
@@ -2819,22 +3036,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'EXPORT_PDF_NOW':
         try {
-          sendResponse(await exportPdfNow(message.pdfFilename, message.excludedSequences));
+          sendResponse(
+            await exportOutputNow(
+              message.outputFilename || message.pdfFilename,
+              message.outputFormats,
+              message.excludedSequences
+            )
+          );
         } catch (error) {
           sendResponse(await setState({
             folderAccessNeeded: needsFolderReconnect(error),
-            lastError: `PDF export failed: ${error.message}`
+            lastError: `${requestedOutputLabel(message.outputFormats)} export failed: ${error.message}`
           }));
         }
         break;
 
       case 'SAVE_FLOW':
         try {
-          sendResponse(await saveFlow(Boolean(message.reveal), message.pdfFilename, message.excludedSequences));
+          sendResponse(
+            await saveFlow(
+              Boolean(message.reveal),
+              message.outputFilename || message.pdfFilename,
+              message.excludedSequences,
+              message.outputFormats
+            )
+          );
         } catch (error) {
           sendResponse(await setState({
             folderAccessNeeded: needsFolderReconnect(error),
-            lastError: `PDF export failed: ${error.message}`
+            lastError: `${requestedOutputLabel(message.outputFormats)} export failed: ${error.message}`
           }));
         }
         break;
@@ -2848,7 +3078,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         try {
-          sendResponse(await startNewRecording(activeTab, message.settings, message.excludedSequences));
+          sendResponse(
+            await startNewRecording(
+              activeTab,
+              message.settings,
+              message.excludedSequences,
+              message.outputFilename || message.pdfFilename,
+              message.outputFormats
+            )
+          );
         } catch (error) {
           sendResponse(await setState({ recording: false, folderAccessNeeded: false, lastError: error.message }));
         }

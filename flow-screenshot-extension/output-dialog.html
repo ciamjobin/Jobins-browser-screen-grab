@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Save recording - JShotz</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="output-dialog">
+    <h1 id="dialogTitle">Save recording</h1>
+    <p id="dialogSummary" class="note"></p>
+
+    <label class="field">
+      <span>File name</span>
+      <input id="outputFilename" type="text" autocomplete="off" />
+    </label>
+
+    <fieldset class="output-formats">
+      <legend>Output formats</legend>
+      <label class="check"><input id="outputPdf" type="checkbox" checked /> PDF (.pdf)</label>
+      <label class="check"><input id="outputDocx" type="checkbox" /> Word (.docx)</label>
+    </fieldset>
+
+    <p id="dialogStatus" class="status idle">Loading recording...</p>
+    <div class="actions">
+      <button id="saveOutput" class="primary" disabled>Save</button>
+      <button id="cancelOutput">Cancel</button>
+    </div>
+
+    <script type="module" src="output-dialog.js"></script>
+  </body>
+</html>

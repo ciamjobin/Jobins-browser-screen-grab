@@ -1,7 +1,10 @@
+import { buildDocx } from './docx.js';
 import { buildPdf } from './pdf.js';
 
 const folderEl = document.getElementById('imageFolder');
-const filenameEl = document.getElementById('pdfFilename');
+const filenameEl = document.getElementById('outputFilename');
+const pdfEl = document.getElementById('outputPdf');
+const docxEl = document.getElementById('outputDocx');
 const summaryEl = document.getElementById('fileSummary');
 const generateEl = document.getElementById('generatePdf');
 const fileSelectionEl = document.getElementById('fileSelection');
@@ -20,12 +23,26 @@ function sortFiles(files) {
   );
 }
 
-function safeFilename(value) {
-  const base = String(value || 'JShotz-screenshots.pdf')
-    .replace(/\.pdf$/i, '')
+function safeFilename(value, format) {
+  const base = String(value || 'JShotz-screenshots')
+    .replace(/\.(?:pdf|docx)$/i, '')
     .replace(/[\\/:*?"<>|]+/g, '-')
     .trim();
-  return `${base || 'JShotz-screenshots'}.pdf`;
+  return `${base || 'JShotz-screenshots'}.${format}`;
+}
+
+function outputFormats() {
+  return [pdfEl.checked && 'pdf', docxEl.checked && 'docx'].filter(Boolean);
+}
+
+function outputMimeType(format) {
+  return format === 'docx'
+    ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    : 'application/pdf';
+}
+
+function buildOutput(format, pages) {
+  return format === 'docx' ? buildDocx(pages) : buildPdf(pages);
 }
 
 function selectedFiles() {
@@ -42,7 +59,7 @@ function updateFileSelectionControls() {
     ? `${selected} of ${total} screenshot(s) selected.`
     : 'No PNG or JPEG screenshots selected.';
   summaryEl.className = total ? 'status idle' : 'status error';
-  generateEl.disabled = selected === 0;
+  generateEl.disabled = selected === 0 || outputFormats().length === 0;
 }
 
 function renderFileList() {
@@ -54,7 +71,7 @@ function renderFileList() {
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.checked = selectedFileIndexes.has(index);
-    checkbox.setAttribute('aria-label', `Include ${file.name} in PDF`);
+    checkbox.setAttribute('aria-label', `Include ${file.name} in output`);
     checkbox.addEventListener('change', () => {
       if (checkbox.checked) {
         selectedFileIndexes.add(index);
@@ -128,6 +145,9 @@ selectAllFilesEl.addEventListener('change', () => {
   renderFileList();
 });
 
+pdfEl.addEventListener('change', updateFileSelectionControls);
+docxEl.addEventListener('change', updateFileSelectionControls);
+
 generateEl.addEventListener('click', async () => {
   const filesToConvert = selectedFiles();
   if (!filesToConvert.length) return;
@@ -142,26 +162,29 @@ generateEl.addEventListener('click', async () => {
       pages.push(await imageToPage(filesToConvert[index], index));
     }
 
-    const bytes = buildPdf(pages);
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
-    const downloadId = await chrome.downloads.download({
-      url,
-      filename: safeFilename(filenameEl.value),
-      saveAs: true
-    });
+    const formats = outputFormats();
+    if (!formats.length) throw new Error('Choose PDF, Word, or both before generating a document.');
+    const names = [];
+    for (const format of formats) {
+      const bytes = buildOutput(format, pages);
+      const url = URL.createObjectURL(new Blob([bytes], { type: outputMimeType(format) }));
+      const filename = safeFilename(filenameEl.value, format);
+      const downloadId = await chrome.downloads.download({ url, filename, saveAs: true });
+      names.push(filename);
 
-    chrome.downloads.onChanged.addListener(function onChanged(progress) {
-      if (progress.id !== downloadId || !progress.state || progress.state.current === 'in_progress') return;
-      chrome.downloads.onChanged.removeListener(onChanged);
-      URL.revokeObjectURL(url);
-    });
+      chrome.downloads.onChanged.addListener(function onChanged(progress) {
+        if (progress.id !== downloadId || !progress.state || progress.state.current === 'in_progress') return;
+        chrome.downloads.onChanged.removeListener(onChanged);
+        URL.revokeObjectURL(url);
+      });
+    }
 
     summaryEl.className = 'status idle';
-    summaryEl.textContent = `PDF generated from ${pages.length} screenshot(s).`;
+    summaryEl.textContent = `Saved ${names.join(' and ')} from ${pages.length} screenshot(s).`;
   } catch (error) {
     summaryEl.className = 'status error';
-    summaryEl.textContent = `PDF generation failed: ${error.message}`;
+    summaryEl.textContent = `Document generation failed: ${error.message}`;
   } finally {
-    generateEl.disabled = selectedFiles().length === 0;
+    generateEl.disabled = selectedFiles().length === 0 || outputFormats().length === 0;
   }
 });

@@ -48,9 +48,11 @@ const LIST_SELECTOR = [
   'datalist'
 ].join(',');
 
-const DIALOG_SELECTOR = ['dialog', '[role="dialog"]', '[role="alertdialog"]'].join(',');
-const MODAL_SCROLL_MIN_VIEWPORT = 220;
-const MODAL_SCROLL_MIN_OVERFLOW = 80;
+const DIALOG_SELECTOR = ['dialog', '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]'].join(',');
+const MODAL_SCROLL_MIN_VIEWPORT = 320;
+const MODAL_SCROLL_MIN_DIALOG_RATIO = 0.65;
+const MODAL_SCROLL_MIN_SCROLLER_RATIO = 0.55;
+const MODAL_SCROLL_MIN_OVERFLOW = 240;
 
 let lastSent = { key: '', at: 0 };
 let editTimer = 0;
@@ -60,7 +62,7 @@ let scrollTimer = 0;
 let suppressScrollUntil = 0;
 let fullPageCaptureActive = false;
 let countdownTimer = 0;
-let saveShortcutTimer = 0;
+let activeDialogFingerprint = null;
 const scrollAnchors = new WeakMap();
 const capturedDialogs = new WeakSet();
 
@@ -106,6 +108,7 @@ function requestCapture(reason, label, options = {}) {
 
 const SETTLE_QUIET_MS = 400;
 const SETTLE_MAX_WAIT_MS = 8000;
+const MODAL_OPEN_GRACE_MS = 500;
 const BUSY_SELECTOR = [
   '[aria-busy="true"]',
   '[class*="spinner" i]',
@@ -150,9 +153,9 @@ function looksBusy() {
 // screen appears. Both are worth keeping: the interim frame shows the action was taken, the settled
 // one shows the result. Fires immediately, then again once the DOM stops changing.
 async function requestCaptureAfterSettle(reason, label) {
-  // Let a synchronous dialog-opening click finish first. The dialog observer owns that capture,
-  // so the underlying button does not add a duplicate frame behind the modal.
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  // Dialogs often mount after their click handler's async state update or entrance animation.
+  // Give that small window to appear so its opening frame replaces the underlying page-click frame.
+  await new Promise((resolve) => setTimeout(resolve, MODAL_OPEN_GRACE_MS));
   if (activeModal()) return;
   requestCapture(reason, label);
 
@@ -229,6 +232,27 @@ function modalForElement(element) {
   return dialog && isVisible(dialog) ? dialog : null;
 }
 
+function dialogFingerprint(dialog) {
+  const rect = dialog.getBoundingClientRect();
+  const identity = [
+    dialog.tagName,
+    dialog.getAttribute('role'),
+    dialog.getAttribute('aria-modal'),
+    dialog.getAttribute('aria-label'),
+    dialog.getAttribute('aria-labelledby'),
+    dialog.id,
+    dialog.getAttribute('data-modal'),
+    dialog.getAttribute('data-dialog')
+  ].join('\u001f');
+  return [
+    identity,
+    Math.round((Number(rect.left) || 0) / 16),
+    Math.round((Number(rect.top) || 0) / 16),
+    Math.round((Number(rect.width) || 0) / 16),
+    Math.round((Number(rect.height) || 0) / 16)
+  ].join('\u001f');
+}
+
 function isModalScrollableElement(element, dialog) {
   if (!element || modalForElement(element) !== dialog) return false;
   const overflow = Math.max(0, Number(element.scrollHeight) - Number(element.clientHeight));
@@ -239,11 +263,18 @@ function isModalScrollableElement(element, dialog) {
 
 function isLargeModalScroller(element, dialog) {
   if (!isModalScrollableElement(element, dialog)) return false;
-  const viewportHeight = Math.max(MODAL_SCROLL_MIN_VIEWPORT, Math.round(window.innerHeight * 0.3));
+  const dialogRect = dialog.getBoundingClientRect();
+  const dialogHeight = Number(dialogRect.height) || 0;
+  const viewportHeight = Math.max(MODAL_SCROLL_MIN_VIEWPORT, Number(window.innerHeight) || 0);
+  if (
+    dialogHeight < viewportHeight * MODAL_SCROLL_MIN_DIALOG_RATIO ||
+    element.clientHeight < viewportHeight * MODAL_SCROLL_MIN_SCROLLER_RATIO
+  ) {
+    return false;
+  }
   const overflow = Math.max(0, Number(element.scrollHeight) - Number(element.clientHeight));
   return (
-    element.clientHeight >= viewportHeight &&
-    overflow >= Math.max(MODAL_SCROLL_MIN_OVERFLOW, element.clientHeight * 0.15)
+    overflow >= Math.max(MODAL_SCROLL_MIN_OVERFLOW, element.clientHeight * 0.35)
   );
 }
 
@@ -303,8 +334,21 @@ function scanForDialogs() {
       if (!isVisible(dialog)) capturedDialogs.delete(dialog);
     }
     const dialog = dialogs.filter(isVisible).at(-1);
-    if (!dialog || capturedDialogs.has(dialog)) return;
+    if (!dialog) {
+      activeDialogFingerprint = null;
+      return;
+    }
+    const fingerprint = dialogFingerprint(dialog);
+    if (capturedDialogs.has(dialog)) {
+      activeDialogFingerprint = fingerprint;
+      return;
+    }
+    if (activeDialogFingerprint === fingerprint) {
+      capturedDialogs.add(dialog);
+      return;
+    }
     capturedDialogs.add(dialog);
+    activeDialogFingerprint = fingerprint;
     requestCapture('dialog-opened', describe(dialog), modalCaptureOptions(dialog));
   }, 350);
 }
@@ -313,7 +357,7 @@ new MutationObserver(scanForDialogs).observe(document.documentElement, {
   childList: true,
   subtree: true,
   attributes: true,
-  attributeFilter: ['open', 'hidden', 'aria-hidden', 'class', 'style']
+  attributeFilter: ['open', 'hidden', 'aria-hidden', 'aria-modal', 'role', 'class', 'style']
 });
 scanForDialogs();
 
@@ -321,7 +365,7 @@ function isManualShortcut(event) {
   return event.ctrlKey && event.altKey && !event.shiftKey && event.key?.toLowerCase() === 'q';
 }
 
-function isPlainControlShortcut(event, key) {
+function isControlShortcut(event, key) {
   return (
     event.ctrlKey &&
     !event.altKey &&
@@ -331,19 +375,23 @@ function isPlainControlShortcut(event, key) {
   );
 }
 
+function isFinalSaveShortcut(event) {
+  return (
+    event.ctrlKey &&
+    event.altKey &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    event.key?.toLowerCase() === 's'
+  );
+}
+
 function preventShortcut(event) {
   event.preventDefault();
   event.stopPropagation();
 }
 
-function scheduleFlowSave() {
-  clearTimeout(saveShortcutTimer);
-  // A browser key event carries one non-modifier key at a time. Briefly wait after Ctrl+S so a
-  // held Ctrl+S+O chord can request the explicit reveal without saving the PDF twice.
-  saveShortcutTimer = setTimeout(() => {
-    saveShortcutTimer = 0;
-    sendRuntimeMessage({ type: 'SAVE_FLOW' });
-  }, 450);
+function requestOutputDialog(mode) {
+  sendRuntimeMessage({ type: 'OPEN_OUTPUT_DIALOG', mode });
 }
 
 window.addEventListener(
@@ -354,27 +402,19 @@ window.addEventListener(
       requestCapture('manual-hotkey', 'Ctrl+Alt+Q');
       return;
     }
-    if (isPlainControlShortcut(event, 'o') && saveShortcutTimer) {
+    if (isFinalSaveShortcut(event)) {
       preventShortcut(event);
-      if (!event.repeat) {
-        clearTimeout(saveShortcutTimer);
-        saveShortcutTimer = 0;
-        sendRuntimeMessage({ type: 'SAVE_FLOW', reveal: true });
-      }
+      if (!event.repeat) requestOutputDialog('final');
       return;
     }
-    if (isPlainControlShortcut(event, 's')) {
+    if (isControlShortcut(event, 's')) {
       preventShortcut(event);
-      if (!event.repeat) scheduleFlowSave();
+      if (!event.repeat) requestOutputDialog('checkpoint');
       return;
     }
-    if (isPlainControlShortcut(event, 'n')) {
+    if (isControlShortcut(event, 'n')) {
       preventShortcut(event);
-      if (!event.repeat) {
-        clearTimeout(saveShortcutTimer);
-        saveShortcutTimer = 0;
-        sendRuntimeMessage({ type: 'START_NEW_RECORDING' });
-      }
+      if (!event.repeat) requestOutputDialog('new-recording');
     }
   },
   true
