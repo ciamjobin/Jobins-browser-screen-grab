@@ -21,8 +21,10 @@
     </fieldset>
 
     <p id="dialogStatus" class="status idle">Loading recording...</p>
-    <div class="actions">
+  <div id="dialogToast" class="toast" role="status" aria-live="polite" hidden></div>
+    <div class="actions output-save-actions">
       <button id="saveOutput" class="primary" disabled>Save</button>
+      <button id="saveAndOpenOutput" hidden disabled>Save, stop, and open file location (Ctrl+Alt+S)</button>
       <button id="cancelOutput">Cancel</button>
     </div>
 

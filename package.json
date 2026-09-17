@@ -1,10 +1,13 @@
 {
   "name": "my-playwright-project",
-  "version": "1.0.0",
+  "version": "3.14.1",
   "type": "module",
   "description": "",
   "main": "index.js",
-  "scripts": {},
+  "scripts": {
+    "test": "node --test tests/content-capture.test.mjs tests/docx.test.mjs tests/exporter.test.mjs tests/image-worker.test.mjs tests/page-hook.test.mjs tests/recording-recovery.test.mjs",
+    "test:popup": "playwright test tests/popup-output.spec.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",

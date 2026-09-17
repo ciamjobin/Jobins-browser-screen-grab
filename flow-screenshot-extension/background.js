@@ -16,15 +16,23 @@ const SESSION_TRACKING_KEY = 'flowRecorderSessionTracking';
 const FRAMES_KEY = 'flowRecorderFrames';
 const FRAME_PREFIX = `${FRAMES_KEY}:`;
 const OFFSCREEN_PATH = 'offscreen.html';
-const WATERMARK = "Captured by Jobin's Screenshots";
 
 // captureVisibleTab is rate limited; serialize captures and pace them.
 let captureChain = Promise.resolve();
+let pendingCaptureCount = 0;
+let interimOutputChain = Promise.resolve();
+let captureRequestSequence = 0;
 let lastRawCaptureHash = '';
-let lastTabTitle = '';
+let lastTabTitles = new Map();
+const captureCancellationSignals = new Map();
 let sessionRecoveryPending = false;
 let sessionRecoveryChain = Promise.resolve();
+let browserRestartInterruptionChain = Promise.resolve();
 let recoveredSessionId = null;
+let outputRequestSequence = 0;
+const pendingNewTabLinkTargets = new Map();
+const recentNewTabLinkTargets = new Map();
+const recentUnlinkedNewTabs = [];
 
 // Held in memory rather than storage: concurrent API events would race a read-modify-write.
 let apiQueue = [];
@@ -32,8 +40,17 @@ let apiHeaderRecords = [];
 
 const API_HEADER_TTL_MS = 120000;
 const CAPTURE_COUNTDOWN_MS = 5000;
+const STOP_CAPTURE_DRAIN_MS = 1500;
+const INTERIM_OUTPUT_CAPTURE_INTERVAL = 5;
+const INTERIM_OUTPUT_FILENAME = 'JShotz-interim.pdf';
 const EMPTY_CAPTURE_FOLDER_NOTICE =
   'No previous screenshots found in selected folder, JShotz is still capturing the current flows to the selected folder.';
+const NO_READABLE_CAPTURE_FOLDER_NOTICE =
+  'No readable screenshots found in selected folder. JShotz is still capturing the current flow in that folder.';
+
+function skippedUnreadableCaptureNotice(count) {
+  return `Skipped ${count} unreadable image file${count === 1 ? '' : 's'} while resuming the selected folder.`;
+}
 
 // A per-session debug log, cleared at the start of each new recording, mirroring capture attempts,
 // timings, errors and mode switches - so "screenshot #N at time T had a problem" can be answered
@@ -58,6 +75,10 @@ function logLine(text) {
       await chrome.storage.local.set({ [LOG_KEY]: log });
     })
     .catch(() => {});
+}
+
+function logFileSave(status, type, filename, destination) {
+  logLine(`FILE_SAVE status=${status} type=${type} destination=${destination} filename=${filename}`);
 }
 
 async function flushLog() {
@@ -86,6 +107,11 @@ const defaultState = {
   trackedWindowIds: [],
   downloadIds: [],
   outputFolder: null,
+  pendingResumeFolder: null,
+  completedEvidence: null,
+  interruptedRecording: null,
+  interimOutput: null,
+  interimOutputError: null,
   folderWrittenFiles: [],
   folderAccessNeeded: false,
   apiSeen: 0,
@@ -100,7 +126,6 @@ const defaultState = {
     captureOnClick: true,
     captureOnScroll: true,
     captureApi: false,
-    stampTimestamp: true,
     fullPage: true,
     savePng: true,
     savePdf: true
@@ -216,6 +241,7 @@ function clearSessionTracking() {
 
 async function trackSessionTab(state, tab) {
   if (!state.sessionId || !Number.isSafeInteger(tab?.id)) return Promise.resolve();
+  if (typeof tab.title === 'string') lastTabTitles.set(tab.id, tab.title);
   const tracking = await updateSessionTracking(state.sessionId, (tracking) => ({
     tabIds: [...tracking.tabIds, tab.id],
     windowIds: [...tracking.windowIds, tab.windowId]
@@ -247,6 +273,11 @@ function fileTimestamp(date) {
     `_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}` +
     `-${pad(date.getMilliseconds(), 3)}`
   );
+}
+
+function outputRequestId() {
+  outputRequestSequence += 1;
+  return `output_${Date.now()}_${outputRequestSequence}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function stampText(date) {
@@ -327,7 +358,7 @@ function hashText(value) {
 
 // Only page-driven captures are worth skipping; anything the user did must always be recorded.
 // 'click-loaded' is the settled follow-up to a click - keep it only when the page actually changed.
-const DEDUPE_REASONS = new Set(['navigation', 'url-change', 'click-loaded']);
+const DEDUPE_REASONS = new Set(['navigation', 'url-change', 'title-change', 'click-loaded']);
 
 function shouldKeepDuplicate(reason, apiRows) {
   return apiRows.length > 0 || !DEDUPE_REASONS.has(reason);
@@ -335,11 +366,21 @@ function shouldKeepDuplicate(reason, apiRows) {
 
 // The download bubble overlays the page and would otherwise land in screen captures.
 async function setDownloadUi(enabled) {
+  if (typeof chrome.downloads?.setUiOptions !== 'function') return false;
   try {
     await chrome.downloads.setUiOptions({ enabled });
+    return true;
   } catch (error) {
     console.warn('Could not toggle the download UI:', error.message);
+    return false;
   }
+}
+
+// MV3 workers may be restarted between captures. Reassert the profile-level setting at the
+// actual download boundary so a later PNG cannot reopen Chrome's Downloads bubble.
+async function downloadWithHiddenUi(options) {
+  await setDownloadUi(false);
+  return chrome.downloads.download(options);
 }
 
 async function updateBadge(state) {
@@ -468,24 +509,178 @@ async function openScreenWindow() {
 
 const CAPTURE_QUEUE_WATCHDOG_MS = 20000;
 const FULL_PAGE_CAPTURE_QUEUE_WATCHDOG_MS = 330000;
+const NEW_TAB_LINK_HANDOFF_MS = 800;
 
 // However a single capture fails or hangs, the queue must keep moving - otherwise every capture
 // requested after it (including the popup's own "Capture now" / "Capture in 5s" buttons) would wait
 // behind a promise that never settles, which looks exactly like the extension has stopped responding.
 const QUEUE_WATCHDOG_TOKEN = Symbol('queue-watchdog-timeout');
-async function captureNow(reason, label, requestedState, modal) {
-  const captureRequest = requestedState || (await recoverRecordingSession());
-  if (!captureRequest.recording || captureRequest.paused) return captureRequest;
-  const captureWatchdogMs =
-    captureRequest.settings?.fullPage && FULL_PAGE_REASONS.has(reason)
-      ? FULL_PAGE_CAPTURE_QUEUE_WATCHDOG_MS
-      : CAPTURE_QUEUE_WATCHDOG_MS;
+function captureActionTime(value) {
+  const actionAt = Number(value);
+  const date = new Date(actionAt);
+  return Number.isFinite(actionAt) && actionAt > 0 && !Number.isNaN(date.getTime()) ? actionAt : Date.now();
+}
+
+function isLinkCaptureReason(reason) {
+  return reason === 'link' || reason === 'modal-link';
+}
+
+// External links commonly use rel="noopener", so Chrome can create their tab without an opener ID.
+// Retain one recent unlinked tab long enough for its originating content-script message to arrive.
+function takeRecentUnlinkedNewTab() {
+  const now = Date.now();
+  for (let index = recentUnlinkedNewTabs.length - 1; index >= 0; index -= 1) {
+    if (now - recentUnlinkedNewTabs[index].createdAt > NEW_TAB_LINK_HANDOFF_MS) {
+      recentUnlinkedNewTabs.splice(index, 1);
+    }
+  }
+  return recentUnlinkedNewTabs.length === 1 ? recentUnlinkedNewTabs.pop() : null;
+}
+
+function takeRecentNewTabForSource(sourceTabId) {
+  const recentTab = recentNewTabLinkTargets.get(sourceTabId);
+  recentNewTabLinkTargets.delete(sourceTabId);
+  if (recentTab && Date.now() - recentTab.createdAt <= NEW_TAB_LINK_HANDOFF_MS) return recentTab;
+  return takeRecentUnlinkedNewTab();
+}
+
+function prepareNewTabLinkTarget(target, reason) {
+  if (!isLinkCaptureReason(reason) || !target?.opensNewTab || !Number.isSafeInteger(target.tabId)) return;
+  let completeHandoff;
+  target.sourceTabId = target.tabId;
+  target.newTabHandoff = new Promise((resolve) => {
+    completeHandoff = resolve;
+  });
+  target.completeNewTabHandoff = completeHandoff;
+  target.newTabHandoffStartedAt = Date.now();
+  pendingNewTabLinkTargets.set(target.sourceTabId, target);
+
+  const recentTab = takeRecentNewTabForSource(target.sourceTabId);
+  if (recentTab) {
+    pendingNewTabLinkTargets.delete(target.sourceTabId);
+    target.tabId = recentTab.tab.id;
+    target.windowId = recentTab.tab.windowId;
+    if (recentTab.needsTracking) target.preexistingNewTab = recentTab.tab;
+    completeNewTabLinkHandoff(target);
+  }
+}
+
+function completeNewTabLinkHandoff(target) {
+  if (typeof target?.completeNewTabHandoff === 'function') {
+    const completeHandoff = target.completeNewTabHandoff;
+    target.completeNewTabHandoff = null;
+    completeHandoff();
+  }
+}
+
+function clearNewTabLinkTarget(target) {
+  if (!target) return;
+  if (pendingNewTabLinkTargets.get(target.sourceTabId) === target) {
+    pendingNewTabLinkTargets.delete(target.sourceTabId);
+  }
+  completeNewTabLinkHandoff(target);
+}
+
+function claimNewTabLinkTarget(tab) {
+  const hasOpener = Number.isSafeInteger(tab.openerTabId);
+  let target = hasOpener ? pendingNewTabLinkTargets.get(tab.openerTabId) : null;
+  if (!target && !hasOpener) {
+    const pendingTargets = [...pendingNewTabLinkTargets.values()].filter(
+      (candidate) => Date.now() - candidate.newTabHandoffStartedAt <= NEW_TAB_LINK_HANDOFF_MS
+    );
+    target = pendingTargets.length === 1 ? pendingTargets[0] : null;
+  }
+  if (!target) {
+    if (hasOpener) {
+      recentNewTabLinkTargets.set(tab.openerTabId, { tab, createdAt: Date.now() });
+    } else {
+      recentUnlinkedNewTabs.push({ tab, createdAt: Date.now(), needsTracking: true });
+    }
+    return null;
+  }
+  if (Date.now() - target.newTabHandoffStartedAt > NEW_TAB_LINK_HANDOFF_MS) {
+    clearNewTabLinkTarget(target);
+    return null;
+  }
+  pendingNewTabLinkTargets.delete(target.sourceTabId);
+  recentNewTabLinkTargets.delete(target.sourceTabId);
+  target.tabId = tab.id;
+  target.windowId = tab.windowId;
+  return target;
+}
+
+async function waitForNewTabLinkTarget(target) {
+  if (!target?.newTabHandoff) return;
+  await Promise.race([target.newTabHandoff, delay(NEW_TAB_LINK_HANDOFF_MS)]);
+  clearNewTabLinkTarget(target);
+}
+
+function clearNewTabLinkTargets() {
+  for (const target of pendingNewTabLinkTargets.values()) clearNewTabLinkTarget(target);
+  recentNewTabLinkTargets.clear();
+  recentUnlinkedNewTabs.length = 0;
+}
+
+function createCaptureRequest(reason, label, state, modal, target, actionAt, requestSequence) {
+  const captureTarget = target || {};
+  if (!Number.isSafeInteger(captureTarget.tabId)) captureTarget.tabId = state.tabId;
+  if (!Number.isSafeInteger(captureTarget.windowId)) captureTarget.windowId = state.windowId;
+  return {
+    reason,
+    label,
+    modal,
+    actionAt,
+    requestSequence,
+    sessionId: state.sessionId,
+    captureGeneration: state.captureGeneration,
+    target: captureTarget,
+    settings: { ...state.settings },
+    streamActive: Boolean(state.streamActive),
+    expectedUrl: typeof captureTarget.expectedUrl === 'string' ? captureTarget.expectedUrl : '',
+    expectedTitle: typeof captureTarget.expectedTitle === 'string' ? captureTarget.expectedTitle : ''
+  };
+}
+
+function captureNow(reason, label, requestedState, modal, target) {
+  const captureTarget = target ? { ...target } : {};
+  prepareNewTabLinkTarget(captureTarget, reason);
+  const actionAt = captureActionTime(captureTarget.actionAt);
+  const requestSequence = ++captureRequestSequence;
+  const captureState = requestedState
+    ? Promise.resolve(requestedState)
+    : recoverRecordingSession(captureTarget.tabId);
+  pendingCaptureCount += 1;
+
+  // Add the task to the queue before any asynchronous state recovery. This preserves the order in
+  // which page actions arrive, rather than the order in which storage reads happen to complete.
   captureChain = captureChain
     .then(async () => {
+      const state = await captureState;
+      if (!state.recording || state.paused) return state;
+      if (captureTarget.preexistingNewTab) {
+        const tab = await chrome.tabs.get(captureTarget.tabId).catch(() => captureTarget.preexistingNewTab);
+        await trackAndFocusNewTab(state, tab);
+      }
+      const captureRequest = createCaptureRequest(
+        reason,
+        label,
+        state,
+        modal,
+        captureTarget,
+        actionAt,
+        requestSequence
+      );
+      const longCaptureLikely =
+        captureRequest.settings.fullPage &&
+        (FULL_PAGE_REASONS.has(reason) || (await isResponsiveCaptureViewport(captureRequest.target.tabId)));
+      const captureWatchdogMs =
+        longCaptureLikely
+          ? FULL_PAGE_CAPTURE_QUEUE_WATCHDOG_MS
+          : CAPTURE_QUEUE_WATCHDOG_MS;
       let watchdogTimer;
       try {
         const result = await Promise.race([
-          performCapture(reason, label, captureRequest.sessionId, captureRequest.captureGeneration, modal),
+          performCapture(captureRequest),
           new Promise((resolve) => {
             watchdogTimer = setTimeout(() => resolve(QUEUE_WATCHDOG_TOKEN), captureWatchdogMs);
           })
@@ -494,7 +689,7 @@ async function captureNow(reason, label, requestedState, modal) {
           logLine(
             `QUEUE_WATCHDOG ${reason}${label ? ` "${label}"` : ''} exceeded ${captureWatchdogMs}ms, moving on`
           );
-          await clearFullPageProgress(captureRequest.tabId);
+          await clearFullPageProgress(captureRequest.target.tabId);
         }
       } finally {
         clearTimeout(watchdogTimer);
@@ -505,7 +700,7 @@ async function captureNow(reason, label, requestedState, modal) {
         logLine(`CAPTURE_SKIPPED ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
         await flushLog();
         const state = await getState();
-        await clearFullPageProgress(state.tabId);
+        await clearFullPageProgress(captureTarget.tabId ?? state.tabId);
         if (state.recording) {
           await setState({
             lastError: 'Capture skipped: JShotz needs access to the current page. Open the JShotz popup on that page, then continue recording.'
@@ -517,7 +712,7 @@ async function captureNow(reason, label, requestedState, modal) {
         logLine(`FOLDER_ACCESS_NEEDED ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
         await flushLog();
         const state = await getState();
-        await clearFullPageProgress(state.tabId);
+        await clearFullPageProgress(captureTarget.tabId ?? state.tabId);
         if (state.recording) {
           await setState({ folderAccessNeeded: true, lastError: error.message });
         }
@@ -527,11 +722,14 @@ async function captureNow(reason, label, requestedState, modal) {
       await flushLog();
       console.error('Capture failed:', error);
       const state = await getState();
-      await clearFullPageProgress(state.tabId);
+      await clearFullPageProgress(captureTarget.tabId ?? state.tabId);
       await setState({
         folderAccessNeeded: needsFolderReconnect(error),
         lastError: `Capture failed: ${error.message}`
       });
+    })
+    .finally(() => {
+      pendingCaptureCount = Math.max(0, pendingCaptureCount - 1);
     });
   return captureChain;
 }
@@ -545,7 +743,9 @@ async function scheduleDelayedCapture(tabId, requestedState) {
       /* No content script on this page (chrome://, Web Store); the capture still fires on time. */
     });
   }
-  delay(CAPTURE_COUNTDOWN_MS).then(() => captureNow('devtools-panel', undefined, captureRequest));
+  delay(CAPTURE_COUNTDOWN_MS).then(() =>
+    captureNow('devtools-panel', undefined, captureRequest, undefined, { tabId })
+  );
 }
 
 // "Failed to capture tab: image readback failed" is a transient compositor/GPU error - the frame
@@ -579,13 +779,169 @@ async function captureVisibleTabWithRetry(windowId) {
   throw lastError;
 }
 
-async function grabPngDataUrl(state, tab) {
-  if (state.settings.captureMode === 'screen' && state.streamActive) {
+async function grabPngDataUrl(captureRequest, tab) {
+  if (captureRequest.settings.captureMode === 'screen' && captureRequest.streamActive) {
     const result = await askScreen('SCREEN_CAPTURE');
     if (result?.dataUrl) return result.dataUrl;
     console.warn('Screen capture unavailable, falling back to tab capture:', result?.error);
   }
   return captureVisibleTabWithRetry(tab.windowId);
+}
+
+// Navigation and title events often arrive before a client-rendered application has painted its
+// real content. Wait for a bounded period of page activity to go quiet before recording them.
+const RENDER_SETTLE_REASONS = new Set([
+  'start',
+  'link',
+  'modal-link',
+  'navigation',
+  'url-change',
+  'title-change'
+]);
+const RENDER_SETTLE_MIN_WAIT_MS = 900;
+const RENDER_SETTLE_TITLE_MIN_WAIT_MS = 1800;
+const RENDER_SETTLE_QUIET_MS = 700;
+const RENDER_SETTLE_MAX_WAIT_MS = 9000;
+const RENDER_SETTLE_TITLE_MAX_WAIT_MS = 12000;
+const RENDER_SETTLE_POLL_MS = 120;
+
+function renderSettleOptions(reason) {
+  if (!RENDER_SETTLE_REASONS.has(reason)) return null;
+  const titleChange = reason === 'title-change';
+  return {
+    reason,
+    minWaitMs: titleChange ? RENDER_SETTLE_TITLE_MIN_WAIT_MS : RENDER_SETTLE_MIN_WAIT_MS,
+    quietMs: RENDER_SETTLE_QUIET_MS,
+    maxWaitMs: titleChange ? RENDER_SETTLE_TITLE_MAX_WAIT_MS : RENDER_SETTLE_MAX_WAIT_MS,
+    pollMs: RENDER_SETTLE_POLL_MS
+  };
+}
+
+async function waitForRenderedPage(tabId, reason) {
+  const options = renderSettleOptions(reason);
+  if (!options) return null;
+
+  const [injected] = await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      args: [options],
+      func: async ({ minWaitMs, quietMs, maxWaitMs, pollMs }) => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const startedAt = performance.now();
+        let lastActivityAt = startedAt;
+        let previousSignature = '';
+        let previousResourceCount = performance.getEntriesByType('resource').length;
+        let fontsReady = !document.fonts?.ready;
+        const noteActivity = () => {
+          lastActivityAt = performance.now();
+        };
+        const mutationObserver = new MutationObserver(noteActivity);
+        mutationObserver.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          characterData: true
+        });
+
+        let resourceObserver = null;
+        try {
+          if (typeof PerformanceObserver === 'function') {
+            resourceObserver = new PerformanceObserver(noteActivity);
+            resourceObserver.observe({ type: 'resource', buffered: false });
+          }
+        } catch {
+          resourceObserver = null;
+        }
+        if (!fontsReady) {
+          Promise.resolve(document.fonts.ready)
+            .catch(() => {})
+            .then(() => {
+              fontsReady = true;
+              noteActivity();
+            });
+        }
+
+        const isVisible = (element) => {
+          const rect = element.getBoundingClientRect();
+          if (rect.width < 2 || rect.height < 2) return false;
+          const style = getComputedStyle(element);
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+        };
+        const hasBusyIndicator = () => {
+          const selectors = [
+            '[aria-busy="true"]',
+            '[role="progressbar"]',
+            '[class*="spinner" i]',
+            '[class*="loading" i]',
+            '[class*="loader" i]'
+          ].join(',');
+          return [...document.querySelectorAll(selectors)].some(isVisible);
+        };
+        const signature = () => {
+          const root = document.documentElement;
+          const body = document.body;
+          const images = [...document.images];
+          const incompleteImages = images.filter((image) => !image.complete).length;
+          return {
+            value: [
+              document.readyState,
+              root.scrollWidth,
+              root.scrollHeight,
+              root.clientWidth,
+              root.clientHeight,
+              body?.childElementCount || 0,
+              body?.textContent?.length || 0,
+              images.length,
+              incompleteImages,
+              hasBusyIndicator() ? 1 : 0
+            ].join('|'),
+            incompleteImages,
+            busy: hasBusyIndicator()
+          };
+        };
+
+        let current = signature();
+        try {
+          while (performance.now() - startedAt < maxWaitMs) {
+            const resourceCount = performance.getEntriesByType('resource').length;
+            if (resourceCount !== previousResourceCount) {
+              previousResourceCount = resourceCount;
+              noteActivity();
+            }
+            current = signature();
+            if (previousSignature && current.value !== previousSignature) noteActivity();
+            previousSignature = current.value;
+
+            const elapsedMs = performance.now() - startedAt;
+            const ready = document.readyState !== 'loading' && fontsReady && !current.incompleteImages && !current.busy;
+            if (ready && elapsedMs >= minWaitMs && performance.now() - lastActivityAt >= quietMs) {
+              return { settled: true, waitedMs: Math.round(elapsedMs) };
+            }
+            await sleep(pollMs);
+          }
+          return {
+            settled: false,
+            waitedMs: Math.round(performance.now() - startedAt),
+            readyState: document.readyState,
+            incompleteImages: current.incompleteImages,
+            busy: current.busy
+          };
+        } finally {
+          mutationObserver.disconnect();
+          resourceObserver?.disconnect();
+        }
+      }
+    })
+    .catch(() => [null]);
+  const result = injected?.result || null;
+  if (result && !result.settled) {
+    logLine(
+      `RENDER_SETTLE_TIMEOUT ${reason} waited=${result.waitedMs}ms ready=${result.readyState || 'unknown'} ` +
+        `images=${result.incompleteImages ?? 'unknown'} busy=${Boolean(result.busy)}`
+    );
+  }
+  return result;
 }
 
 /* ----------------------------------------------------------- full page */
@@ -606,7 +962,10 @@ const FULL_PAGE_PART_MAX_PIXELS = 8000000;
 const FULL_PAGE_PART_MAX_DIMENSION = 8192;
 const FULL_PAGE_BASE_TILE_HEIGHT = 3000;
 const FULL_PAGE_PREFERRED_MAX_PARTS = 8;
+const FULL_PAGE_MAX_READABLE_PART_ASPECT_RATIO = 1.15;
+const FULL_PAGE_MAX_READABLE_PARTS = 24;
 const FULL_PAGE_TILE_JPEG_QUALITY = 94;
+const FULL_PAGE_RESPONSIVE_VIEWPORT_MAX_WIDTH = 640;
 const SCROLLER_SETTLE_MAX_MS = 600;
 // Full-document work is deliberately limited to manual capture actions.
 const FULL_PAGE_REASONS = new Set(['manual-hotkey', 'manual']);
@@ -626,7 +985,7 @@ async function attachDebugger(tabId) {
     return true;
   } catch (error) {
     // Already-attached DevTools owns the session and there is no way to share it.
-    console.warn('Background capture unavailable, using the visible frame:', error.message);
+    console.warn('Background capture unavailable, trying a visible-frame stitch:', error.message);
     debuggerTabId = null;
     return false;
   }
@@ -639,9 +998,29 @@ async function detachDebugger() {
   await chrome.debugger.detach({ tabId }).catch(() => {});
 }
 
-// The tab title is often a generic site-wide string ("John Hancock - My Retirement") that says
-// little about the step being documented, so prefer the heading the page actually shows.
-async function getPageHeading(tabId) {
+function pageMetadataText(value, maxLength = 120) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, maxLength);
+}
+
+function samePageUrl(left, right) {
+  if (!left || !right) return true;
+  try {
+    return new URL(left).href === new URL(right).href;
+  } catch {
+    return left === right;
+  }
+}
+
+function matchesExpectedPage(captureRequest, page) {
+  return (
+    (!captureRequest.expectedUrl || samePageUrl(captureRequest.expectedUrl, page.url)) &&
+    (!captureRequest.expectedTitle || !page.documentTitle || captureRequest.expectedTitle === page.documentTitle)
+  );
+}
+
+// Read title, URL, and the visible heading together. The heading is more useful than a generic
+// site-wide browser title, while returning all three from one page execution keeps them coherent.
+async function getPageContext(tabId, fallbackTab) {
   const [injected] = await chrome.scripting
     .executeScript({
       target: { tabId },
@@ -664,14 +1043,48 @@ async function getPageHeading(tabId) {
           for (const el of scope.querySelectorAll(selector)) {
             if (!visible(el)) continue;
             const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
-            if (text) return text.slice(0, 120);
+            if (text) {
+              return {
+                heading: text.slice(0, 120),
+                title: document.title || '',
+                url: location.href || ''
+              };
+            }
           }
         }
-        return '';
+        return { heading: '', title: document.title || '', url: location.href || '' };
       }
     })
     .catch(() => [null]);
-  return injected?.result || '';
+  const result = injected?.result && typeof injected.result === 'object' ? injected.result : {};
+  const url = String(result.url || fallbackTab?.url || '');
+  const documentTitle = pageMetadataText(result.title || fallbackTab?.title || '');
+  const heading = pageMetadataText(result.heading);
+  return {
+    title: heading || documentTitle || url || 'Untitled page',
+    url,
+    documentTitle
+  };
+}
+
+async function isVisibleCaptureTarget(tab) {
+  const activeTabs = await chrome.tabs.query({ active: true, windowId: tab.windowId }).catch(() => []);
+  return !activeTabs.length || activeTabs.some((activeTab) => activeTab.id === tab.id);
+}
+
+async function isResponsiveCaptureViewport(tabId) {
+  const [injected] = await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      args: [FULL_PAGE_RESPONSIVE_VIEWPORT_MAX_WIDTH],
+      func: (maxViewportWidth) => {
+        const viewportWidth = Math.min(window.innerWidth, document.documentElement.clientWidth || window.innerWidth);
+        return viewportWidth > 0 && viewportWidth <= maxViewportWidth && window.innerHeight > 0;
+      }
+    })
+    .catch(() => [null]);
+  return injected?.result === true;
 }
 
 // Plain document height only: does not look at inner scroll panes, so it never suggests forcing the
@@ -687,6 +1100,7 @@ async function measureDocument(tabId) {
       const docWidth = Math.max(de.scrollWidth, de.offsetWidth, b?.scrollWidth || 0, b?.offsetWidth || 0, innerWidth);
       return {
         width: Math.ceil(docWidth),
+        viewportWidth: innerWidth,
         viewportHeight: innerHeight,
         dpr: window.devicePixelRatio || 1,
         scrollX: window.scrollX,
@@ -970,12 +1384,21 @@ function maximumDocumentPartScale(width, height, dpr) {
   );
 }
 
+function readableDocumentPartCount(width, height) {
+  const readableHeight = Math.max(1, Math.ceil(width * FULL_PAGE_MAX_READABLE_PART_ASPECT_RATIO));
+  return Math.min(FULL_PAGE_MAX_READABLE_PARTS, Math.max(1, Math.ceil(height / readableHeight)));
+}
+
 function fullPageCapturePlan(width, height, dpr) {
+  const safeWidth = Math.max(1, Math.ceil(Number(width) || 0));
+  const safeHeight = Math.max(1, Math.ceil(Number(height) || 0));
   const safeDpr = Math.max(1, Number(dpr) || 1);
-  const rasterWidth = width * safeDpr;
-  const rasterHeight = height * safeDpr;
+  const rasterWidth = safeWidth * safeDpr;
+  const rasterHeight = safeHeight * safeDpr;
   const pagePixels = rasterWidth * rasterHeight;
+  const readablePartCount = readableDocumentPartCount(safeWidth, safeHeight);
   const fitsSingleImage =
+    readablePartCount === 1 &&
     pagePixels <= FULL_PAGE_SINGLE_IMAGE_MAX_PIXELS &&
     rasterWidth <= FULL_PAGE_PART_MAX_DIMENSION &&
     rasterHeight <= FULL_PAGE_PART_MAX_DIMENSION;
@@ -984,15 +1407,18 @@ function fullPageCapturePlan(width, height, dpr) {
     return {
       captureScale: 1,
       format: 'png',
-      tiles: [{ top: 0, height }]
+      tiles: [{ top: 0, height: safeHeight }]
     };
   }
 
-  const tileHeight = Math.min(
-    height,
-    Math.max(FULL_PAGE_BASE_TILE_HEIGHT, Math.ceil(height / FULL_PAGE_PREFERRED_MAX_PARTS))
+  const capacityTileHeight = Math.min(
+    safeHeight,
+    Math.max(FULL_PAGE_BASE_TILE_HEIGHT, Math.ceil(safeHeight / FULL_PAGE_PREFERRED_MAX_PARTS))
   );
-  const captureScale = maximumDocumentPartScale(width, tileHeight, safeDpr);
+  const capacityPartCount = Math.ceil(safeHeight / capacityTileHeight);
+  const partCount = Math.max(readablePartCount, capacityPartCount);
+  const tileHeight = Math.ceil(safeHeight / partCount);
+  const captureScale = maximumDocumentPartScale(safeWidth, tileHeight, safeDpr);
   if (!Number.isFinite(captureScale) || captureScale <= 0) {
     throw new Error('The page dimensions cannot be captured safely.');
   }
@@ -1000,7 +1426,7 @@ function fullPageCapturePlan(width, height, dpr) {
   return {
     captureScale,
     format: 'jpeg',
-    tiles: documentTiles(height, tileHeight)
+    tiles: documentTiles(safeHeight, tileHeight)
   };
 }
 
@@ -1138,7 +1564,7 @@ async function captureDocumentParts(tabId, documentInfo) {
     parts,
     captureScale: plan.captureScale,
     progressTotal,
-    trimBlankMargins: parts.length === 1
+    trimBlankMargins: false
   };
 }
 
@@ -1173,6 +1599,196 @@ async function restoreDocumentScroll(tabId, left, top) {
     .catch(() => {});
 }
 
+function documentCaptureStops(documentInfo) {
+  const viewportHeight = Math.max(1, Math.ceil(Number(documentInfo.viewportHeight) || 0));
+  const totalTravel = Math.max(0, Math.ceil(Number(documentInfo.docHeight) || 0) - viewportHeight);
+  const overlap = Math.min(SCROLLER_FRAME_OVERLAP, Math.floor(viewportHeight / 3));
+  const step = Math.max(viewportHeight - overlap, 80);
+  const stops = [];
+  for (let top = 0; top < totalTravel; top += step) stops.push(top);
+  if (!stops.length || stops[stops.length - 1] !== totalTravel) stops.push(totalTravel);
+  return stops;
+}
+
+function documentCaptureWatchdogMs(documentInfo) {
+  const estimate =
+    documentCaptureStops(documentInfo).length * FULL_PAGE_SCROLLER_FRAME_ESTIMATE_MS +
+    FULL_PAGE_SCROLLER_WATCHDOG_OVERHEAD_MS;
+  return Math.max(FULL_PAGE_WATCHDOG_MS, Math.min(FULL_PAGE_SCROLLER_WATCHDOG_MAX_MS, estimate));
+}
+
+async function scrollDocumentTo(tabId, left, top) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    args: [left, top, SCROLLER_SETTLE_MAX_MS],
+    func: async (targetLeft, targetTop, maxWaitMs) => {
+      const root = document.documentElement;
+      const body = document.body;
+      const previousRootBehavior = root.style.scrollBehavior;
+      const previousBodyBehavior = body?.style.scrollBehavior;
+      root.style.scrollBehavior = 'auto';
+      if (body) body.style.scrollBehavior = 'auto';
+      window.scrollTo({ left: targetLeft, top: targetTop, behavior: 'instant' });
+
+      const deadline = Date.now() + maxWaitMs;
+      while (
+        (Math.abs(window.scrollX - targetLeft) >= 2 || Math.abs(window.scrollY - targetTop) >= 2) &&
+        Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+      root.style.scrollBehavior = previousRootBehavior;
+      if (body) body.style.scrollBehavior = previousBodyBehavior;
+      return { ok: true, scrollX: window.scrollX, scrollY: window.scrollY };
+    }
+  });
+  return injected?.result || { ok: false, scrollX: left, scrollY: top };
+}
+
+async function captureDocumentStitch(tabId, windowId, documentInfo, captureRequest) {
+  await waitForImages(tabId);
+  if (captureRequest && !(await isCaptureRequestActive(captureRequest))) return null;
+  const doc = await waitForDocumentLayout(tabId, documentInfo);
+  if (captureRequest && !(await isCaptureRequestActive(captureRequest))) return null;
+  const viewportWidth = Math.max(1, Math.ceil(Number(doc.viewportWidth || doc.width) || 0));
+  const viewportHeight = Math.max(1, Math.ceil(Number(doc.viewportHeight) || 0));
+  const docHeight = Math.max(viewportHeight, Math.ceil(Number(doc.docHeight) || 0));
+  const stops = documentCaptureStops({ ...doc, viewportHeight, docHeight });
+  const plan = fullPageCapturePlan(viewportWidth, docHeight, doc.dpr);
+  const outputScale = Math.max(1, Number(doc.dpr) || 1) * plan.captureScale;
+  const progressTotal = stops.length + plan.tiles.length * 2;
+  const activeParts = new Map();
+  const parts = [];
+  let nextPartToCreate = 0;
+  let nextPartToFinish = 0;
+  let previousBottom = 0;
+
+  const createPart = (index) => {
+    activeParts.set(index, createFullPagePart(plan.tiles[index], viewportWidth, outputScale));
+  };
+
+  const ensurePartsThrough = (bottom) => {
+    while (nextPartToCreate < plan.tiles.length && plan.tiles[nextPartToCreate].top < bottom) {
+      createPart(nextPartToCreate);
+      nextPartToCreate += 1;
+    }
+  };
+
+  const finishPart = async (index) => {
+    const part = activeParts.get(index);
+    if (!part) return;
+    const partNumber = parts.length + 1;
+    await reportFullPageProgress(
+      tabId,
+      `Assembling full page ${partNumber} of ${plan.tiles.length}`,
+      stops.length + parts.length,
+      progressTotal
+    );
+    let rawDataUrl;
+    try {
+      rawDataUrl = await canvasToDataUrl(
+        part.canvas,
+        `image/${plan.format}`,
+        plan.format === 'jpeg' ? FULL_PAGE_TILE_JPEG_QUALITY / 100 : undefined
+      );
+    } finally {
+      discardFullPagePart(part);
+      activeParts.delete(index);
+    }
+    parts.push({ rawDataUrl });
+    await reportFullPageProgress(
+      tabId,
+      `Assembled full page ${partNumber} of ${plan.tiles.length}`,
+      stops.length + parts.length,
+      progressTotal
+    );
+  };
+
+  const finishPartsBefore = async (top) => {
+    while (nextPartToFinish < plan.tiles.length) {
+      const part = activeParts.get(nextPartToFinish);
+      if (!part || part.top + part.height > top) break;
+      await finishPart(nextPartToFinish);
+      nextPartToFinish += 1;
+    }
+  };
+
+  try {
+    await hideScrollbars(tabId);
+    await reportFullPageProgress(tabId, 'Preparing scrollable page', 0, progressTotal);
+    for (let index = 0; index < stops.length; index += 1) {
+      if (captureRequest && !(await isCaptureRequestActive(captureRequest))) return null;
+      const target = stops[index];
+      await reportFullPageProgress(tabId, `Capturing full page ${index + 1} of ${stops.length}`, index, progressTotal);
+      const { ok, scrollY } = await scrollDocumentTo(tabId, doc.scrollX, target);
+      if (!ok || Math.abs(scrollY - target) > 2) throw new Error('Could not reach a document section.');
+      await delay(450);
+      if (captureRequest && !(await isCaptureRequestActive(captureRequest))) return null;
+
+      let dataUrl;
+      await setFullPageProgressVisibility(tabId, true);
+      try {
+        dataUrl = await captureVisibleTabWithRetry(windowId);
+      } finally {
+        await setFullPageProgressVisibility(tabId, false);
+      }
+      if (captureRequest && !(await isCaptureRequestActive(captureRequest))) return null;
+
+      const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+      try {
+        const sourceScaleX = bitmap.width / viewportWidth;
+        const sourceScaleY = bitmap.height / viewportHeight;
+        const contentBottom = Math.min(docHeight, scrollY + viewportHeight);
+        const sourceTop = Math.max(0, Math.min(contentBottom - scrollY, previousBottom - scrollY));
+        const destinationTop = scrollY + sourceTop;
+        const destinationBottom = contentBottom;
+
+        await finishPartsBefore(destinationTop);
+        ensurePartsThrough(destinationBottom);
+        for (const part of activeParts.values()) {
+          drawBitmapIntoFullPagePart(
+            part,
+            bitmap,
+            {
+              x: 0,
+              y: sourceTop * sourceScaleY,
+              width: bitmap.width,
+              height: (destinationBottom - destinationTop) * sourceScaleY
+            },
+            {
+              x: 0,
+              y: destinationTop,
+              width: viewportWidth,
+              height: destinationBottom - destinationTop
+            },
+            outputScale
+          );
+        }
+        previousBottom = Math.max(previousBottom, destinationBottom);
+      } finally {
+        bitmap.close();
+      }
+      await reportFullPageProgress(tabId, `Captured full page ${index + 1} of ${stops.length}`, index + 1, progressTotal);
+    }
+
+    if (previousBottom < docHeight - 2) throw new Error('Could not capture the bottom of the document.');
+    ensurePartsThrough(docHeight);
+    await finishPartsBefore(Number.POSITIVE_INFINITY);
+    return {
+      parts,
+      captureScale: plan.captureScale,
+      progressTotal,
+      progressCompleted: stops.length + plan.tiles.length,
+      trimBlankMargins: false
+    };
+  } finally {
+    for (const part of activeParts.values()) discardFullPagePart(part);
+    await restoreDocumentScroll(tabId, doc.scrollX, doc.scrollY);
+    await restoreScrollbars(tabId);
+  }
+}
+
 // Chromium can rasterize a document outside the visible viewport directly. Do not use
 // Emulation.setDeviceMetricsOverride here: enlarging the viewport visibly reflows responsive apps
 // while the user-triggered capture is running.
@@ -1198,7 +1814,7 @@ async function captureDocumentHeadless(tabId, documentInfo) {
     }
     return result;
   } catch (error) {
-    console.warn('Full-page capture failed, using the visible frame:', error.message);
+    console.warn('Full-page capture failed, trying a visible-frame stitch:', error.message);
     return null;
   } finally {
     // The debugger is only needed for the instant of the shot, so let go of it immediately - that
@@ -1434,13 +2050,16 @@ async function captureScrollerStitch(tabId, windowId, scroller) {
 // debugger attachment until the latter branch because stitch capture does not need CDP, and attach
 // itself causes Chromium to show a transient browser notice.
 // Returns null when neither applies, so the caller just takes the ordinary visible frame.
-async function captureFullPagePassive(tabId, windowId, documentInfo, knownScroller) {
+async function captureFullPagePassive(tabId, windowId, documentInfo, knownScroller, captureRequest) {
   const doc = documentInfo || (await measureDocument(tabId).catch(() => null));
   if (!doc?.viewportHeight) return null;
 
   if (doc.docHeight > doc.viewportHeight + 4) {
-    if (!HAS_DEBUGGER) return null;
-    return captureDocumentHeadless(tabId, doc);
+    if (doc.viewportWidth > 0 && doc.viewportWidth <= FULL_PAGE_RESPONSIVE_VIEWPORT_MAX_WIDTH) {
+      return captureDocumentStitch(tabId, windowId, doc, captureRequest);
+    }
+    const headless = HAS_DEBUGGER ? await captureDocumentHeadless(tabId, doc) : null;
+    return headless || captureDocumentStitch(tabId, windowId, doc, captureRequest);
   }
 
   const scroller = knownScroller || (await findScroller(tabId).catch(() => null));
@@ -1459,7 +2078,7 @@ async function captureFullPagePassive(tabId, windowId, documentInfo, knownScroll
 // network wait) must never be allowed to stall the whole recording - past the watchdog, give up and
 // fall back to the ordinary visible frame instead. The badge shows "..." for the same reason: a
 // multi-second full-page capture must not look identical to the extension having stopped responding.
-async function captureFullPageWithWatchdog(tabId, windowId) {
+async function captureFullPageWithWatchdog(tabId, windowId, captureRequest) {
   const state = await getState();
   await chrome.action.setBadgeText({ text: state.recording && !state.paused ? '\u2026' : '' });
   try {
@@ -1470,18 +2089,28 @@ async function captureFullPageWithWatchdog(tabId, windowId) {
         : null;
     const watchdogMs = scroller && scroller.scrollHeight > scroller.clientHeight + 4
       ? scrollerCaptureWatchdogMs(scroller)
-      : FULL_PAGE_WATCHDOG_MS;
+      : documentInfo?.viewportHeight && documentInfo.docHeight > documentInfo.viewportHeight + 4
+        ? documentCaptureWatchdogMs(documentInfo)
+        : FULL_PAGE_WATCHDOG_MS;
     const FULL_PAGE_TIMEOUT_TOKEN = Symbol('full-page-timeout');
-    const timeout = new Promise((resolve) => setTimeout(() => resolve(FULL_PAGE_TIMEOUT_TOKEN), watchdogMs));
-    const result = await Promise.race([
-      captureFullPagePassive(tabId, windowId, documentInfo, scroller).catch(() => null),
-      timeout
-    ]);
-    if (result === FULL_PAGE_TIMEOUT_TOKEN) {
-      logLine(`FULL_PAGE_WATCHDOG exceeded ${watchdogMs}ms, using the visible frame instead`);
-      return null;
+    let timeoutId;
+    const timeout = new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve(FULL_PAGE_TIMEOUT_TOKEN), watchdogMs);
+    });
+    try {
+      const captureWork = captureFullPagePassive(tabId, windowId, documentInfo, scroller, captureRequest).catch(() => null);
+      const result = await Promise.race([
+        waitForCaptureOperation(captureRequest, captureWork),
+        timeout
+      ]);
+      if (result === FULL_PAGE_TIMEOUT_TOKEN) {
+        logLine(`FULL_PAGE_WATCHDOG exceeded ${watchdogMs}ms, using the visible frame instead`);
+        return null;
+      }
+      return result;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    return result;
   } finally {
     await updateBadge(await getState());
   }
@@ -1495,6 +2124,11 @@ async function clearStoredFrames() {
   const stored = await chrome.storage.local.get(null);
   const keys = Object.keys(stored).filter((key) => key === FRAMES_KEY || key.startsWith(FRAME_PREFIX));
   if (keys.length) await chrome.storage.local.remove(keys);
+}
+
+function completedEvidenceFor(state) {
+  const evidence = state?.completedEvidence;
+  return evidence && evidence.sessionId === state?.sessionId ? evidence : null;
 }
 
 function hasSelectedCaptureFolder(state) {
@@ -1539,6 +2173,25 @@ async function writableSelectedCaptureFolder(state) {
   return directoryHandle;
 }
 
+function interruptedCompletedEvidence(state) {
+  if (!state.sessionId || !state.captures.length) return null;
+  const savedToFolder = hasSelectedCaptureFolder(state);
+  return {
+    sessionId: state.sessionId,
+    captureCount: state.captures.length,
+    outputFolderName: savedToFolder ? state.outputFolder?.name || null : null,
+    downloadDirectory: savedToFolder ? null : `flow-captures/${state.sessionId}`,
+    completedAt: new Date().toISOString(),
+    interrupted: true
+  };
+}
+
+async function writableCompletedEvidenceFolder(evidence) {
+  const directoryHandle = await writableCaptureFolder();
+  if (directoryHandle.name !== evidence?.outputFolderName) throw folderPermissionError();
+  return directoryHandle;
+}
+
 async function writeSelectedCaptureFolderFile(name, contents) {
   try {
     await writeCaptureFolderFile(await writableCaptureFolder(), name, contents);
@@ -1547,20 +2200,58 @@ async function writeSelectedCaptureFolderFile(name, contents) {
   }
 }
 
-async function cleanupCaptureResources() {
+async function cleanupCaptureResources({ restoreDownloadUi = true, clearFrames = true, clearSessionControl = true } = {}) {
   await closeScreenWindow().catch(() => {});
   await closeOffscreen().catch(() => {});
   await detachDebugger().catch(() => {});
-  await clearStoredFrames().catch(() => {});
-  await chrome.storage.local.remove(SESSION_CONTROL_KEY).catch(() => {});
+  if (clearFrames) await clearStoredFrames().catch(() => {});
+  if (clearSessionControl) await chrome.storage.local.remove(SESSION_CONTROL_KEY).catch(() => {});
   await clearSessionTracking().catch(() => {});
-  await setDownloadUi(true).catch(() => {});
+  if (restoreDownloadUi) await setDownloadUi(true).catch(() => {});
   apiQueue = [];
   apiHeaderRecords = [];
+  clearNewTabLinkTargets();
   lastRawCaptureHash = '';
-  lastTabTitle = '';
+  lastTabTitles.clear();
   sessionRecoveryPending = false;
   recoveredSessionId = null;
+}
+
+async function interruptRecordingAfterBrowserRestart() {
+  const state = await getState();
+  if (!state.recording) {
+    sessionRecoveryPending = false;
+    return state;
+  }
+
+  logLine(`SESSION_INTERRUPTED browser-restart captures=${state.captures.length}`);
+  await configureApiHooks(state.trackedTabIds, false);
+  await cleanupCaptureResources({ clearFrames: false });
+  const interruptedAt = new Date().toISOString();
+  const next = await setState({
+    recording: false,
+    paused: false,
+    captureGeneration: 0,
+    tabId: null,
+    windowId: null,
+    streamActive: false,
+    fullPageProgress: null,
+    downloadIds: [],
+    outputFolder: null,
+    pendingResumeFolder: null,
+    completedEvidence: interruptedCompletedEvidence(state),
+    interruptedRecording: {
+      sessionId: state.sessionId,
+      captureCount: state.captures.length,
+      interruptedAt
+    },
+    folderWrittenFiles: [],
+    folderAccessNeeded: false,
+    lastError: null
+  });
+  await updateBadge(next);
+  await flushLog();
+  return next;
 }
 
 function isActiveCapture(state, sessionId, captureGeneration) {
@@ -1572,37 +2263,126 @@ function isActiveCapture(state, sessionId, captureGeneration) {
   );
 }
 
-async function performCapture(reason, label, requestedSessionId, requestedCaptureGeneration, modal) {
-  const startedAt = Date.now();
-  const state = await getState();
-  if (state.tabId === null || !isActiveCapture(state, requestedSessionId, requestedCaptureGeneration)) return;
+function captureRequestKey(sessionId, captureGeneration) {
+  return `${sessionId}:${captureGeneration}`;
+}
 
-  const tab = await chrome.tabs.get(state.tabId).catch(() => null);
+function cancelCaptureRequest(sessionId, captureGeneration) {
+  const signals = captureCancellationSignals.get(captureRequestKey(sessionId, captureGeneration));
+  if (!signals) return;
+  for (const signal of signals) signal();
+}
+
+function watchCaptureCancellation(captureRequest) {
+  const key = captureRequestKey(captureRequest.sessionId, captureRequest.captureGeneration);
+  let timer;
+  let disposed = false;
+  let resolveCancellation;
+  const promise = new Promise((resolve) => {
+    resolveCancellation = resolve;
+  });
+  const signals = captureCancellationSignals.get(key) || new Set();
+  signals.add(resolveCancellation);
+  captureCancellationSignals.set(key, signals);
+
+  const checkState = async () => {
+    if (disposed) return;
+    if (!(await isCaptureRequestActive(captureRequest).catch(() => false))) {
+      resolveCancellation();
+      return;
+    }
+    timer = setTimeout(checkState, 250);
+  };
+  void checkState();
+
+  return {
+    promise,
+    dispose() {
+      disposed = true;
+      clearTimeout(timer);
+      signals.delete(resolveCancellation);
+      if (!signals.size) captureCancellationSignals.delete(key);
+    }
+  };
+}
+
+async function waitForCaptureOperation(captureRequest, operation) {
+  if (!captureRequest) return operation;
+  const cancellation = watchCaptureCancellation(captureRequest);
+  try {
+    return await Promise.race([operation, cancellation.promise.then(() => null)]);
+  } finally {
+    cancellation.dispose();
+  }
+}
+
+async function isCaptureRequestActive(captureRequest) {
+  const state = await getState();
+  return isActiveCapture(state, captureRequest.sessionId, captureRequest.captureGeneration);
+}
+
+async function performCapture(captureRequest) {
+  const startedAt = Date.now();
+  const {
+    reason,
+    label,
+    sessionId,
+    captureGeneration,
+    target,
+    settings,
+    modal
+  } = captureRequest;
+  const state = await getState();
+  if (!isActiveCapture(state, sessionId, captureGeneration)) return;
+
+  // Let the page settle (navigation paint, click-driven UI updates) before grabbing the frame.
+  const settle =
+    reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : reason === 'dialog-opened' ? 550 : 450;
+  await delay(settings.captureApi ? settle + 500 : settle);
+
+  await waitForNewTabLinkTarget(target);
+  const tabId = target?.tabId;
+  if (!Number.isSafeInteger(tabId)) return;
+  await waitForRenderedPage(tabId, reason);
+  const latest = await getState();
+  if (!isActiveCapture(latest, sessionId, captureGeneration)) return;
+
+  // Refresh the tab after waiting. Its old title and URL may describe the page before the action.
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab) {
     sessionRecoveryPending = true;
     await setState({ lastError: 'Recording target is unavailable. Open the popup to resume on the active tab.' });
     return;
   }
 
-  // Let the page settle (navigation paint, click-driven UI updates) before grabbing the frame.
-  const settle =
-    reason === 'navigation' ? 600 : reason === 'devtools-panel' ? 150 : reason === 'dialog-opened' ? 550 : 450;
-  await delay(state.settings.captureApi ? settle + 500 : settle);
+  const responsiveViewport = settings.fullPage && (await isResponsiveCaptureViewport(tab.id));
+  const wantsFullPage = settings.fullPage && (FULL_PAGE_REASONS.has(reason) || responsiveViewport);
+  if (!wantsFullPage && settings.captureMode !== 'screen' && !(await isVisibleCaptureTarget(tab))) {
+    logLine(`CAPTURE_SKIPPED ${reason}${label ? ` "${label}"` : ''}: the action tab is no longer visible.`);
+    return;
+  }
 
-  const latest = await getState();
-  if (!isActiveCapture(latest, state.sessionId, state.captureGeneration)) return;
+  const page = await getPageContext(tab.id, tab);
+  if (!matchesExpectedPage(captureRequest, page)) {
+    logLine(
+      `CAPTURE_SKIPPED_STALE ${reason}${label ? ` "${label}"` : ''} ` +
+        `expectedUrl=${shortUrl(captureRequest.expectedUrl)} actualUrl=${shortUrl(page.url)} ` +
+        `expectedTitle=${captureRequest.expectedTitle || '(none)'} actualTitle=${page.documentTitle || '(none)'}`
+    );
+    return;
+  }
 
   // Full-page capture renders the page itself, not whatever surface a mode normally captures - that
   // applies just as well in Screen/window and API mode as it does in Tab viewport mode. The queue
   // watchdog above is what actually guards against this hanging the rest of the recording, so this
   // no longer needs to be restricted to specific modes to stay safe.
-  const wantsFullPage = state.settings.fullPage && FULL_PAGE_REASONS.has(reason);
   let fullPage = null;
   try {
     if (wantsFullPage) {
       await reportFullPageProgress(tab.id, 'Preparing full-page screenshot', 0, 1);
-      fullPage = await captureFullPageWithWatchdog(tab.id, tab.windowId);
+      fullPage = await captureFullPageWithWatchdog(tab.id, tab.windowId, captureRequest);
     }
+    if (!(await isActiveCapture(await getState(), sessionId, captureGeneration))) return;
     const fullPageInfo = wantsFullPage
       ? fullPage?.parts
         ? `parts=${fullPage.parts.length} scale=${Math.round(fullPage.captureScale * 100)}%`
@@ -1610,19 +2390,20 @@ async function performCapture(reason, label, requestedSessionId, requestedCaptur
           ? 'ok'
           : 'fell back to visible frame'
       : 'n/a';
-    const heading = await getPageHeading(tab.id).catch(() => '');
     const capture = {
-      title: heading || tab.title || tab.url || 'Untitled page',
-      url: tab.url || '',
+      title: page.title,
+      url: page.url,
       reason,
       label,
       startedAt,
-      sessionId: state.sessionId,
-      captureGeneration: state.captureGeneration,
-      mode: state.settings.captureMode,
+      actionAt: captureRequest.actionAt,
+      requestSequence: captureRequest.requestSequence,
+      sessionId,
+      captureGeneration,
+      mode: settings.captureMode,
       fullPageInfo,
       // Screen/window and stitched full-page images do not share the page viewport coordinate system.
-      modal: !wantsFullPage && (state.settings.captureMode === 'tab' || state.settings.captureMode === 'api') ? modal : null
+      modal: !wantsFullPage && (settings.captureMode === 'tab' || settings.captureMode === 'api') ? modal : null
     };
 
     if (fullPage?.parts?.length) {
@@ -1642,12 +2423,12 @@ async function performCapture(reason, label, requestedSessionId, requestedCaptur
     } else {
       if (wantsFullPage) await setFullPageProgressVisibility(tab.id, true);
       try {
-        rawDataUrl = await grabPngDataUrl(state, tab);
+        rawDataUrl = await grabPngDataUrl(captureRequest, tab);
       } finally {
         if (wantsFullPage) await setFullPageProgressVisibility(tab.id, false);
       }
     }
-    if (wantsFullPage && !fullPage && state.settings.captureMode !== 'screen') {
+    if (wantsFullPage && !fullPage && settings.captureMode !== 'screen' && !responsiveViewport) {
       rawDataUrl = await trimBlankMargins(rawDataUrl);
     }
     return await persistCapture({ ...capture, rawDataUrl });
@@ -1699,8 +2480,6 @@ async function persistFullPageParts({
         label: fullPagePartLabel(capture.label, index, parts.length),
         apiRows: index === 0 ? apiRows : [],
         titleBar: index === 0,
-        stampTimestamp: index === 0,
-        watermarkText: index === parts.length - 1 ? WATERMARK : null,
         jpegQuality: parts.length > 1 ? 0.9 : undefined
       });
       if (entry) entries.push(entry);
@@ -1726,6 +2505,8 @@ async function persistCapture({
   reason,
   label,
   startedAt,
+  actionAt,
+  requestSequence,
   sessionId,
   captureGeneration,
   mode,
@@ -1733,8 +2514,6 @@ async function persistCapture({
   modal,
   apiRows: suppliedApiRows,
   titleBar = true,
-  stampTimestamp = true,
-  watermarkText = WATERMARK,
   jpegQuality
 }) {
   const state = await getState();
@@ -1745,6 +2524,8 @@ async function persistCapture({
   if (!isActiveCapture(await getState(), sessionId, captureGeneration)) return;
 
   const capturedAt = new Date();
+  const actionTime = new Date(actionAt);
+  const actionOccurredAt = Number.isNaN(actionTime.getTime()) ? capturedAt : actionTime;
   const sequence = state.sequence + 1;
   const usesQueuedApiRows = suppliedApiRows === undefined;
   const apiRows = usesQueuedApiRows ? apiQueue : suppliedApiRows;
@@ -1754,8 +2535,6 @@ async function persistCapture({
   };
   const processed = await askOffscreen('OFFSCREEN_PROCESS', {
     dataUrl: rawDataUrl,
-    stampText: stampTimestamp && settings.stampTimestamp ? stampText(capturedAt) : null,
-    watermarkText,
     titleBar: titleBar ? { title, url } : null,
     wantPng: settings.savePng,
     wantJpeg: true,
@@ -1796,11 +2575,14 @@ async function persistCapture({
       const pngBlob = await (await fetch(pngDataUrl)).blob();
       try {
         await writeSelectedCaptureFolderFile(filename, pngBlob);
+        logFileSave('completed', 'png', filename, 'selected-folder');
         const latest = await getState();
         await setState({ folderWrittenFiles: [...latest.folderWrittenFiles, filename] });
       } catch (error) {
+        logFileSave('failed', 'png', filename, 'selected-folder');
         filename = downloadsFilename;
-        const downloadId = await chrome.downloads.download({ url: pngDataUrl, filename, saveAs: false });
+        logFileSave('requested', 'png', filename, 'downloads');
+        const downloadId = await downloadWithHiddenUi({ url: pngDataUrl, filename, saveAs: false });
         const latest = await getState();
         await setState({
           downloadIds: [...latest.downloadIds, downloadId],
@@ -1810,7 +2592,8 @@ async function persistCapture({
         logLine(`FOLDER_FALLBACK #${sequence} ${error.message}`);
       }
     } else {
-      const downloadId = await chrome.downloads.download({ url: pngDataUrl, filename, saveAs: false });
+      logFileSave('requested', 'png', filename, 'downloads');
+      const downloadId = await downloadWithHiddenUi({ url: pngDataUrl, filename, saveAs: false });
       await setState({ downloadIds: [...(await getState()).downloadIds, downloadId] });
     }
   }
@@ -1821,7 +2604,9 @@ async function persistCapture({
       title,
       note: '',
       url,
-      time: `${stampText(capturedAt)}  |  ${reason}${label ? ` "${label}"` : ''}  |  ${mode} mode`,
+      time: `${stampText(actionOccurredAt)}  |  ${reason}${label ? ` "${label}"` : ''}  |  ${mode} mode`,
+      actionAt: actionOccurredAt.toISOString(),
+      requestSequence,
       apiRows,
       base64: jpeg.base64,
       width: jpeg.width,
@@ -1838,6 +2623,8 @@ async function persistCapture({
     note: '',
     mode,
     apiCalls: apiRows.length,
+    actionAt: actionOccurredAt.toISOString(),
+    requestSequence,
     capturedAt: capturedAt.toISOString(),
     filename: settings.savePng ? filename : null
   };
@@ -1852,6 +2639,9 @@ async function persistCapture({
     `#${sequence} ${reason}${label ? ` "${label}"` : ''} mode=${mode} fullPage=${fullPageInfo}` +
       `${apiRows.length ? ` apiCalls=${apiRows.length}` : ''} url=${shortUrl(url)} (${Date.now() - startedAt}ms)`
   );
+  if (sequence % INTERIM_OUTPUT_CAPTURE_INTERVAL === 0) {
+    queueInterimOutput(state.sessionId, sequence);
+  }
   return entry;
 }
 
@@ -1933,23 +2723,19 @@ async function queueApiCall({
 // Neither the service worker (no blob URLs) nor an offscreen document (chrome.runtime only)
 // can write browser downloads, so a short-lived extension page does it.
 async function exportOutputsInWindow(outputFiles, excludedSequences) {
+  const requestId = outputRequestId();
   const params = new URLSearchParams({
     filename: outputFiles[0]?.filename || '',
-    outputs: JSON.stringify(outputFiles)
+    outputs: JSON.stringify(outputFiles),
+    requestId
   });
   if (Array.isArray(excludedSequences)) {
     params.set('excluded', normalizeSequenceList(excludedSequences).join(','));
   }
 
-  const win = await chrome.windows.create({
-    url: `exporter.html?${params}`,
-    type: 'popup',
-    width: 420,
-    height: 200,
-    focused: false
-  });
-
-  const result = await new Promise((resolve) => {
+  let outputWindowId = null;
+  let completeOutputRequest;
+  const resultPromise = new Promise((resolve) => {
     const finish = (value) => {
       clearTimeout(timer);
       chrome.runtime.onMessage.removeListener(onMessage);
@@ -1957,27 +2743,56 @@ async function exportOutputsInWindow(outputFiles, excludedSequences) {
       resolve(value);
     };
     const onMessage = (message) => {
-      if (message?.type === 'OUTPUT_DONE' || message?.type === 'PDF_DONE') {
-        const downloadIds = normalizeIdList(
-          Array.isArray(message.downloadIds)
-            ? message.downloadIds
-            : typeof message.downloadId === 'number'
-              ? [message.downloadId]
-              : []
-        );
-        finish(message.error ? { error: message.error } : { ok: true, downloadIds });
-      }
+      if (message?.type !== 'OUTPUT_DONE' || message.requestId !== requestId) return;
+      const downloadIds = normalizeIdList(
+        Array.isArray(message.downloadIds)
+          ? message.downloadIds
+          : typeof message.downloadId === 'number'
+            ? [message.downloadId]
+            : []
+      );
+      finish(message.error ? { error: message.error } : { ok: true, downloadIds });
     };
     const onRemoved = (windowId) => {
-      if (windowId === win.id) finish({ error: 'The output window was closed early.' });
+      if (windowId === outputWindowId) finish({ error: 'The output window was closed early.' });
     };
     const timer = setTimeout(() => finish({ error: 'Timed out while writing output files.' }), 120000);
 
     chrome.runtime.onMessage.addListener(onMessage);
     chrome.windows.onRemoved.addListener(onRemoved);
+    completeOutputRequest = finish;
   });
 
-  if (result.ok) await chrome.windows.remove(win.id).catch(() => {});
+  try {
+    const win = await chrome.windows.create({
+      url: `exporter.html?${params}`,
+      type: 'popup',
+      width: 420,
+      height: 200,
+      focused: false
+    });
+    outputWindowId = win?.id;
+    if (!Number.isSafeInteger(outputWindowId)) {
+      completeOutputRequest({ error: 'The output window could not be opened.' });
+    }
+  } catch (error) {
+    completeOutputRequest({ error: `Could not open the output window: ${error.message}` });
+  }
+
+  const result = await resultPromise;
+
+  if (result.ok) {
+    for (const output of outputFiles) {
+      logFileSave('completed', output.format, output.filename, 'downloads');
+    }
+    if (Number.isSafeInteger(outputWindowId)) {
+      await chrome.windows.remove(outputWindowId).catch(() => {});
+    }
+  } else {
+    for (const output of outputFiles) {
+      logFileSave('failed', output.format, output.filename, 'downloads');
+    }
+  }
   return result;
 }
 
@@ -1992,10 +2807,38 @@ async function storedFrames() {
   const stored = await chrome.storage.local.get(null);
   const frames = Object.entries(stored)
     .filter(([key]) => key.startsWith(FRAME_PREFIX))
-    .map(([, frame]) => frame)
-    .sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
+    .map(([, frame]) => frame);
   if (!frames.length && Array.isArray(stored[FRAMES_KEY])) frames.push(...stored[FRAMES_KEY]);
-  return frames;
+  return frames.sort(compareCaptureFlow);
+}
+
+function captureActionMilliseconds(capture) {
+  const milliseconds = Date.parse(capture?.actionAt || '');
+  return Number.isFinite(milliseconds) ? milliseconds : null;
+}
+
+function captureSequence(capture) {
+  const sequence = Number(capture?.sequence);
+  return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : 0;
+}
+
+function captureRequestOrder(capture) {
+  const requestSequence = Number(capture?.requestSequence);
+  return Number.isSafeInteger(requestSequence) && requestSequence > 0 ? requestSequence : null;
+}
+
+function compareCaptureFlow(left, right) {
+  const leftActionAt = captureActionMilliseconds(left);
+  const rightActionAt = captureActionMilliseconds(right);
+  if (leftActionAt !== null && rightActionAt !== null && leftActionAt !== rightActionAt) {
+    return leftActionAt - rightActionAt;
+  }
+  const leftRequestOrder = captureRequestOrder(left);
+  const rightRequestOrder = captureRequestOrder(right);
+  if (leftRequestOrder !== null && rightRequestOrder !== null && leftRequestOrder !== rightRequestOrder) {
+    return leftRequestOrder - rightRequestOrder;
+  }
+  return captureSequence(left) - captureSequence(right);
 }
 
 function captureNote(value) {
@@ -2006,7 +2849,7 @@ function captureNote(value) {
 
 async function setCaptureNote(sessionId, sequence, value) {
   const state = await getState();
-  if (!state.recording || sessionId !== state.sessionId) return state;
+  if ((!state.recording && !completedEvidenceFor(state)) || sessionId !== state.sessionId) return state;
 
   const normalizedSequence = Number(sequence);
   const note = captureNote(value);
@@ -2046,17 +2889,90 @@ function outputBytes(format, pages) {
   return format === 'docx' ? buildDocx(pages) : buildPdf(pages);
 }
 
+function interimDownloadFilename(sessionId) {
+  return `flow-captures/${sessionId}/${INTERIM_OUTPUT_FILENAME}`;
+}
+
+function queueInterimOutput(sessionId, requestedSequence) {
+  interimOutputChain = interimOutputChain
+    .catch(() => {})
+    .then(() => writeInterimOutput(sessionId, requestedSequence))
+    .catch(async (error) => {
+      logLine(`INTERIM_OUTPUT_FAILED session=${sessionId} error=${error.message}`);
+      await flushLog();
+      const state = await getState().catch(() => null);
+      if (state?.recording && state.sessionId === sessionId) {
+        await setState({ interimOutputError: `Could not update the interim PDF: ${error.message}` });
+      }
+    });
+  return interimOutputChain;
+}
+
+async function writeInterimOutput(sessionId, requestedSequence) {
+  const state = await getState();
+  if (!state.recording || state.sessionId !== sessionId || state.sequence < requestedSequence) return null;
+
+  const frames = await storedFrames();
+  if (!frames.length) return null;
+
+  const latestFrameSequence = Math.max(...frames.map(captureSequence));
+  const previousSequence = Number(state.interimOutput?.captureSequence) || 0;
+  if (state.interimOutput?.sessionId === sessionId && previousSequence >= latestFrameSequence) {
+    return state.interimOutput;
+  }
+
+  const selectedFolder = savesToSelectedFolder(state)
+    ? await writableSelectedCaptureFolder(state)
+    : null;
+  const filename = selectedFolder ? INTERIM_OUTPUT_FILENAME : interimDownloadFilename(sessionId);
+  logFileSave('requested', 'interim-pdf', filename, selectedFolder ? 'selected-folder' : 'downloads');
+  try {
+    const result = selectedFolder
+      ? await writeCaptureFolderFile(selectedFolder, filename, outputBytes('pdf', outputPages(frames)))
+      : await exportOutputsInWindow([{ format: 'pdf', filename, overwrite: true }]);
+    if (result?.error) throw new Error(result.error);
+
+    const latest = await getState();
+    if (!latest.recording || latest.sessionId !== sessionId) return null;
+    const next = await setState({
+      interimOutput: {
+        sessionId,
+        filename: INTERIM_OUTPUT_FILENAME,
+        destination: selectedFolder ? 'selected-folder' : 'downloads',
+        downloadFilename: selectedFolder ? null : filename,
+        downloadId: selectedFolder ? null : result.downloadIds?.at(-1) ?? null,
+        captureCount: frames.length,
+        captureSequence: latestFrameSequence,
+        updatedAt: new Date().toISOString()
+      },
+      interimOutputError: null
+    });
+    logFileSave('completed', 'interim-pdf', filename, selectedFolder ? 'selected-folder' : 'downloads');
+    logLine(`INTERIM_OUTPUT captures=${frames.length} file=${filename}`);
+    return next.interimOutput;
+  } catch (error) {
+    logFileSave('failed', 'interim-pdf', filename, selectedFolder ? 'selected-folder' : 'downloads');
+    throw error;
+  }
+}
+
 async function exportOutputsToSelectedFolder(directoryHandle, outputFiles, excludedSequences) {
   const excluded = new Set(normalizeSequenceList(excludedSequences));
   const frames = (await storedFrames()).filter((frame) => !excluded.has(Number(frame.sequence)));
   if (!frames.length) return { error: 'No selected screenshots are available for the selected output.' };
 
   const pages = outputPages(frames);
+  let currentOutput = null;
   try {
     for (const output of outputFiles) {
+      currentOutput = output;
       await writeCaptureFolderFile(directoryHandle, output.filename, outputBytes(output.format, pages));
+      logFileSave('completed', output.format, output.filename, 'selected-folder');
     }
   } catch (error) {
+    if (currentOutput) {
+      logFileSave('failed', currentOutput.format, currentOutput.filename, 'selected-folder');
+    }
     throw normalizeFolderAccessError(error);
   }
   return { ok: true };
@@ -2179,6 +3095,7 @@ async function refreshRecoveredFolderAccess(state) {
 // Chrome preserves extension storage across a browser restart, but tab and window IDs belong to
 // the old browser process. Rebind the active recording to a live tab before accepting new captures.
 async function recoverRecordingSession(preferredTabId, force = false) {
+  await browserRestartInterruptionChain;
   sessionRecoveryChain = sessionRecoveryChain
     .catch(() => {})
     .then(async () => {
@@ -2234,17 +3151,27 @@ async function recoverRecordingSession(preferredTabId, force = false) {
 }
 
 async function startRecording(tab, settings, outputFolderName = null) {
+  await interimOutputChain.catch(() => {});
   const sessionId = `session_${fileTimestamp(new Date())}`;
   await chrome.storage.local.remove(LOG_KEY).catch(() => {});
   await chrome.storage.local.remove(PDF_EXCLUSIONS_KEY).catch(() => {});
   await chrome.storage.local.remove(SESSION_CONTROL_KEY).catch(() => {});
   await clearSessionTracking();
   await clearStoredFrames();
-  await setState({ lastError: null });
+  captureRequestSequence = 0;
+  await setState({
+    lastError: null,
+    pendingResumeFolder: null,
+    completedEvidence: null,
+    interruptedRecording: null,
+    interimOutput: null,
+    interimOutputError: null
+  });
   await setDownloadUi(false);
   apiQueue = [];
   lastRawCaptureHash = '';
-  lastTabTitle = tab.title || '';
+  lastTabTitles.clear();
+  lastTabTitles.set(tab.id, tab.title || '');
 
   const merged = { ...defaultState.settings, ...(await getState()).settings, ...settings };
   merged.captureApi = merged.captureMode === 'api';
@@ -2290,6 +3217,10 @@ async function startRecording(tab, settings, outputFolderName = null) {
     streamActive,
     fullPageProgress: null,
     lastError: null,
+    completedEvidence: null,
+    interruptedRecording: null,
+    interimOutput: null,
+    interimOutputError: null,
     settings: merged
   });
   sessionRecoveryPending = false;
@@ -2307,13 +3238,15 @@ async function startRecording(tab, settings, outputFolderName = null) {
 }
 
 async function restoreFolderFrames(captures) {
+  const restoredCaptures = [];
+  const skippedFiles = [];
   for (const { fileHandle, entry } of captures) {
-    let dataUrl = await imageFileToDataUrl(fileHandle);
+    let dataUrl;
+    let processed;
     try {
-      const processed = await askOffscreen('OFFSCREEN_PROCESS', {
+      dataUrl = await imageFileToDataUrl(fileHandle);
+      processed = await askOffscreen('OFFSCREEN_PROCESS', {
         dataUrl,
-        stampText: null,
-        watermarkText: null,
         titleBar: null,
         wantPng: false,
         wantJpeg: true,
@@ -2322,29 +3255,50 @@ async function restoreFolderFrames(captures) {
       if (processed?.error || !processed?.jpeg) {
         throw new Error(processed?.error || `Could not load ${fileHandle.name}.`);
       }
-      await storeFrame({
-        sequence: entry.sequence,
-        title: entry.title,
-        note: entry.note || '',
-        url: entry.url,
-        time: `${entry.capturedAt}  |  ${entry.reason}  |  resumed folder`,
-        apiRows: [],
-        base64: processed.jpeg.base64,
-        width: processed.jpeg.width,
-        height: processed.jpeg.height
-      });
+    } catch (error) {
+      skippedFiles.push(fileHandle.name);
+      logLine(`FOLDER_RESTORE_SKIPPED file=${fileHandle.name} error=${error?.message || 'unreadable image'}`);
+      continue;
     } finally {
       dataUrl = null;
     }
+
+    await storeFrame({
+      sequence: entry.sequence,
+      title: entry.title,
+      note: entry.note || '',
+      url: entry.url,
+      time: `${entry.actionAt || entry.capturedAt}  |  ${entry.reason}  |  resumed folder`,
+      actionAt: entry.actionAt || entry.capturedAt,
+      requestSequence: entry.requestSequence || entry.sequence,
+      apiRows: [],
+      base64: processed.jpeg.base64,
+      width: processed.jpeg.width,
+      height: processed.jpeg.height
+    });
+    restoredCaptures.push({ fileHandle, entry });
   }
+  return { captures: restoredCaptures, skippedFiles };
+}
+
+async function prepareResumeFromFolder() {
+  const state = await recoverRecordingSession(undefined, true);
+  if (state.recording) return setState({ lastError: 'Stop the current recording before selecting a resume folder.' });
+
+  const folder = await writableCaptureFolder();
+  return setState({
+    pendingResumeFolder: { name: folder.name || 'selected folder' },
+    lastError: null
+  });
 }
 
 async function resumeRecordingFromFolder(tab, settings) {
+  await interimOutputChain.catch(() => {});
   const folder = await writableCaptureFolder();
   const restored = await scanCaptureFolder(folder);
   if (!restored.captures.length) {
     const started = await startRecording(tab, { ...settings, savePng: true }, restored.folderName);
-    return { ...started, notice: EMPTY_CAPTURE_FOLDER_NOTICE };
+    return started.recording ? { ...started, notice: EMPTY_CAPTURE_FOLDER_NOTICE } : started;
   }
 
   const sessionId = String(restored.sessionId || '').trim() || `resumed_${fileTimestamp(new Date())}`;
@@ -2358,17 +3312,25 @@ async function resumeRecordingFromFolder(tab, settings) {
   };
   merged.captureApi = merged.captureMode === 'api';
   let streamActive = false;
+  let restoredFrames;
 
   await chrome.storage.local.remove(LOG_KEY).catch(() => {});
   await chrome.storage.local.remove(PDF_EXCLUSIONS_KEY).catch(() => {});
   await chrome.storage.local.remove(SESSION_CONTROL_KEY).catch(() => {});
   await clearSessionTracking();
   await clearStoredFrames();
-  await setState({ lastError: null });
+  await setState({
+    lastError: null,
+    completedEvidence: null,
+    interruptedRecording: null,
+    interimOutput: null,
+    interimOutputError: null
+  });
   await setDownloadUi(false);
   apiQueue = [];
   lastRawCaptureHash = '';
-  lastTabTitle = tab.title || '';
+  lastTabTitles.clear();
+  lastTabTitles.set(tab.id, tab.title || '');
 
   try {
     await ensureOffscreen();
@@ -2377,7 +3339,7 @@ async function resumeRecordingFromFolder(tab, settings) {
       if (result.error) throw new Error(result.error);
       streamActive = true;
     }
-    await restoreFolderFrames(restored.captures);
+    restoredFrames = await restoreFolderFrames(restored.captures);
   } catch (error) {
     await closeScreenWindow();
     await closeOffscreen();
@@ -2387,16 +3349,28 @@ async function resumeRecordingFromFolder(tab, settings) {
       recording: false,
       streamActive: false,
       outputFolder: null,
+      pendingResumeFolder: null,
       folderWrittenFiles: [],
       folderAccessNeeded: false,
       lastError: error.message
     });
   }
 
+  if (!restoredFrames.captures.length) {
+    await closeScreenWindow();
+    await closeOffscreen();
+    const started = await startRecording(tab, { ...settings, savePng: true }, restored.folderName);
+    return started.recording ? { ...started, notice: NO_READABLE_CAPTURE_FOLDER_NOTICE } : started;
+  }
+
   await chrome.storage.local.set({
     [SESSION_CONTROL_KEY]: { sessionId, paused: false, captureGeneration: 0 }
   });
   await replaceSessionTracking(sessionId, [tab.id], [tab.windowId]);
+  captureRequestSequence = Math.max(
+    captureRequestSequence,
+    ...restoredFrames.captures.map(({ entry }) => Number(entry.requestSequence) || Number(entry.sequence) || 0)
+  );
   const state = await setState({
     recording: true,
     paused: false,
@@ -2405,12 +3379,17 @@ async function resumeRecordingFromFolder(tab, settings) {
     windowId: tab.windowId,
     sessionId,
     sequence: restored.nextSequence - 1,
-    captures: restored.captures.map(({ entry }) => entry).slice(-300),
+    captures: restoredFrames.captures.map(({ entry }) => entry).slice(-300),
     pdfExcludedSequences: [],
     trackedTabIds: [tab.id],
     trackedWindowIds: [tab.windowId],
     downloadIds: [],
     outputFolder: { name: restored.folderName },
+    pendingResumeFolder: null,
+    completedEvidence: null,
+    interruptedRecording: null,
+    interimOutput: null,
+    interimOutputError: null,
     folderWrittenFiles: [],
     folderAccessNeeded: false,
     apiSeen: 0,
@@ -2425,9 +3404,12 @@ async function resumeRecordingFromFolder(tab, settings) {
 
   await injectRecordingScripts(tab.id, merged.captureApi);
   await updateBadge(state);
-  logLine(`SESSION_RESUMED folder=${restored.folderName} captures=${restored.captures.length}`);
+  logLine(`SESSION_RESUMED folder=${restored.folderName} captures=${restoredFrames.captures.length}`);
   await captureNow('start');
-  return getState();
+  const resumed = await getState();
+  return restoredFrames.skippedFiles.length
+    ? { ...resumed, notice: skippedUnreadableCaptureNotice(restoredFrames.skippedFiles.length) }
+    : resumed;
 }
 
 async function reconnectCaptureFolder() {
@@ -2459,6 +3441,22 @@ async function deleteSessionDownloads(ids) {
     });
     await chrome.downloads.erase({ id }).catch(() => {});
   }
+}
+
+async function removeInterimOutput(state, interimOutput, directoryHandle = null) {
+  if (!interimOutput || interimOutput.sessionId !== state.sessionId) return false;
+  if (interimOutput.destination === 'selected-folder') {
+    await removeCaptureFolderFiles(
+      directoryHandle || await writableSelectedCaptureFolder(state),
+      [interimOutput.filename]
+    );
+  } else if (interimOutput.destination === 'downloads' && Number.isSafeInteger(interimOutput.downloadId)) {
+    await deleteSessionDownloads([interimOutput.downloadId]);
+  } else {
+    return false;
+  }
+  logLine(`INTERIM_OUTPUT_REMOVED session=${state.sessionId}`);
+  return true;
 }
 
 function normalizeOutputFormats(value, settings = {}) {
@@ -2501,6 +3499,68 @@ function outputFilesFor(value, fallback, formats) {
   ];
 }
 
+function missingFolderFile(error) {
+  return error?.name === 'NotFoundError' || /(?:no file named|not found)/i.test(String(error?.message || ''));
+}
+
+async function folderOutputFileExists(directoryHandle, filename) {
+  try {
+    await directoryHandle.getFileHandle(filename);
+    return true;
+  } catch (error) {
+    if (missingFolderFile(error)) return false;
+    throw normalizeFolderAccessError(error);
+  }
+}
+
+async function downloadedOutputFileExists(filename) {
+  if (typeof chrome.downloads?.search !== 'function') return false;
+  try {
+    const relativeFilename = String(filename || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!relativeFilename) return false;
+    const downloads = await chrome.downloads.search({});
+    return downloads.some((download) => {
+      const downloadedName = String(download?.filename || '').replace(/\\/g, '/');
+      return downloadedName === relativeFilename || downloadedName.endsWith(`/${relativeFilename}`);
+    });
+  } catch {
+    return false;
+  }
+}
+
+function versionedEvidenceBase(base, timestamp, index) {
+  const suffix = `_${timestamp}${index ? `_${index + 1}` : ''}`;
+  return `${base.slice(0, Math.max(1, 120 - suffix.length))}${suffix}`;
+}
+
+function evidenceDownloadDirectory(evidence) {
+  return evidence.downloadDirectory || `flow-captures/${evidence.sessionId}`;
+}
+
+async function evidenceOutputFiles(requestedOutputFilename, evidence, formats, directoryHandle) {
+  const fallback = `${evidence.sessionId}_evidence`;
+  const base = outputFilenameBase(requestedOutputFilename, fallback);
+  const downloadDirectory = evidenceDownloadDirectory(evidence);
+  const hasNameConflict = async (outputFiles) => {
+    const checks = outputFiles.map((output) => (
+      directoryHandle
+        ? folderOutputFileExists(directoryHandle, output.filename)
+        : downloadedOutputFileExists(`${downloadDirectory}/${output.filename}`)
+    ));
+    return (await Promise.all(checks)).some(Boolean);
+  };
+
+  let outputFiles = outputFilesFor(base, fallback, formats);
+  if (!(await hasNameConflict(outputFiles))) return outputFiles;
+
+  const timestamp = fileTimestamp(new Date());
+  for (let index = 0; index < 100; index += 1) {
+    outputFiles = outputFilesFor(versionedEvidenceBase(base, timestamp, index), fallback, formats);
+    if (!(await hasNameConflict(outputFiles))) return outputFiles;
+  }
+  throw new Error('Could not choose an unused evidence document name.');
+}
+
 function savedOutputFields(outputFiles) {
   const savedOutputFilenames = outputFiles.map((output) => output.filename);
   const savedPdfFilename = outputFiles.find((output) => output.format === 'pdf')?.filename;
@@ -2511,22 +3571,68 @@ function savedOutputFields(outputFiles) {
 }
 
 async function revealSavedFiles(downloadId) {
+  let showError = null;
   try {
-    if (typeof downloadId === 'number') {
+    if (Number.isSafeInteger(downloadId) && typeof chrome.downloads?.show === 'function') {
       await chrome.downloads.show(downloadId);
-      return;
+      return { opened: true, fallback: false };
+    }
+  } catch (error) {
+    showError = error;
+    console.warn('Could not open the downloaded file location:', error.message);
+  }
+  try {
+    if (typeof chrome.downloads?.showDefaultFolder !== 'function') {
+      throw showError || new Error('The browser cannot open the Downloads folder.');
     }
     await chrome.downloads.showDefaultFolder();
+    return { opened: true, fallback: true };
   } catch (error) {
     console.warn('Could not open the download folder:', error.message);
+    return { opened: false, fallback: Boolean(showError), error: error.message };
   }
+}
+
+async function waitForDownloadCompletion(downloadId) {
+  if (
+    !Number.isSafeInteger(downloadId) ||
+    typeof chrome.downloads?.onChanged?.addListener !== 'function'
+  ) {
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    let finished = false;
+    let timer = 0;
+    const finish = (state = null) => {
+      if (finished) return;
+      finished = true;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      clearTimeout(timer);
+      resolve(state);
+    };
+    const onChanged = (change) => {
+      const downloadState = change?.state?.current;
+      if (change?.id === downloadId && downloadState && downloadState !== 'in_progress') {
+        finish(downloadState);
+      }
+    };
+    chrome.downloads.onChanged.addListener(onChanged);
+    timer = setTimeout(() => finish('timed_out'), 120000);
+
+    if (typeof chrome.downloads.search === 'function') {
+      chrome.downloads.search({ id: downloadId }).then((items) => {
+        if (items[0]?.state && items[0].state !== 'in_progress') finish(items[0].state);
+      }).catch(() => {});
+    }
+  });
 }
 
 // Writes selected document formats from whatever has been captured so far without stopping the recording - a checkpoint
 // the user can hand off or review while the same session keeps adding to the same numbered sequence.
 // Unlike the final export, the folder is not opened here - only the final save should interrupt the
 // user, since this can happen many times over the course of one recording.
-async function exportOutputNow(requestedOutputFilename, outputFormats, excludedSequences, reveal = false) {
+async function exportOutputNow(requestedOutputFilename, outputFormats, excludedSequences) {
   if (apiQueue.length) await captureNow('final-api-calls');
   await captureChain.catch(() => {});
 
@@ -2563,10 +3669,6 @@ async function exportOutputNow(requestedOutputFilename, outputFormats, excludedS
   if (result.error) {
     return setState({ lastError: `${outputLabel(formats)} export failed: ${result.error}` });
   }
-  const revealId = result.downloadIds?.at(-1);
-  if (reveal && !selectedFolder && typeof revealId === 'number') {
-    await revealSavedFiles(revealId);
-  }
   return {
     ...(await setState({ lastError: null, ...(selectedFolder ? { folderAccessNeeded: false } : {}) })),
     ...savedOutputFields(outputFiles)
@@ -2577,15 +3679,88 @@ function checkpointOutputFilename(sessionId) {
   return `${sessionId}_checkpoint_${fileTimestamp(new Date())}`;
 }
 
-async function saveFlow(reveal, requestedOutputFilename, excludedSequences, outputFormats) {
+async function saveFlow(requestedOutputFilename, excludedSequences, outputFormats) {
   const state = await recoverRecordingSession(undefined, true);
   if (!state.recording) return setState({ lastError: 'Not currently recording.' });
   return exportOutputNow(
     requestedOutputFilename || checkpointOutputFilename(state.sessionId),
     outputFormats,
-    excludedSequences,
-    reveal
+    excludedSequences
   );
+}
+
+async function generateEvidence(requestedOutputFilename, excludedSequences, outputFormats) {
+  const state = await getState();
+  if (state.recording) {
+    return setState({ lastError: 'Stop the recording before generating evidence documents.' });
+  }
+  const evidence = completedEvidenceFor(state);
+  if (!evidence) {
+    return setState({ lastError: 'There is no completed recording available for evidence generation.' });
+  }
+  if (!(await storedFrames()).length) {
+    return setState({ lastError: 'The completed screenshots are no longer available for evidence generation.' });
+  }
+
+  const formats = normalizeOutputFormats(outputFormats, state.settings);
+  if (!hasOutputFormat(formats)) {
+    return setState({ lastError: 'Choose PDF, Word, or both before generating evidence.' });
+  }
+  const excluded = Array.isArray(excludedSequences)
+    ? normalizeSequenceList(excludedSequences)
+    : normalizeSequenceList(state.pdfExcludedSequences);
+  const selectedFolder = evidence.outputFolderName
+    ? await writableCompletedEvidenceFolder(evidence)
+    : null;
+  const outputFiles = await evidenceOutputFiles(
+    requestedOutputFilename,
+    evidence,
+    formats,
+    selectedFolder
+  );
+  logLine(`EVIDENCE_EXPORT formats=${Object.entries(formats).filter(([, enabled]) => enabled).map(([format]) => format).join(',')} excluded=${excluded.length}`);
+
+  // Evidence is generated after the recording ended, when the normal recording-level download
+  // suppression has already been restored. Keep Chrome's download UI hidden until the exporter
+  // confirms every requested document is complete; the popup toast is the user-facing feedback.
+  if (!selectedFolder) await setDownloadUi(false);
+  try {
+    const result = selectedFolder
+      ? await exportOutputsToSelectedFolder(selectedFolder, outputFiles, excluded)
+      : await exportOutputsInWindow(
+        outputFiles.map((output) => ({
+          ...output,
+          filename: `${evidenceDownloadDirectory(evidence)}/${output.filename}`
+        })),
+        excluded
+      );
+    await flushLog();
+    if (result.error) {
+      return setState({ lastError: `${outputLabel(formats)} evidence generation failed: ${result.error}` });
+    }
+    let interimOutput = state.interimOutput;
+    let interimOutputError = state.interimOutputError;
+    try {
+      if (await removeInterimOutput(state, interimOutput, selectedFolder)) {
+        interimOutput = null;
+        interimOutputError = null;
+      }
+    } catch (error) {
+      interimOutputError = `Could not remove the interim PDF: ${error.message}`;
+      logLine(`INTERIM_OUTPUT_REMOVE_FAILED error=${error.message}`);
+    }
+    return {
+      ...(await setState({
+        lastError: null,
+        interimOutput,
+        interimOutputError,
+        ...(selectedFolder ? { folderAccessNeeded: false } : {})
+      })),
+      ...savedOutputFields(outputFiles)
+    };
+  } finally {
+    if (!selectedFolder) await setDownloadUi(true);
+  }
 }
 
 async function setRecordingPaused(paused) {
@@ -2616,26 +3791,70 @@ async function stopRecording(
   keepFiles = true,
   requestedOutputFilename,
   excludedSequences,
-  reveal = true,
+  reveal = false,
   createPdf = true,
   outputFormats
 ) {
+  const stateBeforeStop = await getState();
+  const capturesWerePending = pendingCaptureCount > 0;
+  if (capturesWerePending && stateBeforeStop.recording && stateBeforeStop.sessionId) {
+    await chrome.storage.local.set({
+      [SESSION_CONTROL_KEY]: {
+        sessionId: stateBeforeStop.sessionId,
+        paused: true,
+        captureGeneration: stateBeforeStop.captureGeneration + 1
+      }
+    });
+    cancelCaptureRequest(stateBeforeStop.sessionId, stateBeforeStop.captureGeneration);
+    logLine(`CAPTURE_CANCELLED stop pending=${pendingCaptureCount}`);
+    await clearFullPageProgress(stateBeforeStop.tabId);
+  }
+
   // Anything still queued would be lost, so give it a final frame to sit under.
-  if (keepFiles && apiQueue.length) {
+  if (keepFiles && apiQueue.length && !capturesWerePending) {
     await captureNow('final-api-calls');
   }
-  await captureChain.catch(() => {});
+  if (capturesWerePending) {
+    let drainTimer;
+    try {
+      const drained = await Promise.race([
+        captureChain.then(() => true, () => true),
+        new Promise((resolve) => {
+          drainTimer = setTimeout(() => resolve(false), STOP_CAPTURE_DRAIN_MS);
+        })
+      ]);
+      if (!drained) logLine(`CAPTURE_DRAIN_TIMEOUT stop after=${STOP_CAPTURE_DRAIN_MS}ms`);
+    } finally {
+      clearTimeout(drainTimer);
+    }
+  } else {
+    await captureChain.catch(() => {});
+  }
+  await interimOutputChain.catch(() => {});
   const state = await getState();
+  if (keepFiles) await setDownloadUi(false);
   logLine(`SESSION_END keepFiles=${keepFiles} createPdf=${createPdf} captures=${state.captures.length}`);
   await configureApiHooks(state.trackedTabIds, false);
   const excluded = Array.isArray(excludedSequences)
     ? normalizeSequenceList(excludedSequences)
     : normalizeSequenceList(state.pdfExcludedSequences);
   const savedToFolder = hasSelectedCaptureFolder(state);
+  const completedEvidence = state.recording && keepFiles && state.captures.length
+    ? {
+        sessionId: state.sessionId,
+        captureCount: state.captures.length,
+        outputFolderName: savedToFolder ? state.outputFolder?.name || null : null,
+        downloadDirectory: savedToFolder ? null : `flow-captures/${state.sessionId}`,
+        completedAt: new Date().toISOString()
+      }
+    : null;
   const deletedFileCount = savedToFolder ? state.folderWrittenFiles.length : state.downloadIds.length;
   let lastError = null;
   let revealId = state.downloadIds[state.downloadIds.length - 1];
   let outputFiles = [];
+  let fileLocationResult = null;
+  let interimOutput = state.interimOutput;
+  let interimOutputError = state.interimOutputError;
 
   if (!keepFiles) {
     if (savedToFolder) {
@@ -2646,6 +3865,15 @@ async function stopRecording(
       }
     } else {
       await deleteSessionDownloads(state.downloadIds);
+    }
+    try {
+      if (await removeInterimOutput(state, interimOutput)) {
+        interimOutput = null;
+        interimOutputError = null;
+      }
+    } catch (error) {
+      interimOutputError = `Could not remove the interim PDF: ${error.message}`;
+      logLine(`INTERIM_OUTPUT_REMOVE_FAILED error=${error.message}`);
     }
   } else {
     const formats = normalizeOutputFormats(outputFormats, state.settings);
@@ -2671,40 +3899,76 @@ async function stopRecording(
     }
 
     if (state.captures.length) {
+      const manifestFilename = savedToFolder
+        ? 'flow-manifest.json'
+        : `flow-captures/${state.sessionId}/flow-manifest.json`;
+      const manifestDestination = savedToFolder ? 'selected-folder' : 'downloads';
+      logFileSave('requested', 'manifest', manifestFilename, manifestDestination);
+      const manifestCaptures = [...state.captures].sort(compareCaptureFlow);
       const manifest = {
         sessionId: state.sessionId,
-        startedAt: state.captures[0]?.capturedAt ?? null,
+        startedAt: manifestCaptures[0]?.actionAt ?? manifestCaptures[0]?.capturedAt ?? null,
         endedAt: new Date().toISOString(),
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         captureMode: state.settings.captureMode,
         screenshotCount: state.captures.length,
-        screenshots: state.captures,
+        screenshots: manifestCaptures,
         debugLog: await readDebugLog()
       };
       const manifestUrl =
         'data:application/json;base64,' +
         btoa(unescape(encodeURIComponent(JSON.stringify(manifest, null, 2))));
       if (savedToFolder) {
-        await writeCaptureFolderFile(
-          await writableSelectedCaptureFolder(state),
-          'flow-manifest.json',
-          JSON.stringify(manifest, null, 2)
-        );
+        try {
+          await writeCaptureFolderFile(
+            await writableSelectedCaptureFolder(state),
+            manifestFilename,
+            JSON.stringify(manifest, null, 2)
+          );
+          logFileSave('completed', 'manifest', manifestFilename, manifestDestination);
+        } catch (error) {
+          logFileSave('failed', 'manifest', manifestFilename, manifestDestination);
+          throw error;
+        }
       } else {
-        await chrome.downloads.download({
+        const manifestDownloadId = await downloadWithHiddenUi({
           url: manifestUrl,
-          filename: `flow-captures/${state.sessionId}/flow-manifest.json`,
+          filename: manifestFilename,
           saveAs: false
-        }).then((id) => { revealId = id; });
+        });
+        const downloadState = await waitForDownloadCompletion(manifestDownloadId);
+        logFileSave(
+          downloadState === 'complete' ? 'completed' : downloadState || 'requested',
+          'manifest',
+          manifestFilename,
+          manifestDestination
+        );
+        if (typeof revealId !== 'number') revealId = manifestDownloadId;
       }
     }
   }
 
-  await cleanupCaptureResources();
+  if (keepFiles && createPdf && outputFiles.length && !lastError) {
+    try {
+      if (await removeInterimOutput(state, interimOutput)) {
+        interimOutput = null;
+        interimOutputError = null;
+      }
+    } catch (error) {
+      interimOutputError = `Could not remove the interim PDF: ${error.message}`;
+      logLine(`INTERIM_OUTPUT_REMOVE_FAILED error=${error.message}`);
+    }
+  }
 
-  // The shelf is suppressed during recording, so opening the folder is the only cue that files landed.
+  // Keep the browser download UI hidden until the final document has been revealed.
+  await cleanupCaptureResources({
+    restoreDownloadUi: false,
+    clearFrames: !completedEvidence,
+    clearSessionControl: false
+  });
+
   await flushLog();
-  if (keepFiles && reveal && state.captures.length && !savedToFolder) await revealSavedFiles(revealId);
+  const shouldRevealSavedFiles = keepFiles && reveal && state.captures.length;
 
   const next = await setState({
     recording: false,
@@ -2716,42 +3980,39 @@ async function stopRecording(
     fullPageProgress: null,
     downloadIds: [],
     outputFolder: null,
+    pendingResumeFolder: null,
+    completedEvidence,
+    interruptedRecording: null,
+    interimOutput,
+    interimOutputError,
     folderWrittenFiles: [],
     folderAccessNeeded: false,
     lastError:
       lastError ?? (keepFiles ? null : `Deleted ${deletedFileCount} file(s) from this session.`)
   });
-  await updateBadge(next);
-  return outputFiles.length ? { ...next, ...savedOutputFields(outputFiles) } : next;
-}
-
-async function startNewRecording(tab, settings, excludedSequences, requestedOutputFilename, outputFormats) {
-  const state = await recoverRecordingSession(undefined, true);
-  const nextSettings = { ...state.settings, ...settings };
-  let previousOutput = null;
-  if (state.recording) {
-    if (!state.paused) await setRecordingPaused(true);
-    // Finish the old flow first, but do not reveal its folder: Ctrl+N is intended to keep users
-    // working in the current tab while the next session starts in its own capture folder.
-    previousOutput = await stopRecording(
-      true,
-      requestedOutputFilename,
-      excludedSequences,
-      false,
-      true,
-      outputFormats
-    );
+  await chrome.storage.local.remove(SESSION_CONTROL_KEY).catch(() => {});
+  try {
+    await updateBadge(next);
+    // The output is complete before the recording is marked stopped, then its folder is revealed.
+    // File System Access handles do not expose a native path. For a selected capture folder,
+    // opening Downloads is the closest location browser extensions may reveal.
+    if (shouldRevealSavedFiles) {
+      fileLocationResult = await revealSavedFiles(savedToFolder ? undefined : revealId);
+    }
+    return {
+      ...next,
+      ...(outputFiles.length ? savedOutputFields(outputFiles) : {}),
+      ...(fileLocationResult
+        ? {
+            fileLocationOpened: fileLocationResult.opened,
+            fileLocationFallback: fileLocationResult.fallback,
+            ...(fileLocationResult.error ? { fileLocationError: fileLocationResult.error } : {})
+          }
+        : {})
+    };
+  } finally {
+    await setDownloadUi(true);
   }
-  const started = await startRecording(tab, nextSettings);
-  return previousOutput?.savedOutputFilenames
-    ? {
-        ...started,
-        ...savedOutputFields(previousOutput.savedOutputFilenames.map((filename) => ({
-          format: /\.docx$/i.test(filename) ? 'docx' : 'pdf',
-          filename
-        })))
-      }
-    : started;
 }
 
 async function openOutputDialog(mode) {
@@ -2759,14 +4020,15 @@ async function openOutputDialog(mode) {
   if (!state.recording) return setState({ lastError: 'Not currently recording.' });
   if (!state.captures.length) return setState({ lastError: 'Nothing captured yet.' });
 
-  const acceptedMode = ['checkpoint', 'final', 'new-recording'].includes(mode)
+  const acceptedMode = ['checkpoint', 'final'].includes(mode)
     ? mode
     : 'checkpoint';
+  const params = new URLSearchParams({ mode: acceptedMode });
   await chrome.windows.create({
-    url: `output-dialog.html?mode=${encodeURIComponent(acceptedMode)}`,
+    url: `output-dialog.html?${params}`,
     type: 'popup',
     width: 390,
-    height: 320,
+    height: 370,
     focused: true
   });
   return state;
@@ -2793,34 +4055,51 @@ async function adoptActiveTab(tabId) {
   await setState({ tabId, windowId: tab.windowId });
 }
 
+async function trackAndFocusNewTab(state, tab) {
+  await trackSessionTab(state, tab);
+  logLine(`NEW_TAB opened from recorded tab (tabId=${tab.id}), bringing it into focus`);
+  await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+}
+
+async function captureRecordedPageEvent(details, reason, label, expectedTitle = '') {
+  const state = await recoverRecordingSession(details.tabId);
+  if (!state.recording || !state.trackedTabIds.includes(details.tabId)) return;
+  const capture = captureNow(reason, label, state, undefined, {
+    tabId: details.tabId,
+    actionAt: Date.now(),
+    expectedUrl: details.url || '',
+    expectedTitle
+  });
+  await adoptActiveTab(details.tabId);
+  await capture;
+}
+
 chrome.webNavigation.onCompleted.addListener(async (details) => {
-  if (details.frameId === 0 && (await isRecordedTab(details.tabId))) {
-    await adoptActiveTab(details.tabId);
-    await captureNow('navigation');
-  }
+  if (details.frameId === 0) await captureRecordedPageEvent(details, 'navigation');
 });
 
 // Single-page apps change routes without a full page load.
 chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
-  if (details.frameId === 0 && (await isRecordedTab(details.tabId))) {
-    await adoptActiveTab(details.tabId);
-    await captureNow('url-change');
-  }
+  if (details.frameId === 0) await captureRecordedPageEvent(details, 'url-change');
 });
 
 chrome.webNavigation.onReferenceFragmentUpdated.addListener(async (details) => {
-  if (details.frameId === 0 && (await isRecordedTab(details.tabId))) {
-    await adoptActiveTab(details.tabId);
-    await captureNow('url-change');
-  }
+  if (details.frameId === 0) await captureRecordedPageEvent(details, 'url-change');
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
-  if (!changeInfo.title || !(await isRecordedTab(tabId))) return;
-  if (changeInfo.title === lastTabTitle) return;
-  lastTabTitle = changeInfo.title;
+  if (!changeInfo.title || changeInfo.title === lastTabTitles.get(tabId)) return;
+  lastTabTitles.set(tabId, changeInfo.title);
+  const state = await recoverRecordingSession(tabId);
+  if (!state.recording || !state.trackedTabIds.includes(tabId)) return;
+  const capture = captureNow('title-change', changeInfo.title, state, undefined, {
+    tabId,
+    actionAt: Date.now(),
+    expectedTitle: changeInfo.title
+  });
   await adoptActiveTab(tabId);
-  await captureNow('title-change', changeInfo.title);
+  await capture;
 });
 
 // Manually switching back to a tab the recording already knows about (the original tab, or a child
@@ -2831,6 +4110,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  lastTabTitles.delete(tabId);
   const state = await recoverRecordingSession();
   if (!state.recording) return;
   await untrackSessionTab(state, tabId);
@@ -2852,14 +4132,15 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 // display it also determines what actually shows up in the capture. Bring the new tab forward, and
 // treat it as part of the same recording so switching between it and its opener keeps capturing.
 chrome.tabs.onCreated.addListener(async (tab) => {
-  const state = await recoverRecordingSession(tab.openerTabId);
-  if (!state.recording || !state.trackedTabIds.includes(tab.openerTabId)) return;
-  await trackSessionTab(state, tab);
-  logLine(`NEW_TAB opened from recorded tab (tabId=${tab.id}), bringing it into focus`);
-  // Activating the tab below fires onActivated, which is what actually adopts it as the current
-  // capture target - calling adoptActiveTab here too just raced that same update and logged twice.
-  await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
-  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  const linkTarget = claimNewTabLinkTarget(tab);
+  try {
+    const sourceTabId = linkTarget?.sourceTabId ?? tab.openerTabId;
+    const state = await recoverRecordingSession(sourceTabId);
+    if (!state.recording || !state.trackedTabIds.includes(sourceTabId)) return;
+    await trackAndFocusNewTab(state, tab);
+  } finally {
+    completeNewTabLinkHandoff(linkTarget);
+  }
 });
 
 chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
@@ -2873,8 +4154,9 @@ chrome.commands.onCommand.addListener(async (command) => {
   const state = await recoverRecordingSession(undefined, true);
   if (!state.recording || state.paused) return;
 
-  if (command === 'capture-panel') await captureNow('devtools-panel');
-  if (command === 'capture-manual') await captureNow('manual-hotkey');
+  const target = { tabId: state.tabId, windowId: state.windowId };
+  if (command === 'capture-panel') await captureNow('devtools-panel', undefined, state, undefined, target);
+  if (command === 'capture-manual') await captureNow('manual-hotkey', undefined, state, undefined, target);
   if (command === 'capture-later') scheduleDelayedCapture(state.tabId, state);
 });
 
@@ -2890,9 +4172,21 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
   }
 });
 
-function recoverAfterBrowserRestart() {
+async function recoverAfterBrowserRestart() {
   sessionRecoveryPending = true;
-  recoverRecordingSession().catch((error) => console.error('Could not recover recording session:', error));
+  browserRestartInterruptionChain = browserRestartInterruptionChain
+    .catch(() => {})
+    .then(async () => {
+      try {
+        const state = await interruptRecordingAfterBrowserRestart();
+        if (!state.recording && state.pendingResumeFolder?.name) {
+          await setState({ pendingResumeFolder: null });
+        }
+      } catch (error) {
+        console.error('Could not preserve the interrupted recording:', error);
+      }
+    });
+  return browserRestartInterruptionChain;
 }
 
 chrome.runtime.onStartup.addListener(recoverAfterBrowserRestart);
@@ -2930,12 +4224,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
         try {
-          sendResponse(await startRecording(tab, message.settings));
+          sendResponse(
+            current.pendingResumeFolder?.name
+              ? await resumeRecordingFromFolder(tab, message.settings)
+              : await startRecording(tab, message.settings)
+          );
         } catch (error) {
-          sendResponse(await setState({ recording: false, folderAccessNeeded: false, lastError: error.message }));
+          sendResponse(await setState({
+            recording: false,
+            pendingResumeFolder: null,
+            folderAccessNeeded: false,
+            lastError: error.message
+          }));
         }
         break;
       }
+
+      case 'PREPARE_RESUME_FROM_FOLDER':
+        try {
+          sendResponse(await prepareResumeFromFolder());
+        } catch (error) {
+          sendResponse(await setState({ pendingResumeFolder: null, lastError: error.message }));
+        }
+        break;
 
       case 'RESUME_FROM_FOLDER': {
         const current = await getState();
@@ -2954,6 +4265,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse(await setState({
             recording: false,
             outputFolder: null,
+            pendingResumeFolder: null,
             folderWrittenFiles: [],
             folderAccessNeeded: false,
             lastError: error.message
@@ -2983,7 +4295,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'SET_PDF_EXCLUSIONS': {
         const state = await getState();
-        if (!state.recording || message.sessionId !== state.sessionId) {
+        if ((!state.recording && !completedEvidenceFor(state)) || message.sessionId !== state.sessionId) {
           sendResponse(state);
           break;
         }
@@ -2995,6 +4307,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ...state, pdfExcludedSequences: excluded });
         break;
       }
+
+      case 'GENERATE_EVIDENCE':
+        try {
+          sendResponse(
+            await generateEvidence(
+              message.outputFilename || message.pdfFilename,
+              message.excludedSequences,
+              message.outputFormats
+            )
+          );
+        } catch (error) {
+          sendResponse(await setState({
+            lastError: `${requestedOutputLabel(message.outputFormats)} evidence generation failed: ${error.message}`
+          }));
+        }
+        break;
 
       case 'SET_CAPTURE_NOTE':
         try {
@@ -3019,7 +4347,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               message.keepFiles !== false,
               message.outputFilename || message.pdfFilename,
               message.excludedSequences,
-              true,
+              Boolean(message.reveal),
               message.createPdf !== false,
               message.outputFormats
             )
@@ -3034,28 +4362,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         break;
 
-      case 'EXPORT_PDF_NOW':
-        try {
-          sendResponse(
-            await exportOutputNow(
-              message.outputFilename || message.pdfFilename,
-              message.outputFormats,
-              message.excludedSequences
-            )
-          );
-        } catch (error) {
-          sendResponse(await setState({
-            folderAccessNeeded: needsFolderReconnect(error),
-            lastError: `${requestedOutputLabel(message.outputFormats)} export failed: ${error.message}`
-          }));
-        }
-        break;
-
       case 'SAVE_FLOW':
         try {
           sendResponse(
             await saveFlow(
-              Boolean(message.reveal),
               message.outputFilename || message.pdfFilename,
               message.excludedSequences,
               message.outputFormats
@@ -3068,30 +4378,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }));
         }
         break;
-
-      case 'START_NEW_RECORDING': {
-        const [activeTab] = sender.tab
-          ? [sender.tab]
-          : await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!activeTab) {
-          sendResponse(await setState({ lastError: 'No active tab found.' }));
-          break;
-        }
-        try {
-          sendResponse(
-            await startNewRecording(
-              activeTab,
-              message.settings,
-              message.excludedSequences,
-              message.outputFilename || message.pdfFilename,
-              message.outputFormats
-            )
-          );
-        } catch (error) {
-          sendResponse(await setState({ recording: false, folderAccessNeeded: false, lastError: error.message }));
-        }
-        break;
-      }
 
       case 'CAPTURE_NOW':
         await captureNow('manual', undefined, await recoverRecordingSession(undefined, true));
@@ -3127,9 +4413,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ? state.settings.captureOnScroll
             : state.settings.captureOnClick);
         const tabId = sender.tab?.id;
-        if (state.recording && allowed && tabId !== undefined && (await isRecordedTab(tabId))) {
+        if (state.recording && allowed && tabId !== undefined && state.trackedTabIds.includes(tabId)) {
+          const capture = !state.paused
+            ? captureNow(reason, message.label, state, message.modal, {
+              tabId,
+              windowId: sender.tab?.windowId,
+              actionAt: message.actionAt,
+              opensNewTab: Boolean(message.opensNewTab)
+            })
+            : null;
           await adoptActiveTab(tabId);
-          if (!state.paused) await captureNow(reason, message.label, undefined, message.modal);
+          if (capture) await capture;
         }
         sendResponse({ ok: true });
         break;

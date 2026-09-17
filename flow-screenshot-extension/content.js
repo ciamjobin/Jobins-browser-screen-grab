@@ -26,6 +26,9 @@ const INTERACTIVE_SELECTOR = [
   '[role="radio"]',
   '[role="switch"]',
   '[role="tab"]',
+  '[role="link"]',
+  'a[href]',
+  'area[href]',
   'summary',
   '[type="submit"]'
 ].join(',');
@@ -49,6 +52,11 @@ const LIST_SELECTOR = [
 ].join(',');
 
 const DIALOG_SELECTOR = ['dialog', '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]'].join(',');
+const LINK_SELECTOR = ['a[href]', 'area[href]', '[role="link"]'].join(',');
+const COOKIE_CONSENT_IDENTITY_PATTERN =
+  /\b(?:cookie[-_:\s]*(?:banner|consent|notice|popup|modal|law|preference|settings)|cookiebot|cookieyes|cookielaw|onetrust|trustarc|didomi|quantcast|usercentrics|osano|termly|consent[-_:\s]*(?:banner|notice|modal|manager|preferences?|popup)|privacy[-_:\s]*(?:manager|preferences?|choices?))\b/i;
+const COOKIE_CONSENT_TEXT_PATTERN =
+  /(?=[\s\S]*\bcookies?\b)(?=[\s\S]*\b(?:accept|reject|manage|allow|decline|optional|preferences|settings)\b)/i;
 const MODAL_SCROLL_MIN_VIEWPORT = 320;
 const MODAL_SCROLL_MIN_DIALOG_RATIO = 0.65;
 const MODAL_SCROLL_MIN_SCROLLER_RATIO = 0.55;
@@ -63,6 +71,7 @@ let suppressScrollUntil = 0;
 let fullPageCaptureActive = false;
 let countdownTimer = 0;
 let activeDialogFingerprint = null;
+let cookieConsentSurfaces = [];
 const scrollAnchors = new WeakMap();
 const capturedDialogs = new WeakSet();
 
@@ -93,17 +102,23 @@ function isScrollCapture(reason) {
   return reason === 'scrolled' || reason === 'modal-scrolled';
 }
 
-function requestCapture(reason, label, options = {}) {
+function actionTimestamp(value, fallback) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : fallback;
+}
+
+function requestCapture(reason, label, options = {}, actionAt) {
   const key = `${reason}:${label}`;
-  const now = Date.now();
-  if (key === lastSent.key && now - lastSent.at < 800) return;
-  lastSent = { key, at: now };
+  const requestedAt = Date.now();
+  const sourceActionAt = actionTimestamp(actionAt, requestedAt);
+  if (key === lastSent.key && requestedAt - lastSent.at < 800) return;
+  lastSent = { key, at: requestedAt };
 
   // Chromium can briefly resize the visible viewport while it displays a debugger notice during
   // ordinary full-page capture; that must not read as a user scroll.
-  if (!isScrollCapture(reason)) suppressScrollUntil = now + 2500;
+  if (!isScrollCapture(reason)) suppressScrollUntil = requestedAt + 2500;
 
-  sendRuntimeMessage({ type: 'CLICK_CAPTURE', reason, label, ...options });
+  sendRuntimeMessage({ type: 'CLICK_CAPTURE', reason, label, ...options, actionAt: sourceActionAt });
 }
 
 const SETTLE_QUIET_MS = 400;
@@ -152,12 +167,12 @@ function looksBusy() {
 // A button click on a client-rendered page often swaps in a loading spinner before the real next
 // screen appears. Both are worth keeping: the interim frame shows the action was taken, the settled
 // one shows the result. Fires immediately, then again once the DOM stops changing.
-async function requestCaptureAfterSettle(reason, label) {
+async function requestCaptureAfterSettle(reason, label, actionAt) {
   // Dialogs often mount after their click handler's async state update or entrance animation.
   // Give that small window to appear so its opening frame replaces the underlying page-click frame.
   await new Promise((resolve) => setTimeout(resolve, MODAL_OPEN_GRACE_MS));
   if (activeModal()) return;
-  requestCapture(reason, label);
+  requestCapture(reason, label, undefined, actionAt);
 
   const deadline = Date.now() + SETTLE_MAX_WAIT_MS;
   await waitForQuiet(SETTLE_QUIET_MS, SETTLE_MAX_WAIT_MS);
@@ -167,7 +182,7 @@ async function requestCaptureAfterSettle(reason, label) {
   // A distinct reason so the settled shot is not deduped against the interim one by label alone;
   // the background still drops it if the page turned out not to have changed at all.
   if (activeModal()) return;
-  requestCapture(`${reason}-loaded`, label);
+  requestCapture(`${reason}-loaded`, label, undefined, actionAt);
 }
 
 function describeEditedField(element) {
@@ -177,7 +192,7 @@ function describeEditedField(element) {
   return `${describe(element)} edited`;
 }
 
-function requestEditCapture(element) {
+function requestEditCapture(element, actionAt) {
   const dialog = modalForElement(element);
   if (activeModal() && !dialog) return;
   clearTimeout(editTimer);
@@ -188,7 +203,8 @@ function requestEditCapture(element) {
     requestCapture(
       activeDialog ? 'modal-edited' : 'field-edited',
       describeEditedField(element),
-      activeDialog ? modalCaptureOptions(activeDialog) : undefined
+      activeDialog ? modalCaptureOptions(activeDialog) : undefined,
+      actionAt
     );
   }, 700);
 }
@@ -204,11 +220,12 @@ function selectedTextFromActiveElement() {
 }
 
 function requestSelectionCapture() {
+  const actionAt = Date.now();
   clearTimeout(selectionTimer);
   selectionTimer = setTimeout(() => {
     if (activeModal()) return;
     const text = selectedTextFromActiveElement().trim().replace(/\s+/g, ' ');
-    if (text) requestCapture('text-selected', text.slice(0, 80));
+    if (text) requestCapture('text-selected', text.slice(0, 80), undefined, actionAt);
   }, 500);
 }
 
@@ -218,8 +235,73 @@ function isVisible(element) {
   return rect.width > 0 && rect.height > 0;
 }
 
+function matchesSelector(element, selector) {
+  try {
+    return Boolean(element?.matches?.(selector));
+  } catch {
+    return false;
+  }
+}
+
+function isDialogSurface(element) {
+  return matchesSelector(element, DIALOG_SELECTOR);
+}
+
+function isCookieConsentSurface(element) {
+  if (!(element instanceof Element) || !isVisible(element)) return false;
+  if (element === document.documentElement || element === document.body) return false;
+
+  const identity = [
+    element.id,
+    element.getAttribute('id'),
+    element.getAttribute('class'),
+    element.getAttribute('data-testid'),
+    element.getAttribute('data-test'),
+    element.getAttribute('data-cookieconsent')
+  ].filter(Boolean).join(' ');
+  const text = [element.getAttribute('aria-label'), element.innerText, element.textContent]
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, 1200);
+  const isConsent = COOKIE_CONSENT_IDENTITY_PATTERN.test(identity) || COOKIE_CONSENT_TEXT_PATTERN.test(text);
+  if (!isConsent) return false;
+
+  const rect = element.getBoundingClientRect();
+  const width = Number(rect.width) || 0;
+  const height = Number(rect.height) || 0;
+  if (width < 160 || height < 32) return false;
+
+  const viewportWidth = Math.max(1, Number(window.innerWidth) || 0);
+  const viewportHeight = Math.max(1, Number(window.innerHeight) || 0);
+  const top = Number(rect.top) || 0;
+  const bottom = top + height;
+  const position = typeof getComputedStyle === 'function'
+    ? getComputedStyle(element).position || ''
+    : element.style?.position || '';
+  const positionedOverlay = /fixed|sticky|absolute/i.test(position);
+  const nearViewportEdge = top <= viewportHeight * 0.2 || bottom >= viewportHeight * 0.8;
+  const edgeBanner = nearViewportEdge && width >= viewportWidth * 0.35 && height <= viewportHeight * 0.45;
+
+  return isDialogSurface(element) || positionedOverlay || edgeBanner;
+}
+
+function isDescendantOf(element, ancestor) {
+  for (let current = element?.parentElement; current; current = current.parentElement) {
+    if (current === ancestor) return true;
+  }
+  return false;
+}
+
+function collectCookieConsentSurfaces() {
+  const candidates = [...document.querySelectorAll('*')].filter(isCookieConsentSurface);
+  return candidates.filter((candidate) => !candidates.some((other) => other !== candidate && isDescendantOf(candidate, other)));
+}
+
 function visibleDialogs() {
-  return [...document.querySelectorAll(DIALOG_SELECTOR)].filter(isVisible);
+  return [...new Set([
+    ...document.querySelectorAll(DIALOG_SELECTOR),
+    ...cookieConsentSurfaces
+  ])].filter(isVisible);
 }
 
 function activeModal() {
@@ -228,8 +310,10 @@ function activeModal() {
 }
 
 function modalForElement(element) {
-  const dialog = element?.closest?.(DIALOG_SELECTOR);
-  return dialog && isVisible(dialog) ? dialog : null;
+  for (let current = element; current instanceof Element; current = current.parentElement) {
+    if ((isDialogSurface(current) || isCookieConsentSurface(current)) && isVisible(current)) return current;
+  }
+  return null;
 }
 
 function dialogFingerprint(dialog) {
@@ -307,12 +391,14 @@ function modalCaptureOptions(dialog) {
       height,
       viewportWidth,
       viewportHeight,
-      compact: !hasModalScrollbar(dialog)
+      // A consent banner is part of the page state, not a stand-alone dialog. Preserve the full
+      // viewport so the banner and the page it affects appear together in one evidence image.
+      compact: !isCookieConsentSurface(dialog) && !hasModalScrollbar(dialog)
     }
   };
 }
 
-async function requestModalActionAfterSettle(reason, label, sourceDialog) {
+async function requestModalActionAfterSettle(reason, label, sourceDialog, actionAt) {
   const deadline = Date.now() + SETTLE_MAX_WAIT_MS;
   await waitForQuiet(SETTLE_QUIET_MS, SETTLE_MAX_WAIT_MS);
   while (looksBusy() && Date.now() < deadline) {
@@ -322,18 +408,26 @@ async function requestModalActionAfterSettle(reason, label, sourceDialog) {
   const dialog = activeModal();
   // Opening a different modal is already captured by scanForDialogs().
   if (dialog && dialog !== sourceDialog) return;
-  requestCapture(reason, label, dialog ? modalCaptureOptions(dialog) : undefined);
+  requestCapture(reason, label, dialog ? modalCaptureOptions(dialog) : undefined, actionAt);
 }
 
 // A modal can be opened by a control we do not recognise, so watch for the dialog itself appearing.
 function scanForDialogs() {
+  const actionAt = Date.now();
   clearTimeout(dialogTimer);
   dialogTimer = setTimeout(() => {
-    const dialogs = [...document.querySelectorAll(DIALOG_SELECTOR)];
-    for (const dialog of dialogs) {
+    dialogTimer = 0;
+    const previousCookieConsentSurfaces = cookieConsentSurfaces;
+    cookieConsentSurfaces = collectCookieConsentSurfaces();
+    const dialogs = visibleDialogs();
+    for (const dialog of [...new Set([
+      ...document.querySelectorAll(DIALOG_SELECTOR),
+      ...previousCookieConsentSurfaces,
+      ...cookieConsentSurfaces
+    ])]) {
       if (!isVisible(dialog)) capturedDialogs.delete(dialog);
     }
-    const dialog = dialogs.filter(isVisible).at(-1);
+    const dialog = dialogs.at(-1);
     if (!dialog) {
       activeDialogFingerprint = null;
       return;
@@ -349,7 +443,7 @@ function scanForDialogs() {
     }
     capturedDialogs.add(dialog);
     activeDialogFingerprint = fingerprint;
-    requestCapture('dialog-opened', describe(dialog), modalCaptureOptions(dialog));
+    requestCapture('dialog-opened', describe(dialog), modalCaptureOptions(dialog), actionAt);
   }, 350);
 }
 
@@ -357,29 +451,71 @@ new MutationObserver(scanForDialogs).observe(document.documentElement, {
   childList: true,
   subtree: true,
   attributes: true,
-  attributeFilter: ['open', 'hidden', 'aria-hidden', 'aria-modal', 'role', 'class', 'style']
+  attributeFilter: ['open', 'hidden', 'aria-hidden', 'aria-modal', 'role', 'class', 'id', 'aria-label', 'style']
 });
 scanForDialogs();
+
+function clickPathElements(event) {
+  const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+  const elements = [];
+  for (const candidate of [event.target, ...path]) {
+    const element = candidate instanceof Element
+      ? candidate
+      : candidate?.parentElement instanceof Element
+        ? candidate.parentElement
+        : null;
+    if (element && !elements.includes(element)) elements.push(element);
+  }
+  return elements;
+}
+
+function closestClickTarget(event, selector) {
+  for (const element of clickPathElements(event)) {
+    const match = element.closest?.(selector);
+    if (match) return match;
+  }
+  return null;
+}
+
+function linkCaptureOptions(link, dialog, event) {
+  const options = dialog ? modalCaptureOptions(dialog) || {} : {};
+  const target = String(link.getAttribute?.('target') || '').trim().toLowerCase();
+  const opensNewTab =
+    !link.hasAttribute?.('download') &&
+    (target && target !== '_self' || event.button === 1 || event.ctrlKey || event.metaKey || event.shiftKey);
+  if (opensNewTab) options.opensNewTab = true;
+  return options;
+}
 
 function isManualShortcut(event) {
   return event.ctrlKey && event.altKey && !event.shiftKey && event.key?.toLowerCase() === 'q';
 }
 
-function isControlShortcut(event, key) {
+function isSaveAndOpenLocationShortcut(event) {
+  return (
+    event.ctrlKey &&
+    event.altKey &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    event.key?.toLowerCase() === 's'
+  );
+}
+
+function isSaveAndStopShortcut(event) {
   return (
     event.ctrlKey &&
     !event.altKey &&
     !event.shiftKey &&
     !event.metaKey &&
-    event.key?.toLowerCase() === key
+    event.key?.toLowerCase() === 's'
   );
 }
 
-function isFinalSaveShortcut(event) {
+function isCheckpointSaveShortcut(event) {
   return (
     event.ctrlKey &&
-    event.altKey &&
-    !event.shiftKey &&
+    !event.altKey &&
+    event.shiftKey &&
     !event.metaKey &&
     event.key?.toLowerCase() === 's'
   );
@@ -402,19 +538,19 @@ window.addEventListener(
       requestCapture('manual-hotkey', 'Ctrl+Alt+Q');
       return;
     }
-    if (isFinalSaveShortcut(event)) {
+    if (isSaveAndOpenLocationShortcut(event)) {
       preventShortcut(event);
       if (!event.repeat) requestOutputDialog('final');
       return;
     }
-    if (isControlShortcut(event, 's')) {
+    if (isCheckpointSaveShortcut(event)) {
       preventShortcut(event);
       if (!event.repeat) requestOutputDialog('checkpoint');
       return;
     }
-    if (isControlShortcut(event, 'n')) {
+    if (isSaveAndStopShortcut(event)) {
       preventShortcut(event);
-      if (!event.repeat) requestOutputDialog('new-recording');
+      if (!event.repeat) requestOutputDialog('final');
     }
   },
   true
@@ -424,23 +560,34 @@ window.addEventListener(
 window.addEventListener(
   'click',
   (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
+    const target = clickPathElements(event)[0];
+    if (!target) return;
+    const actionAt = Date.now();
     const openDialog = activeModal();
 
+    // Links can start unloading the document before a delayed settled-click capture gets sent.
+    // Record their intent immediately; the normal navigation listener still records the result.
+    const link = closestClickTarget(event, LINK_SELECTOR);
+    if (link) {
+      const dialog = modalForElement(link);
+      if (openDialog && !dialog) return;
+      requestCapture(dialog ? 'modal-link' : 'link', describe(link), linkCaptureOptions(link, dialog, event), actionAt);
+      return;
+    }
+
     // A picker may be explored with many clicks and scrolls. Keep only the committed value.
-    const option = target.closest(OPTION_SELECTOR);
+    const option = closestClickTarget(event, OPTION_SELECTOR);
     if (option) {
       const dialog = modalForElement(option) || openDialog;
       if (dialog) {
-        requestModalActionAfterSettle('modal-selection', describe(option), dialog);
+        requestModalActionAfterSettle('modal-selection', describe(option), dialog, actionAt);
       } else {
-        requestCapture('selection', describe(option));
+        requestCapture('selection', describe(option), undefined, actionAt);
       }
       return;
     }
 
-    const list = target.closest(LIST_SELECTOR);
+    const list = closestClickTarget(event, LIST_SELECTOR);
     if (list) {
       return;
     }
@@ -450,7 +597,7 @@ window.addEventListener(
     // create captures until the modal closes or the user acts inside it.
     if (openDialog && !dialog) return;
 
-    const trigger = target.closest(INTERACTIVE_SELECTOR) || target.closest('a[href]');
+    const trigger = closestClickTarget(event, INTERACTIVE_SELECTOR);
     if (!trigger) return;
 
     if (trigger instanceof HTMLInputElement && (trigger.type === 'checkbox' || trigger.type === 'radio')) return;
@@ -459,14 +606,14 @@ window.addEventListener(
     if (opensList) return;
 
     if (dialog) {
-      requestModalActionAfterSettle('modal-click', describe(trigger), dialog);
+      requestModalActionAfterSettle('modal-click', describe(trigger), dialog, actionAt);
       return;
     }
 
     // A button click on a client-rendered page often swaps in a loading spinner before the real
     // next screen appears; capturing immediately would just record the spinner. Waiting for the
     // page to stop actively changing catches the settled result instead.
-    requestCaptureAfterSettle('click', describe(trigger));
+    requestCaptureAfterSettle('click', describe(trigger), actionAt);
   },
   true
 );
@@ -481,6 +628,7 @@ const SCROLL_MIN_TRAVEL = 40;
 document.addEventListener(
   'scroll',
   (event) => {
+    const actionAt = Date.now();
     const target = event.target;
     const isDocument = target === document || target === document.documentElement || target === document.body;
     const scroller = isDocument ? document.documentElement : target;
@@ -535,7 +683,8 @@ document.addEventListener(
       requestCapture(
         modalScroller ? 'modal-scrolled' : 'scrolled',
         modalScroller ? `${describe(dialog)} ${label}` : label,
-        modalScroller ? modalCaptureOptions(dialog) : undefined
+        modalScroller ? modalCaptureOptions(dialog) : undefined,
+        actionAt
       );
     }, 450);
   },
@@ -546,6 +695,7 @@ document.addEventListener(
 window.addEventListener(
   'change',
   (event) => {
+    const actionAt = Date.now();
     const element = event.target;
     const openDialog = activeModal();
     const dialog = modalForElement(element);
@@ -555,7 +705,8 @@ window.addEventListener(
       requestCapture(
         dialog ? 'modal-selection' : 'selection',
         `${describe(element)} = ${chosen}`.slice(0, 80),
-        dialog ? modalCaptureOptions(dialog) : undefined
+        dialog ? modalCaptureOptions(dialog) : undefined,
+        actionAt
       );
       return;
     }
@@ -565,7 +716,8 @@ window.addEventListener(
       requestCapture(
         dialog ? 'modal-edited' : 'toggle',
         `${describe(element)} = ${state}`.slice(0, 80),
-        dialog ? modalCaptureOptions(dialog) : undefined
+        dialog ? modalCaptureOptions(dialog) : undefined,
+        actionAt
       );
     }
   },
@@ -581,7 +733,7 @@ window.addEventListener(
       element instanceof HTMLTextAreaElement ||
       element?.isContentEditable
     ) {
-      requestEditCapture(element);
+      requestEditCapture(element, Date.now());
     }
   },
   true

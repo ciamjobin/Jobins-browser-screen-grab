@@ -5,15 +5,13 @@ import {
 } from './capture-folder.js';
 
 const statusEl = document.getElementById('status');
+const extensionVersionEl = document.getElementById('extensionVersion');
 const toastEl = document.getElementById('toast');
 const toggleEl = document.getElementById('toggle');
 const pauseResumeEl = document.getElementById('pauseResume');
 const captureNowEl = document.getElementById('captureNow');
 const captureLaterEl = document.getElementById('captureLater');
 const saveFlowEl = document.getElementById('saveFlow');
-const saveAndOpenEl = document.getElementById('saveAndOpen');
-const startNewRecordingEl = document.getElementById('startNewRecording');
-const exportPdfNowEl = document.getElementById('exportPdfNow');
 const captureListEl = document.getElementById('captureList');
 const settingsEl = document.querySelector('.settings');
 const mainActionsEl = document.getElementById('mainActions');
@@ -21,18 +19,22 @@ const confirmEl = document.getElementById('confirm');
 const filenamePromptEl = document.getElementById('filenamePrompt');
 const deleteConfirmEl = document.getElementById('deleteConfirm');
 const outputFilenameEl = document.getElementById('outputFilename');
+const outputPromptTitleEl = document.getElementById('outputPromptTitle');
 const outputPdfEl = document.getElementById('outputPdf');
 const outputDocxEl = document.getElementById('outputDocx');
 const shortcutHintEl = document.getElementById('shortcutHint');
 const selectAllCapturesEl = document.getElementById('selectAllCaptures');
 const captureSelectionSummaryEl = document.getElementById('captureSelectionSummary');
 const saveWithNameEl = document.getElementById('saveWithName');
+const saveWithNameAndOpenEl = document.getElementById('saveWithNameAndOpen');
 const fullPageProgressEl = document.getElementById('fullPageProgress');
 const fullPageProgressLabelEl = document.getElementById('fullPageProgressLabel');
 const fullPageProgressPercentEl = document.getElementById('fullPageProgressPercent');
 const fullPageProgressBarEl = document.getElementById('fullPageProgressBar');
 const fullPageProgressTrackEl = fullPageProgressBarEl.parentElement;
 const resumeCaptureFromFolderEl = document.getElementById('resumeCaptureFromFolder');
+const completedEvidenceActionsEl = document.getElementById('completedEvidenceActions');
+const generateEvidenceEl = document.getElementById('generateEvidence');
 const extensionOnlyButtons = [...document.querySelectorAll('button')];
 const CAPTURE_LIST_PAGE_SIZE = 50;
 
@@ -58,7 +60,6 @@ const controls = {
   captureMode: document.getElementById('captureMode'),
   captureOnClick: document.getElementById('captureOnClick'),
   captureOnScroll: document.getElementById('captureOnScroll'),
-  stampTimestamp: document.getElementById('stampTimestamp'),
   fullPage: document.getElementById('fullPage'),
   savePng: document.getElementById('savePng'),
   savePdf: document.getElementById('savePdf')
@@ -75,6 +76,25 @@ function hasExtensionRuntime() {
   } catch {
     return false;
   }
+}
+
+async function getCurrentTabId() {
+  try {
+    const tabs = await globalThis.chrome?.tabs?.query?.({ active: true, currentWindow: true });
+    const tabId = tabs?.[0]?.id;
+    return Number.isSafeInteger(tabId) ? tabId : null;
+  } catch {
+    return null;
+  }
+}
+
+function showExtensionVersion() {
+  try {
+    const version = chrome.runtime?.getManifest?.().version;
+    if (!version) return;
+    extensionVersionEl.textContent = `v${version}`;
+    extensionVersionEl.hidden = false;
+  } catch {}
 }
 
 function showRuntimeError() {
@@ -101,13 +121,25 @@ function showActionError(action, error) {
   statusEl.className = 'status error';
 }
 
-function showSaveResult(state) {
+function showSaveResult(state, { locationRequested = false, selectedFolderName = null } = {}) {
   const names = Array.isArray(state?.savedOutputFilenames)
     ? state.savedOutputFilenames
     : state?.savedPdfFilename
       ? [state.savedPdfFilename]
       : [];
   if (names.length) {
+    if (locationRequested) {
+      const message = selectedFolderName
+        ? `Saved as ${names.join(' and ')}. Opened Downloads; Chrome cannot directly open the selected capture folder.`
+        : state?.fileLocationOpened === false
+          ? `Saved as ${names.join(' and ')}, but could not open the file location: ${state.fileLocationError || 'Chrome did not provide a download location.'}`
+          : state?.fileLocationFallback
+            ? `Saved as ${names.join(' and ')} and opened Downloads.`
+            : `Saved as ${names.join(' and ')} and opened the file location.`;
+      statusEl.textContent = message;
+      statusEl.className = state?.fileLocationOpened === false ? 'status error' : 'status idle';
+      return;
+    }
     showToast(`Saved as ${names.join(' and ')}`);
     return;
   }
@@ -131,6 +163,24 @@ function send(type, payload = {}) {
   } catch (error) {
     return Promise.reject(error);
   }
+}
+
+async function getPopupState() {
+  const [state, currentTabId] = await Promise.all([send('GET_STATE'), getCurrentTabId()]);
+  const trackedTabIds = Array.isArray(state?.trackedTabIds) ? state.trackedTabIds : [];
+  return {
+    ...state,
+    recordingElsewhere: Boolean(
+      state?.recording &&
+        Number.isSafeInteger(currentTabId) &&
+        trackedTabIds.length &&
+        !trackedTabIds.includes(currentTabId)
+    )
+  };
+}
+
+function isRecordingHere(state) {
+  return Boolean(state?.recording && !state?.recordingElsewhere);
 }
 
 function folderPermissionError() {
@@ -160,12 +210,12 @@ function preloadSelectedCaptureFolder() {
   return selectedCaptureFolderHandleLoad;
 }
 
-function renewSelectedCaptureFolderWritePermission() {
-  const folderName = renderedState?.recording ? renderedState.outputFolder?.name : null;
-  if (!folderName) return Promise.resolve();
+function renewSelectedCaptureFolderWritePermission(folderName = null) {
+  const targetFolderName = folderName ?? (renderedState?.recording ? renderedState.outputFolder?.name : null);
+  if (!targetFolderName) return Promise.resolve();
 
   const directoryHandle = selectedCaptureFolderHandle;
-  if (directoryHandle?.name !== folderName) {
+  if (directoryHandle?.name !== targetFolderName) {
     preloadSelectedCaptureFolder();
     return Promise.reject(folderPermissionError());
   }
@@ -181,7 +231,6 @@ function readSettings() {
     captureMode: controls.captureMode.value,
     captureOnClick: controls.captureOnClick.checked,
     captureOnScroll: controls.captureOnScroll.checked,
-    stampTimestamp: controls.stampTimestamp.checked,
     fullPage: controls.fullPage.checked,
     savePng: controls.savePng.checked,
     savePdf: controls.savePdf.checked
@@ -196,8 +245,37 @@ function captureSequences(captures = currentCaptures) {
 
 function captureListKey(captures) {
   return captures
-    .map((capture) => [capture.sequence, capture.capturedAt, capture.title, capture.note, capture.url, capture.reason].join('\u001f'))
+    .map((capture) => [capture.sequence, capture.actionAt, capture.capturedAt, capture.title, capture.note, capture.url, capture.reason].join('\u001f'))
     .join('\u001e');
+}
+
+function captureActionMilliseconds(capture) {
+  const milliseconds = Date.parse(capture?.actionAt || '');
+  return Number.isFinite(milliseconds) ? milliseconds : null;
+}
+
+function captureSequence(capture) {
+  const sequence = Number(capture?.sequence);
+  return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : 0;
+}
+
+function captureRequestOrder(capture) {
+  const requestSequence = Number(capture?.requestSequence);
+  return Number.isSafeInteger(requestSequence) && requestSequence > 0 ? requestSequence : null;
+}
+
+function compareCaptureFlow(left, right) {
+  const leftActionAt = captureActionMilliseconds(left);
+  const rightActionAt = captureActionMilliseconds(right);
+  if (leftActionAt !== null && rightActionAt !== null && leftActionAt !== rightActionAt) {
+    return leftActionAt - rightActionAt;
+  }
+  const leftRequestOrder = captureRequestOrder(left);
+  const rightRequestOrder = captureRequestOrder(right);
+  if (leftRequestOrder !== null && rightRequestOrder !== null && leftRequestOrder !== rightRequestOrder) {
+    return leftRequestOrder - rightRequestOrder;
+  }
+  return captureSequence(left) - captureSequence(right);
 }
 
 function syncCaptureSelection(sessionId, captures, excludedSequences = []) {
@@ -268,9 +346,11 @@ function updateCaptureSelectionControls() {
   captureSelectionSummaryEl.textContent = total ? `${selected} of ${total} selected for output.` : '';
 
   const needsSelection = Boolean(pendingOutputAction);
-  saveWithNameEl.disabled =
+  const saveDisabled =
     !filenamePromptEl.hidden &&
     (!outputFormats().length || (needsSelection && total > 0 && selected === 0));
+  saveWithNameEl.disabled = saveDisabled;
+  saveWithNameAndOpenEl.disabled = saveDisabled;
 }
 
 function renderCaptures(captures, force = false) {
@@ -301,7 +381,7 @@ function renderCaptures(captures, force = false) {
   }
 
   const fragment = document.createDocumentFragment();
-  const visibleCaptures = captures.slice(-captureListLimit).reverse();
+  const visibleCaptures = [...captures].sort(compareCaptureFlow).slice(-captureListLimit).reverse();
   for (const capture of visibleCaptures) {
     const item = document.createElement('li');
 
@@ -326,7 +406,8 @@ function renderCaptures(captures, force = false) {
 
     const meta = document.createElement('span');
     meta.className = 'capture-meta';
-    meta.textContent = `${new Date(capture.capturedAt).toLocaleTimeString()} · ${capture.reason}`;
+    const actionTime = capture.actionAt || capture.capturedAt;
+    meta.textContent = `${new Date(actionTime).toLocaleTimeString()} · ${capture.reason}`;
 
     const selection = document.createElement('label');
     selection.className = 'capture-select';
@@ -400,15 +481,49 @@ function isFolderReconnectNotice(state) {
 
 function updateResumeCaptureButton(state) {
   const reconnecting = canReconnectCaptureFolder(state);
+  const pendingFolderName = !state?.recording ? state?.pendingResumeFolder?.name : null;
   resumeCaptureFromFolderEl.textContent = reconnecting
     ? 'Reconnect capture folder'
-    : 'Resume capture from folder';
+    : pendingFolderName
+      ? 'Change resume capture folder'
+      : 'Resume capture from folder';
   resumeCaptureFromFolderEl.disabled = Boolean(state?.recording) && !reconnecting;
+}
+
+function hasCompletedEvidence(state) {
+  return Boolean(
+    !state?.recording &&
+      state?.completedEvidence?.sessionId &&
+      state.completedEvidence.sessionId === state.sessionId
+  );
+}
+
+function updateCompletedEvidenceButton(state) {
+  const available = hasCompletedEvidence(state);
+  completedEvidenceActionsEl.hidden = !available;
+  generateEvidenceEl.disabled = !available || !state?.captures?.length;
+}
+
+function interruptedRecordingMessage(state) {
+  const interrupted = state?.interruptedRecording;
+  if (!interrupted || interrupted.sessionId !== state?.sessionId) return null;
+
+  const captureCount = Number(interrupted.captureCount) || state?.captures?.length || 0;
+  const interimOutput = state?.interimOutput;
+  if (interimOutput?.sessionId === state.sessionId) {
+    const interimCount = Number(interimOutput.captureCount) || captureCount;
+    return `Recording ended after the browser restarted. Interim backup includes ${interimCount} screenshot(s).`;
+  }
+  return captureCount
+    ? `Recording ended after the browser restarted. ${captureCount} screenshot(s) remain available for evidence.`
+    : 'Recording ended after the browser restarted.';
 }
 
 function render(state) {
   renderedState = state ?? null;
-  const recording = Boolean(state?.recording);
+  const sessionRecording = Boolean(state?.recording);
+  const recordingElsewhere = sessionRecording && Boolean(state?.recordingElsewhere);
+  const recording = sessionRecording && !recordingElsewhere;
   const paused = recording && Boolean(state?.paused);
   const settings = state?.settings ?? {};
   currentSettings = settings;
@@ -422,18 +537,24 @@ function render(state) {
   apply(controls.captureMode, () => (controls.captureMode.value = settings.captureMode ?? 'tab'));
   apply(controls.captureOnClick, () => (controls.captureOnClick.checked = settings.captureOnClick !== false));
   apply(controls.captureOnScroll, () => (controls.captureOnScroll.checked = settings.captureOnScroll !== false));
-  apply(controls.stampTimestamp, () => (controls.stampTimestamp.checked = settings.stampTimestamp !== false));
   apply(controls.fullPage, () => (controls.fullPage.checked = settings.fullPage !== false));
   apply(controls.savePng, () => (controls.savePng.checked = settings.savePng !== false));
   apply(controls.savePdf, () => (controls.savePdf.checked = settings.savePdf !== false));
-  settingsEl.classList.toggle('locked', recording);
+  settingsEl.classList.toggle('locked', sessionRecording);
+  for (const control of Object.values(controls)) {
+    control.disabled = standalonePopup || recordingElsewhere;
+  }
   shortcutHintEl.hidden = controls.captureMode.value !== 'screen';
 
   const reconnectingFolder = canReconnectCaptureFolder(state);
-  const problem = state?.error || (isFolderReconnectNotice(state) ? null : state?.lastError);
+  const problem = state?.error || state?.interimOutputError || (isFolderReconnectNotice(state) ? null : state?.lastError);
+  const interruptedMessage = interruptedRecordingMessage(state);
   if (problem) {
     statusEl.textContent = problem;
     statusEl.className = 'status error';
+  } else if (recordingElsewhere) {
+    statusEl.textContent = 'This tab is not being recorded.';
+    statusEl.className = 'status idle';
   } else if (paused) {
     statusEl.textContent = `Paused \u00b7 ${state.sequence} screenshot(s)`;
     statusEl.className = 'status paused';
@@ -442,23 +563,32 @@ function render(state) {
     const folderFallback = reconnectingFolder ? ' \u00b7 saving in Downloads' : '';
     statusEl.textContent = `Recording \u00b7 ${state.sequence} screenshot(s)${api}${folderFallback}`;
     statusEl.className = 'status recording';
+  } else if (interruptedMessage) {
+    statusEl.textContent = interruptedMessage;
+    statusEl.className = 'status idle';
+  } else if (state?.pendingResumeFolder?.name) {
+    statusEl.textContent = 'Ready to start in the selected capture folder.';
+    statusEl.className = 'status idle';
   } else {
     statusEl.textContent = 'Idle';
     statusEl.className = 'status idle';
   }
 
-  toggleEl.textContent = recording ? 'Stop recording' : 'Start recording';
+  toggleEl.textContent = recordingElsewhere
+    ? 'Recording on another tab'
+    : recording
+      ? 'Stop recording'
+      : 'Start recording';
   toggleEl.classList.toggle('stop', recording);
+  if (!awaitingChoice) toggleEl.disabled = standalonePopup || recordingElsewhere;
   pauseResumeEl.hidden = !recording;
   pauseResumeEl.disabled = !recording;
   pauseResumeEl.textContent = paused ? 'Continue recording' : 'Pause recording';
   captureNowEl.disabled = !recording || paused || Boolean(state?.fullPageProgress?.active);
   captureLaterEl.disabled = !recording || paused;
   saveFlowEl.disabled = !recording || !state?.captures?.length;
-  saveAndOpenEl.disabled = !recording || !state?.captures?.length;
-  startNewRecordingEl.disabled = !recording;
-  exportPdfNowEl.disabled = !recording || !state?.captures?.length;
   updateResumeCaptureButton(state);
+  updateCompletedEvidenceButton(state);
 
   renderCaptures(currentCaptures);
 }
@@ -467,7 +597,7 @@ async function refresh() {
   // Polling must not dismiss the keep-or-delete prompt out from under the user.
   if (awaitingChoice || standalonePopup) return;
   try {
-    render(await send('GET_STATE'));
+    render(await getPopupState());
   } catch {
     showRuntimeError();
   }
@@ -475,8 +605,12 @@ async function refresh() {
 
 toggleEl.addEventListener('click', async () => {
   try {
-    const state = await send('GET_STATE');
-    if (state.recording) {
+    const state = await getPopupState();
+    if (state.recordingElsewhere) {
+      render(state);
+      return;
+    }
+    if (isRecordingHere(state)) {
       awaitingChoice = true;
       mainActionsEl.classList.add('awaiting-stop-choice');
       toggleEl.disabled = true;
@@ -485,15 +619,27 @@ toggleEl.addEventListener('click', async () => {
       deleteConfirmEl.hidden = true;
       return;
     }
-    render(await send('START', { settings: readSettings() }));
+    const startsFromResumeFolder = Boolean(state.pendingResumeFolder?.name);
+    const started = await send('START', { settings: readSettings() });
+    if (startsFromResumeFolder && started.recording) {
+      captureSelectionSessionId = null;
+      knownCaptureSequences = new Set();
+      selectedCaptureSequences = new Set();
+    }
+    render(started);
+    if (started.notice) {
+      showToast(started.notice);
+    } else if (started.lastError) {
+      showToast(started.lastError, 'error');
+    }
   } catch {
     showRuntimeError();
   }
 });
 
 pauseResumeEl.addEventListener('click', async () => {
-  const state = await send('GET_STATE');
-  if (!state.recording) {
+  const state = await getPopupState();
+  if (!isRecordingHere(state)) {
     render(state);
     return;
   }
@@ -502,17 +648,32 @@ pauseResumeEl.addEventListener('click', async () => {
   pauseResumeEl.disabled = false;
 });
 
-async function finishRecording(keepFiles, outputFilename, selectedOutputFormats, createPdf = true) {
+async function finishRecording(
+  keepFiles,
+  outputFilename,
+  selectedOutputFormats,
+  createPdf = true,
+  reveal = false
+) {
   const folderPermission = renewSelectedCaptureFolderWritePermission();
   confirmEl.hidden = true;
   filenamePromptEl.hidden = true;
   deleteConfirmEl.hidden = true;
   awaitingChoice = false;
   toggleEl.disabled = true;
+  const selectedFolderName = renderedState?.outputFolder?.name || null;
+  const opensDownloadLocation = reveal && !selectedFolderName;
   statusEl.textContent = keepFiles
     ? 'Finishing up \u2014 writing files and opening the folder\u2026'
     : 'Deleting captured files\u2026';
-  const payload = { keepFiles, outputFilename, outputFormats: selectedOutputFormats, createPdf };
+  if (keepFiles && !opensDownloadLocation) statusEl.textContent = 'Finishing up - writing files...';
+  const payload = {
+    keepFiles,
+    outputFilename,
+    outputFormats: selectedOutputFormats,
+    createPdf,
+    reveal
+  };
   if (keepFiles && createPdf) {
     payload.excludedSequences = excludedCaptureSequenceList();
   }
@@ -521,7 +682,9 @@ async function finishRecording(keepFiles, outputFilename, selectedOutputFormats,
     await noteUpdateChain;
     const state = await send('STOP', payload);
     render(state);
-    if (keepFiles && createPdf && !state.lastError) showSaveResult(state);
+    if (keepFiles && createPdf && !state.lastError) {
+      showSaveResult(state, { locationRequested: reveal, selectedFolderName });
+    }
     if (keepFiles && !createPdf && !state.lastError) {
       showToast('Recording stopped without creating a document.');
     }
@@ -536,29 +699,6 @@ async function finishRecording(keepFiles, outputFilename, selectedOutputFormats,
   }
 }
 
-async function exportOutputNow(outputFilename, selectedOutputFormats) {
-  const folderPermission = renewSelectedCaptureFolderWritePermission();
-  filenamePromptEl.hidden = true;
-  mainActionsEl.hidden = false;
-  awaitingChoice = false;
-  pendingOutputAction = null;
-  returnToStopChoice = false;
-  statusEl.textContent = 'Writing checkpoint output\u2026';
-  try {
-    await folderPermission;
-    await noteUpdateChain;
-    const state = await send('EXPORT_PDF_NOW', {
-      outputFilename,
-      outputFormats: selectedOutputFormats,
-      excludedSequences: excludedCaptureSequenceList()
-    });
-    render(state);
-    showSaveResult(state);
-  } catch (error) {
-    showActionError('Save failed', error);
-  }
-}
-
 async function saveFlow(outputFilename, selectedOutputFormats) {
   const folderPermission = renewSelectedCaptureFolderWritePermission();
   filenamePromptEl.hidden = true;
@@ -569,9 +709,9 @@ async function saveFlow(outputFilename, selectedOutputFormats) {
   try {
     await folderPermission;
     await noteUpdateChain;
-    const state = await send('GET_STATE');
+    const state = await getPopupState();
     render(state);
-    if (!state.recording || !state.captures.length) return;
+    if (!isRecordingHere(state) || !state.captures.length) return;
     statusEl.textContent = 'Saving checkpoint output...';
     statusEl.className = 'status recording';
     const saved = await send('SAVE_FLOW', {
@@ -586,54 +726,104 @@ async function saveFlow(outputFilename, selectedOutputFormats) {
   }
 }
 
-async function startNewRecording(outputFilename, selectedOutputFormats) {
-  const folderPermission = renewSelectedCaptureFolderWritePermission();
+async function generateEvidence(outputFilename, selectedOutputFormats) {
+  const evidenceFolderName = renderedState?.completedEvidence?.outputFolderName || null;
+  const folderPermission = renewSelectedCaptureFolderWritePermission(evidenceFolderName);
   filenamePromptEl.hidden = true;
   mainActionsEl.hidden = false;
+  completedEvidenceActionsEl.hidden = true;
   awaitingChoice = false;
   pendingOutputAction = null;
   returnToStopChoice = false;
   try {
     await folderPermission;
     await noteUpdateChain;
-    const state = await send('GET_STATE');
-    render(state);
-    if (!state.recording) return;
-    statusEl.textContent = 'Saving the current flow and starting a new recording...';
-    statusEl.className = 'status recording';
-    const started = await send('START_NEW_RECORDING', {
-      settings: readSettings(),
+    const saved = await send('GENERATE_EVIDENCE', {
       outputFilename,
       outputFormats: selectedOutputFormats,
       excludedSequences: excludedCaptureSequenceList()
     });
-    render(started);
-    if (started?.savedOutputFilenames?.length || started?.savedPdfFilename) showSaveResult(started);
+    render(saved);
+    if (saved.lastError) throw new Error(saved.lastError);
+    showSaveResult(saved);
   } catch (error) {
-    showActionError('Could not start a new recording', error);
+    showActionError('Could not generate evidence', error);
+    updateCompletedEvidenceButton(renderedState);
   }
 }
 
-function outputPromptLabel(action) {
-  if (action === 'final') return 'Save and stop';
-  if (action === 'new-recording') return 'Save and start new';
-  return 'Save checkpoint';
+function outputPromptConfig(action) {
+  if (action === 'checkpoint') {
+    return {
+      checkpoint: true,
+      final: false,
+      title: 'Save checkpoint',
+      button: 'Save checkpoint (Shift+Ctrl+S)',
+      reveal: false,
+      showLocationButton: false
+    };
+  }
+  if (action === 'evidence') {
+    return {
+      checkpoint: false,
+      final: false,
+      evidence: true,
+      title: 'Generate evidences',
+      button: 'Generate evidences',
+      reveal: false,
+      showLocationButton: false
+    };
+  }
+  if (action === 'final-save') {
+    return {
+      checkpoint: false,
+      final: true,
+      title: 'Save and stop (Ctrl+S)',
+      button: 'Save and stop (Ctrl+S)',
+      reveal: false,
+      showLocationButton: false
+    };
+  }
+  if (action === 'final-reveal') {
+    return {
+      checkpoint: false,
+      final: true,
+      title: 'Save, stop, and open file location (Ctrl+Alt+S)',
+      button: 'Save, stop, and open file location (Ctrl+Alt+S)',
+      reveal: true,
+      showLocationButton: false
+    };
+  }
+  return {
+    checkpoint: false,
+    final: true,
+    title: 'Save and stop recording',
+    button: 'Save and stop (Ctrl+S)',
+    reveal: false,
+    showLocationButton: true
+  };
 }
 
 function openOutputPrompt(action, state, restoreStopChoice = false) {
+  const prompt = outputPromptConfig(action);
   pendingOutputAction = action;
   returnToStopChoice = restoreStopChoice;
   awaitingChoice = true;
   const sessionId = state?.sessionId || 'JShotz-session';
-  outputFilenameEl.value = action === 'final' || action === 'new-recording'
-    ? sessionId
-    : `${sessionId}_checkpoint`;
+  outputFilenameEl.value = prompt.checkpoint
+    ? `${sessionId}_checkpoint`
+    : prompt.evidence
+      ? `${sessionId}_evidence`
+      : sessionId;
   outputPdfEl.checked = currentSettings.savePdf !== false;
   outputDocxEl.checked = false;
-  saveWithNameEl.textContent = outputPromptLabel(action);
+  outputPromptTitleEl.textContent = prompt.title;
+  saveWithNameEl.textContent = prompt.button;
+  saveWithNameAndOpenEl.hidden = !prompt.showLocationButton;
   confirmEl.hidden = true;
   deleteConfirmEl.hidden = true;
   mainActionsEl.hidden = true;
+  completedEvidenceActionsEl.hidden = true;
   filenamePromptEl.hidden = false;
   updateCaptureSelectionControls();
   outputFilenameEl.focus();
@@ -641,20 +831,15 @@ function openOutputPrompt(action, state, restoreStopChoice = false) {
 }
 
 async function beginOutputAction(action) {
-  const state = await send('GET_STATE');
+  const state = await getPopupState();
   render(state);
-  if (!state.recording) return;
-  if (!state.captures.length) {
-    if (action === 'new-recording') {
-      await startNewRecording(undefined, undefined);
-    }
-    return;
-  }
+  if (!isRecordingHere(state)) return;
+  if (!state.captures.length) return;
   openOutputPrompt(action, state);
 }
 
 document.getElementById('keepYes').addEventListener('click', async () => {
-  const state = await send('GET_STATE');
+  const state = await getPopupState();
   render(state);
   openOutputPrompt('final', state, true);
 });
@@ -676,8 +861,9 @@ document.getElementById('filenameCancel').addEventListener('click', () => {
   } else {
     awaitingChoice = false;
   }
+  updateCompletedEvidenceButton(renderedState);
 });
-document.getElementById('saveWithName').addEventListener('click', () => {
+function saveNamedOutput(reveal) {
   const selectedOutputFormats = outputFormats();
   if (!selectedOutputFormats.length) {
     statusEl.textContent = 'Choose PDF, Word, or both before saving.';
@@ -690,10 +876,32 @@ document.getElementById('saveWithName').addEventListener('click', () => {
     return;
   }
   const action = pendingOutputAction;
-  if (action === 'final') finishRecording(true, outputFilenameEl.value, selectedOutputFormats);
-  else if (action === 'new-recording') startNewRecording(outputFilenameEl.value, selectedOutputFormats);
-  else if (action === 'checkpoint') saveFlow(outputFilenameEl.value, selectedOutputFormats);
-  else exportOutputNow(outputFilenameEl.value, selectedOutputFormats);
+  if (!action) return;
+  const prompt = outputPromptConfig(action);
+  if (prompt.final) {
+    finishRecording(true, outputFilenameEl.value, selectedOutputFormats, true, reveal ?? prompt.reveal);
+  } else if (prompt.checkpoint) {
+    saveFlow(outputFilenameEl.value, selectedOutputFormats);
+  } else if (prompt.evidence) {
+    generateEvidence(outputFilenameEl.value, selectedOutputFormats);
+  }
+}
+
+document.getElementById('saveWithName').addEventListener('click', () => {
+  saveNamedOutput();
+});
+saveWithNameAndOpenEl.addEventListener('click', () => {
+  saveNamedOutput(true);
+});
+generateEvidenceEl.addEventListener('click', async () => {
+  try {
+    const state = await getPopupState();
+    render(state);
+    if (!hasCompletedEvidence(state) || !state.captures?.length) return;
+    openOutputPrompt('evidence', state);
+  } catch {
+    showRuntimeError();
+  }
 });
 document.getElementById('keepWithoutPdf').addEventListener('click', () => finishRecording(true, undefined, undefined, false));
 document.getElementById('deleteConfirmYes').addEventListener('click', () => finishRecording(false));
@@ -725,14 +933,8 @@ resumeCaptureFromFolderEl.addEventListener('click', async () => {
     }
     await saveCaptureFolder(directoryHandle);
     const state = await send(
-      reconnecting ? 'RECONNECT_CAPTURE_FOLDER' : 'RESUME_FROM_FOLDER',
-      reconnecting ? {} : { settings: readSettings() }
+      reconnecting ? 'RECONNECT_CAPTURE_FOLDER' : 'PREPARE_RESUME_FROM_FOLDER'
     );
-    if (state.recording && !reconnecting) {
-      captureSelectionSessionId = null;
-      knownCaptureSequences = new Set();
-      selectedCaptureSequences = new Set();
-    }
     render(state);
     if (state.notice) {
       showToast(state.notice);
@@ -740,6 +942,8 @@ resumeCaptureFromFolderEl.addEventListener('click', async () => {
       showToast(state.lastError, 'error');
     } else if (reconnecting) {
       showToast('Capture folder reconnected.');
+    } else if (state.pendingResumeFolder?.name) {
+      showToast(`Capture folder selected: ${state.pendingResumeFolder.name}.`);
     }
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -752,7 +956,7 @@ resumeCaptureFromFolderEl.addEventListener('click', async () => {
     }
   } finally {
     if (!standalonePopup) {
-      const state = await send('GET_STATE').catch(() => null);
+      const state = await getPopupState().catch(() => null);
       renderedState = state;
       updateResumeCaptureButton(state);
     }
@@ -764,9 +968,6 @@ captureNowEl.addEventListener('click', async () => {
 });
 
 saveFlowEl.addEventListener('click', () => beginOutputAction('checkpoint').catch(showRuntimeError));
-saveAndOpenEl.addEventListener('click', () => beginOutputAction('final').catch(showRuntimeError));
-startNewRecordingEl.addEventListener('click', () => beginOutputAction('new-recording').catch(showRuntimeError));
-exportPdfNowEl.addEventListener('click', () => beginOutputAction('export').catch(showRuntimeError));
 
 selectAllCapturesEl.addEventListener('change', () => {
   selectedCaptureSequences = selectAllCapturesEl.checked
@@ -786,21 +987,31 @@ captureLaterEl.addEventListener('click', async () => {
   window.close();
 });
 
-function isPlainControlShortcut(event, key) {
+function isSaveAndOpenLocationShortcut(event) {
+  return (
+    event.ctrlKey &&
+    event.altKey &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    event.key?.toLowerCase() === 's'
+  );
+}
+
+function isSaveAndStopShortcut(event) {
   return (
     event.ctrlKey &&
     !event.altKey &&
     !event.shiftKey &&
     !event.metaKey &&
-    event.key?.toLowerCase() === key
+    event.key?.toLowerCase() === 's'
   );
 }
 
-function isFinalSaveShortcut(event) {
+function isCheckpointSaveShortcut(event) {
   return (
     event.ctrlKey &&
-    event.altKey &&
-    !event.shiftKey &&
+    !event.altKey &&
+    event.shiftKey &&
     !event.metaKey &&
     event.key?.toLowerCase() === 's'
   );
@@ -812,20 +1023,43 @@ function preventShortcut(event) {
 }
 
 document.addEventListener('keydown', (event) => {
-  if (standalonePopup || !renderedState?.recording || awaitingChoice) return;
-  if (isFinalSaveShortcut(event)) {
-    preventShortcut(event);
-    if (!event.repeat) beginOutputAction('final').catch(showRuntimeError);
+  if (standalonePopup || !renderedState?.recording) return;
+  if (awaitingChoice) {
+    if (
+      (pendingOutputAction === 'final' || pendingOutputAction === 'final-reveal') &&
+      isSaveAndOpenLocationShortcut(event)
+    ) {
+      preventShortcut(event);
+      if (!event.repeat) saveNamedOutput(pendingOutputAction === 'final' ? true : undefined);
+      return;
+    }
+    if (
+      (pendingOutputAction === 'final' || pendingOutputAction === 'final-save') &&
+      isSaveAndStopShortcut(event)
+    ) {
+      preventShortcut(event);
+      if (!event.repeat) saveNamedOutput();
+      return;
+    }
+    if (pendingOutputAction === 'checkpoint' && isCheckpointSaveShortcut(event)) {
+      preventShortcut(event);
+      if (!event.repeat) saveNamedOutput();
+    }
     return;
   }
-  if (isPlainControlShortcut(event, 's')) {
+  if (isSaveAndOpenLocationShortcut(event)) {
+    preventShortcut(event);
+    if (!event.repeat) beginOutputAction('final-reveal').catch(showRuntimeError);
+    return;
+  }
+  if (isCheckpointSaveShortcut(event)) {
     preventShortcut(event);
     if (!event.repeat) beginOutputAction('checkpoint').catch(showRuntimeError);
     return;
   }
-  if (isPlainControlShortcut(event, 'n')) {
+  if (isSaveAndStopShortcut(event)) {
     preventShortcut(event);
-    if (!event.repeat) beginOutputAction('new-recording').catch(showRuntimeError);
+    if (!event.repeat) beginOutputAction('final-save').catch(showRuntimeError);
   }
 });
 
@@ -837,6 +1071,7 @@ for (const control of Object.values(controls)) {
 }
 
 // Chrome closes the popup when the share picker opens, so re-sync on open and while visible.
+showExtensionVersion();
 render(null);
 if (hasExtensionRuntime()) {
   preloadSelectedCaptureFolder();

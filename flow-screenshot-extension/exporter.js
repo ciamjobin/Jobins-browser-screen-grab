@@ -23,6 +23,13 @@ function dataUrl(bytes, mimeType) {
   return `data:${mimeType};base64,${btoa(binary)}`;
 }
 
+async function hideDownloadUi() {
+  if (typeof chrome.downloads?.setUiOptions !== 'function') return;
+  try {
+    await chrome.downloads.setUiOptions({ enabled: false });
+  } catch {}
+}
+
 function waitForDownload(downloadId) {
   return new Promise((resolve) => {
     const onChanged = (progress) => {
@@ -72,13 +79,19 @@ function outputFilesFromParams(params) {
   try {
     const outputs = JSON.parse(encoded);
     if (!Array.isArray(outputs)) return [];
-    return outputs.filter(
-      (output) =>
-        output &&
-        (output.format === 'pdf' || output.format === 'docx') &&
-        typeof output.filename === 'string' &&
-        output.filename.trim()
-    );
+    return outputs
+      .filter(
+        (output) =>
+          output &&
+          (output.format === 'pdf' || output.format === 'docx') &&
+          typeof output.filename === 'string' &&
+          output.filename.trim()
+      )
+      .map((output) => ({
+        format: output.format,
+        filename: output.filename,
+        overwrite: output.overwrite === true
+      }));
   } catch {
     return [];
   }
@@ -94,10 +107,40 @@ function outputMimeType(format) {
     : 'application/pdf';
 }
 
+function captureActionMilliseconds(capture) {
+  const milliseconds = Date.parse(capture?.actionAt || '');
+  return Number.isFinite(milliseconds) ? milliseconds : null;
+}
+
+function captureSequence(capture) {
+  const sequence = Number(capture?.sequence);
+  return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : 0;
+}
+
+function captureRequestOrder(capture) {
+  const requestSequence = Number(capture?.requestSequence);
+  return Number.isSafeInteger(requestSequence) && requestSequence > 0 ? requestSequence : null;
+}
+
+function compareCaptureFlow(left, right) {
+  const leftActionAt = captureActionMilliseconds(left);
+  const rightActionAt = captureActionMilliseconds(right);
+  if (leftActionAt !== null && rightActionAt !== null && leftActionAt !== rightActionAt) {
+    return leftActionAt - rightActionAt;
+  }
+  const leftRequestOrder = captureRequestOrder(left);
+  const rightRequestOrder = captureRequestOrder(right);
+  if (leftRequestOrder !== null && rightRequestOrder !== null && leftRequestOrder !== rightRequestOrder) {
+    return leftRequestOrder - rightRequestOrder;
+  }
+  return captureSequence(left) - captureSequence(right);
+}
+
 // A real extension page is required here: offscreen documents expose only chrome.runtime,
 // and service workers cannot create blob URLs.
 async function run() {
   const params = new URLSearchParams(location.search);
+  const requestId = params.get('requestId') || '';
   const outputFiles = outputFilesFromParams(params);
   const selectedSequences = sequencesFromParams(params, 'selected');
   const excludedSequences = sequencesFromParams(params, 'excluded');
@@ -107,9 +150,9 @@ async function run() {
     const stored = await chrome.storage.local.get(null);
     const frames = Object.entries(stored)
       .filter(([key]) => key.startsWith(FRAME_PREFIX))
-      .map(([, frame]) => frame)
-      .sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
+      .map(([, frame]) => frame);
     if (!frames.length && Array.isArray(stored[FRAMES_KEY])) frames.push(...stored[FRAMES_KEY]);
+    frames.sort(compareCaptureFlow);
     const includedFrames = selectedSequences
       ? frames.filter((frame) => selectedSequences.has(Number(frame.sequence)))
       : excludedSequences
@@ -136,9 +179,11 @@ async function run() {
     const downloadIds = [];
     for (const output of outputFiles) {
       const bytes = buildOutput(output.format, pages);
+      await hideDownloadUi();
       const downloadId = await chrome.downloads.download({
         url: dataUrl(bytes, outputMimeType(output.format)),
         filename: output.filename,
+        ...(output.overwrite ? { conflictAction: 'overwrite' } : {}),
         saveAs: false
       });
       const outcome = await waitForDownload(downloadId);
@@ -150,6 +195,7 @@ async function run() {
     // The background closes this window once it sees the message, avoiding a close/message race.
     chrome.runtime.sendMessage({
       type: 'OUTPUT_DONE',
+      requestId,
       pageCount: includedFrames.length,
       downloadIds,
       savedOutputFilenames: outputFiles.map((output) => output.filename)
@@ -157,7 +203,7 @@ async function run() {
   } catch (error) {
     stateEl.textContent = error.message;
     stateEl.className = 'status error';
-    chrome.runtime.sendMessage({ type: 'OUTPUT_DONE', error: error.message });
+    chrome.runtime.sendMessage({ type: 'OUTPUT_DONE', requestId, error: error.message });
   }
 }
 

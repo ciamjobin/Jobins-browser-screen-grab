@@ -3,6 +3,10 @@
   font-family: "Segoe UI", system-ui, sans-serif;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   width: 320px;
   margin: 0;
@@ -10,9 +14,24 @@ body {
   color: #1f2933;
 }
 
-h1 {
+.popup-header {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
   margin: 0 0 10px;
+}
+
+h1 {
+  margin: 0;
   font-size: 15px;
+}
+
+.extension-version {
+  color: #52606d;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 h2 {
@@ -181,10 +200,7 @@ h2 {
 }
 
 #toggle,
-#saveFlow,
-#saveAndOpen,
-#startNewRecording,
-#exportPdfNow {
+#saveFlow {
   grid-column: 1 / -1;
 }
 
@@ -341,6 +357,13 @@ button.danger:hover:not(:disabled) {
   font-weight: 600;
 }
 
+.confirm .output-prompt-title {
+  margin: 0 0 8px;
+  color: #1f2933;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .output-formats {
   margin: 0 0 10px;
   padding: 6px 8px;
@@ -353,6 +376,15 @@ button.danger:hover:not(:disabled) {
   color: #52606d;
   font-size: 11px;
   font-weight: 600;
+}
+
+.output-save-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.completed-evidence-actions {
+  margin-top: 8px;
 }
 
 .later-pdf {

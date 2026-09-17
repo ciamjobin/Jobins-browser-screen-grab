@@ -5,6 +5,9 @@ const PAGE_HEIGHT = 612;
 const MARGIN = 28;
 const TITLE_SIZE = 14;
 const META_SIZE = 9;
+const FOOTER_SIZE = 8;
+const FOOTER_TEXT = "Captured by Jobin's Screenshots";
+const IMAGE_META_GAP = 8;
 
 function encodeLatin1(text) {
   const bytes = new Uint8Array(text.length);
@@ -34,7 +37,7 @@ function pdfText(value, maxLength) {
 
 function layoutImage(width, height, top, bottom) {
   const availableWidth = PAGE_WIDTH - MARGIN * 2;
-  const availableHeight = top - bottom;
+  const availableHeight = Math.max(1, top - bottom);
   const scale = Math.min(availableWidth / width, availableHeight / height);
   const drawWidth = width * scale;
   const drawHeight = height * scale;
@@ -42,7 +45,7 @@ function layoutImage(width, height, top, bottom) {
     width: drawWidth.toFixed(2),
     height: drawHeight.toFixed(2),
     x: (MARGIN + (availableWidth - drawWidth) / 2).toFixed(2),
-    y: (bottom + (availableHeight - drawHeight) / 2).toFixed(2)
+    y: (top - drawHeight).toFixed(2)
   };
 }
 
@@ -202,6 +205,15 @@ function underline(text, y) {
   return `0.5 w ${MARGIN} ${y.toFixed(2)} m ${(MARGIN + width).toFixed(2)} ${y.toFixed(2)} l S`;
 }
 
+function documentFooter() {
+  const width = FOOTER_TEXT.length * FOOTER_SIZE * 0.52;
+  const x = PAGE_WIDTH - MARGIN - width;
+  return (
+    `BT /F2 ${FOOTER_SIZE} Tf 0.35 0.35 0.35 rg 1 0 0 1 ${x.toFixed(2)} ${(MARGIN / 2).toFixed(2)} Tm ` +
+    `${pdfText(FOOTER_TEXT, 80)} Tj ET`
+  );
+}
+
 function contentStream(page, table, drawImage) {
   const titleY = PAGE_HEIGHT - MARGIN - TITLE_SIZE;
 
@@ -212,7 +224,8 @@ function contentStream(page, table, drawImage) {
     const heading = table?.firstPage ? 'API calls in this step' : 'API calls (continued)';
     return [
       `BT /F1 ${TITLE_SIZE} Tf 0 0 0 rg 1 0 0 1 ${MARGIN} ${titleY} Tm ${pdfText(title, 110)} Tj ET`,
-      table ? apiTableOps(table, titleY - 10 - table.height, heading) : ''
+      table ? apiTableOps(table, titleY - 10 - table.height, heading) : '',
+      documentFooter()
     ].join('\n');
   }
 
@@ -222,7 +235,7 @@ function contentStream(page, table, drawImage) {
   const timeY = timeHeadingY - 11;
 
   const imageBottom = MARGIN + (table ? table.height + 10 : 0);
-  const box = layoutImage(page.width, page.height, timeY - 12, imageBottom);
+  const box = layoutImage(page.width, page.height, timeY - IMAGE_META_GAP, imageBottom);
 
   return [
     `BT /F1 ${TITLE_SIZE} Tf 1 0 0 1 ${MARGIN} ${titleY} Tm ${pdfText(pageHeading(page), 95)} Tj ET`,
@@ -238,7 +251,8 @@ function contentStream(page, table, drawImage) {
 
     '0 0 0 rg',
     `q ${box.width} 0 0 ${box.height} ${box.x} ${box.y} cm /Im0 Do Q`,
-    table ? apiTableOps(table, MARGIN, 'API calls in this step') : ''
+    table ? apiTableOps(table, MARGIN, 'API calls in this step') : '',
+    documentFooter()
   ].join('\n');
 }
 

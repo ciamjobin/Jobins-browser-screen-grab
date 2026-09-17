@@ -125,6 +125,7 @@ function zip(entries) {
 function xml(value, maxLength = 4000) {
   return String(value ?? '')
     .slice(0, maxLength)
+    .replace(/[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\u{10000}-\u{10ffff}]/gu, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -138,10 +139,11 @@ function heading(page) {
   return note ? `${title} [${note}]` : title;
 }
 
-function textParagraph(value, { bold = false, size = 20 } = {}) {
+function textParagraph(value, { bold = false, size = 20, after = 100 } = {}) {
   const text = xml(value);
   const properties = `${bold ? '<w:b/>' : ''}<w:sz w:val="${size}"/>`;
-  return `<w:p><w:pPr><w:spacing w:after="100"/></w:pPr><w:r><w:rPr>${properties}</w:rPr><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+  const spacingAfter = Math.max(0, Math.round(Number(after) || 0));
+  return `<w:p><w:pPr><w:spacing w:after="${spacingAfter}"/></w:pPr><w:r><w:rPr>${properties}</w:rPr><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
 }
 
 function imageSize(width, height) {
@@ -160,6 +162,7 @@ function imageParagraph(page, image) {
   return [
     '<w:p><w:pPr><w:spacing w:after="120"/></w:pPr><w:r><w:drawing>',
     `<wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${size.width}" cy="${size.height}"/>`,
+    '<wp:effectExtent l="0" t="0" r="0" b="0"/>',
     `<wp:docPr id="${image.id}" name="Screenshot ${image.id}" descr="${description}"/>`,
     '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>',
     '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">',
@@ -191,7 +194,7 @@ function documentXml(pages) {
     const content = [
       textParagraph(heading(page), { bold: true, size: 30 }),
       textParagraph(`URL: ${page.url || '(URL not recorded)'}`, { size: 18 }),
-      textParagraph(`Time of action: ${page.time || '(time not recorded)'}`, { size: 18 }),
+      textParagraph(`Time of action: ${page.time || '(time not recorded)'}`, { size: 18, after: 20 }),
       image ? imageParagraph(page, image) : '',
       apiParagraphs(page.apiRows),
       index < pages.length - 1 ? '<w:p><w:r><w:br w:type="page"/></w:r></w:p>' : ''
@@ -207,7 +210,7 @@ function documentXml(pages) {
     'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">',
     '<w:body>',
     sections.join(''),
-    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>',
+    '<w:sectPr><w:footerReference w:type="default" r:id="rId99"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:footer="360"/></w:sectPr>',
     '</w:body></w:document>'
   ].join('');
 }
@@ -220,6 +223,11 @@ function contentTypes() {
     '<Default Extension="xml" ContentType="application/xml"/>',
     '<Default Extension="jpg" ContentType="image/jpeg"/>',
     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
+    '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>',
+    '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>',
+    '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>',
+    '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>',
+    '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>',
     '</Types>'
   ].join('');
 }
@@ -229,6 +237,8 @@ function rootRelationships() {
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>',
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>',
+    '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>',
     '</Relationships>'
   ].join('');
 }
@@ -237,10 +247,76 @@ function documentRelationships(images) {
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>',
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>',
+    '<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>',
     ...images.map((image) =>
       `<Relationship Id="rId${image.relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image${image.id}.jpg"/>`
     ),
     '</Relationships>'
+  ].join('');
+}
+
+function footerXml() {
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">',
+    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:color w:val="6B7280"/><w:sz w:val="16"/></w:rPr>',
+    '<w:t>Captured by Jobin&apos;s Screenshots</w:t></w:r></w:p></w:ftr>'
+  ].join('');
+}
+
+function stylesXml() {
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">',
+    '<w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="en-US"/></w:rPr></w:rPrDefault>',
+    '<w:pPrDefault><w:pPr><w:spacing w:after="160"/></w:pPr></w:pPrDefault></w:docDefaults>',
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>',
+    '</w:styles>'
+  ].join('');
+}
+
+function settingsXml() {
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">',
+    '<w:zoom w:percent="100"/><w:proofState w:spelling="clean" w:grammar="clean"/>',
+    '<w:defaultTabStop w:val="720"/><w:compat><w:compatSetting w:name="compatibilityMode" ',
+    'w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>',
+    '</w:settings>'
+  ].join('');
+}
+
+function documentTitle(pages) {
+  const firstTitle = String(pages[0]?.title || '').trim();
+  return firstTitle ? `JShotz evidence - ${firstTitle}` : 'JShotz evidence';
+}
+
+function coreProperties(pages) {
+  const created = new Date().toISOString();
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" ',
+    'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" ',
+    'xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">',
+    `<dc:title>${xml(documentTitle(pages), 255)}</dc:title><dc:creator>JShotz</dc:creator>`,
+    '<cp:lastModifiedBy>JShotz</cp:lastModifiedBy>',
+    `<dcterms:created xsi:type="dcterms:W3CDTF">${created}</dcterms:created>`,
+    `<dcterms:modified xsi:type="dcterms:W3CDTF">${created}</dcterms:modified>`,
+    '</cp:coreProperties>'
+  ].join('');
+}
+
+function appProperties() {
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" ',
+    'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">',
+    '<Application>JShotz</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop>',
+    '<LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc>',
+    '<HyperlinksChanged>false</HyperlinksChanged><AppVersion>3.14</AppVersion>',
+    '</Properties>'
   ].join('');
 }
 
@@ -250,7 +326,7 @@ export function buildDocx(pages) {
   const documentPages = records.map((page) => {
     const jpeg = bytesFor(page?.jpeg);
     const image = jpeg?.length
-      ? { id: images.length + 1, relationshipId: images.length + 1, jpeg }
+      ? { id: images.length + 1, relationshipId: images.length + 3, jpeg }
       : null;
     if (image) images.push(image);
     return { page: page || {}, image };
@@ -259,7 +335,12 @@ export function buildDocx(pages) {
   const entries = [
     ['[Content_Types].xml', contentTypes()],
     ['_rels/.rels', rootRelationships()],
+    ['docProps/core.xml', coreProperties(documentPages.map(({ page }) => page))],
+    ['docProps/app.xml', appProperties()],
     ['word/document.xml', documentXml(documentPages)],
+    ['word/footer1.xml', footerXml()],
+    ['word/styles.xml', stylesXml()],
+    ['word/settings.xml', settingsXml()],
     ['word/_rels/document.xml.rels', documentRelationships(images)]
   ];
   for (const image of images) entries.push([`word/media/image${image.id}.jpg`, image.jpeg]);

@@ -115,6 +115,28 @@ function capturedAtFromFile(file) {
   return Number.isFinite(time) && time > 0 ? new Date(time).toISOString() : new Date().toISOString();
 }
 
+function recordedActionAt(value, fallback) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : fallback;
+}
+
+function captureRequestOrder(capture) {
+  return validSequence(capture?.requestSequence);
+}
+
+function compareCaptureFlow(left, right) {
+  const leftActionAt = Date.parse(left?.actionAt || '');
+  const rightActionAt = Date.parse(right?.actionAt || '');
+  if (Number.isFinite(leftActionAt) && Number.isFinite(rightActionAt) && leftActionAt !== rightActionAt) {
+    return leftActionAt - rightActionAt;
+  }
+  const leftRequestOrder = captureRequestOrder(left);
+  const rightRequestOrder = captureRequestOrder(right);
+  if (leftRequestOrder !== null && rightRequestOrder !== null && leftRequestOrder !== rightRequestOrder) {
+    return leftRequestOrder - rightRequestOrder;
+  }
+  return (validSequence(left?.sequence) || 0) - (validSequence(right?.sequence) || 0);
+}
+
 async function readSessionManifest(directoryHandle) {
   try {
     const manifestHandle = await directoryHandle.getFileHandle('flow-manifest.json');
@@ -154,6 +176,7 @@ export async function scanCaptureFolder(directoryHandle) {
   for (const fileHandle of imageHandles) {
     const file = await fileHandle.getFile();
     const saved = savedEntries.get(fileHandle.name);
+    const capturedAt = saved?.capturedAt || capturedAtFromFile(file);
     let sequence = validSequence(saved?.sequence) || fileSequence(fileHandle.name) || nextSequence;
     while (usedSequences.has(sequence)) sequence += 1;
     usedSequences.add(sequence);
@@ -170,12 +193,14 @@ export async function scanCaptureFolder(directoryHandle) {
         note: typeof saved?.note === 'string' ? saved.note.trim().slice(0, 50) : '',
         mode: saved?.mode || 'folder',
         apiCalls: Number.isSafeInteger(saved?.apiCalls) ? saved.apiCalls : 0,
-        capturedAt: saved?.capturedAt || capturedAtFromFile(file),
+        capturedAt,
+        actionAt: recordedActionAt(saved?.actionAt, capturedAt),
+        requestSequence: validSequence(saved?.requestSequence) || sequence,
         filename: fileHandle.name
       }
     });
   }
-  captures.sort((left, right) => left.entry.sequence - right.entry.sequence);
+  captures.sort((left, right) => compareCaptureFlow(left.entry, right.entry));
 
   return {
     folderName: directoryHandle.name || 'selected folder',

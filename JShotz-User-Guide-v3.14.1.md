@@ -1,11 +1,12 @@
 # JShotz User Guide
 
-**Version 3.14.0**
+**Version 3.14.1**
 
-JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as a
-sequence of timestamped, watermarked screenshots and exports them as a PDF, with an optional
-table of API calls captured under each step. It's built for documenting test flows, support
-tickets, and step-by-step evidence of what happened in a browser session.
+JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as clean
+screenshots and exports PDF or Word documents. Each document shows the action time above its image
+and recorder attribution in the footer, with an optional table of API calls captured under each
+step. It's built for documenting test flows, support tickets, and step-by-step evidence of what
+happened in a browser session.
 
 ---
 
@@ -25,14 +26,14 @@ tickets, and step-by-step evidence of what happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.14.0-chrome-edge.zip`.
+1. Unzip `JShotz-3.14.1-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.14.0-firefox.zip`.
+1. Unzip `JShotz-3.14.1-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -54,11 +55,11 @@ indicate a problem with a newly opened or refreshed recording page.
 Click the JShotz icon to open the popup. It has three parts:
 
 - **Status line** — shows *Idle*, *Recording · N screenshot(s)*, *Paused · N screenshot(s)*,
-  or an error message.
+  an interrupted-recording backup notice, or an error message.
 - **Settings** — capture source and behavior options (locked once recording starts, except the
   capture source, which can be changed mid-recording).
-- **Actions** — Start/Stop, Pause/Continue, Capture now, Capture in 5s, Save checkpoint, Save and
-  stop, Start new recording, Export document so far, and Resume capture from folder.
+- **Actions** — Start/Stop, Pause/Continue, Capture now, Capture in 5s, Save checkpoint, and
+  Resume capture from folder.
 - **Screenshots list** — a live list of what's been captured so far in the current session and
   checkboxes that choose the screenshots included in output, plus an optional 50-character note
   for each screenshot.
@@ -102,12 +103,13 @@ not add network details retroactively to screenshots that were captured in anoth
 ## 4. Settings
 
 - **Capture on every button click** — automatically screenshot after clicks on buttons, links,
-  checkboxes, and similar controls.
+  checkboxes, and similar controls. Link destinations wait for their rendered page state before
+  JShotz takes the screenshot. Its title and URL are read from that rendered page, and stale
+  browser events are skipped rather than being attached to a later screen.
 - **Capture every 60% of a screen scrolled, and at the end** — automatically screenshot as you
   scroll, roughly every 60% of a screenful (so consecutive shots overlap), plus one at the very
   bottom of the page.
-- **Stamp clock + time zone on each shot** — adds a small timestamp banner to each screenshot.
-- **Whole-page shot for Ctrl+Alt+Q and "Capture now" only** — see [Section 6](#6-full-page-whole-page-capture).
+- **Whole-page shots for manual captures and responsive layouts** — see [Section 6](#6-full-page-whole-page-capture).
 - **Save individual PNG files** — save each screenshot as its own PNG in the session folder.
 - **Preselect PDF in output dialogs** — starts each output dialog with PDF selected; you can
   choose PDF, Word, or both for every export.
@@ -123,28 +125,42 @@ session.
 1. Open the tab you want to record, then click **Start recording** in the popup.
 2. Use the page normally. Screenshots are taken automatically per your settings, and you can
    also trigger one manually at any time (see below).
+  JShotz retains the time each action occurred even when it waits for the page to render. The
+  screenshot list, PDF/Word output, and session manifest keep steps in action order; paired
+  interim and settled frames from one action retain their original request order.
 3. When a page you're recording opens a **new tab** (e.g. a sign-in redirect), JShotz follows
    it automatically — that tab is brought to the front and becomes part of the recording.
    Switching back to the original tab (or to any other tab that flow has opened) resumes
-   capturing from wherever you actually are.
+  capturing from wherever you actually are. This also covers external or `target="_blank"`
+  links whose browser tab does not expose an opener relationship.
 4. To temporarily suspend screenshots without ending the session, click **Pause recording**.
   The button changes to **Continue recording**. While paused, JShotz keeps the screenshot list,
   output selections, capture numbering, session folder, and tracked tabs or child windows. Click
   **Continue recording** to add subsequent screenshots to that same session.
-   If Chrome restarts during a recording, return to the restored page and open the JShotz popup.
-   JShotz reconnects to that live tab, restores automatic and manual captures, and keeps the same
-   screenshots, numbering, and session folder. Screen/window sharing cannot survive a browser
-   restart, so that recording continues with tab-viewport capture until sharing is started again.
+  If the browser restarts or crashes during a recording, JShotz ends that session safely rather
+  than attaching it to an arbitrary open tab. The popup reports the interruption, retains the
+  stored screenshots, and offers **Generate evidences**. Start a new recording for a new flow, or
+  use **Resume capture from folder** to continue a folder-backed flow.
 5. When you're done, click **Stop recording**. Use the **Screenshots** list to clear any frames
   you do not want in output. **Select all** starts checked and automatically clears when any
   individual screenshot is unchecked. This choice remains for the current recording if the popup
   closes and is reopened. You'll then be asked whether to keep the files:
    - **Yes, keep** — prompts for a custom file name and PDF, Word, or both. It then saves all PNGs,
-     the manifest, and selected documents. Each document contains only the checked screenshots,
-     and the Downloads folder opens after final browser-download output completes.
-   - **Stop without document** — keeps the captured PNGs and session manifest, but ends the
-     recording without creating a document.
-   - **No, delete all** — asks you to confirm, then removes everything from that session.
+     the manifest, and selected documents. Each document contains only the checked screenshots.
+     Choose **Save and stop (Ctrl+S)** to finish without opening the file location and receive a
+     saved-file toast, or **Save, stop, and open file location (Ctrl+Alt+S)** to reveal the
+     browser-download folder after final output completes.
+   - **Stop without document** — keeps the captured PNGs, session manifest, and current interim
+     PDF, but ends the recording without creating a final document.
+   - **No, delete all** — asks you to confirm, then removes everything from that session, including
+     its interim PDF.
+
+After a keep-files stop, the completed screenshot list stays available in the popup. Click **Generate
+evidences** to choose a custom base name, select PDF, Word, or both, and create another document from
+the checked screenshots. JShotz writes evidence documents into the same selected folder or Downloads
+session directory used by that recording. If an output document with the requested name already exists,
+JShotz appends the creation timestamp to make a new version instead of replacing it. Evidence remains
+available until you start a new recording.
 
 ### Manual capture options
 
@@ -159,27 +175,32 @@ Manual captures are available only while recording is active and not paused.
 
 ### Saving while continuing
 
-Use **Save checkpoint (Ctrl+S)** to open a checkpoint save dialog without stopping the active
+Use **Save checkpoint (Shift+Ctrl+S)** to open a checkpoint save dialog without stopping the active
 recording. Enter a custom base name and select PDF, Word, or both. The screenshot list, numbering,
-output selection, and current session folder remain unchanged.
+output selection, and current session folder remain unchanged. A toast confirms whether the
+checkpoint save succeeded or failed.
 
-Use **Save and stop (Ctrl+Alt+S)** to open the final save dialog. Once its selected documents are
-saved, JShotz ends the recording using the same keep-files behavior as **Stop recording**.
+Use **Save and stop (Ctrl+S)** to open the final save dialog. Once its selected documents are saved,
+JShotz ends the recording using the same keep-files behavior as **Stop recording**. A toast confirms
+the saved file name without opening its location.
 
-Use **Start new recording (Ctrl+N)** when the next activity belongs in a separate flow. JShotz
-prompts for a custom name and output formats, freezes and finalizes the current flow without
-deleting its screenshots or manifest, then starts the new recording at screenshot 1 in its own
-Downloads session folder.
+Use **Save, stop, and open file location (Ctrl+Alt+S)** to open the same final save dialog. Once its
+selected documents are saved, JShotz ends the recording and opens the browser-download location.
+For a directly selected capture folder, browser security does not expose the folder's native path;
+JShotz opens Downloads instead.
 
 The recorded JPEG frames are retained for output, regardless of the initial PDF preference, so a
-later dialog can create PDF, Word, or both.
+later dialog can create PDF, Word, or both. After a keep-files stop, **Generate evidences** uses those
+retained frames and the current checked screenshots to create additional documents.
 
-### Export document so far
+### Automatic interim backup
 
-Click **Export document so far** at any point during a recording to open a named checkpoint dialog
-for the screenshots currently checked in the **Screenshots** list, without stopping. Select PDF,
-Word, or both. The recording keeps going afterward, and final output uses the screenshots selected
-at that time.
+After screenshot 5 and every five screenshots after that, JShotz updates one
+`JShotz-interim.pdf`. It overwrites the existing file in the selected capture folder or the
+session's Downloads folder, so repeated backups do not create a growing set of files. The latest
+interim PDF remains available if the browser crashes, closes accidentally, or the recording stops
+without a document. A successful final PDF/Word save, or a successful post-stop **Generate
+evidences** save, removes the interim PDF.
 
 ### Resume capture from folder
 
@@ -190,22 +211,24 @@ recording cannot be recovered automatically:
 2. In the idle popup, click **Resume capture from folder**.
 3. Choose the exact earlier screenshot folder in the native folder dialog and grant read/write
   access.
+4. Click **Start recording**.
 
-JShotz immediately reloads the **Screenshots** list from that folder and captures the current page
-with the next sequence number. The earlier and new screenshots are selected for **Export document
-so far** and final **Stop recording** output. New PNGs, PDF/Word documents, and `flow-manifest.json` are written
-directly into the selected folder, and JShotz does not open a browser tab for this action.
+JShotz reloads the **Screenshots** list from that folder and captures the current page with the next
+sequence number. The earlier and new screenshots are selected for checkpoint and final **Stop
+recording** output. New PNGs, PDF/Word documents, and `flow-manifest.json` are written directly
+into the selected folder, and JShotz does not open a browser tab for this action.
 
-If the selected folder has no previous PNG or JPEG screenshots, JShotz starts a new recording in
-that folder instead. It displays: **No previous screenshots found in selected folder, JShotz is
-still capturing the current flows to the selected folder.**
+If the selected folder has no previous PNG or JPEG screenshots, Start recording starts a new recording
+in that folder instead. It displays: **No previous screenshots found in selected folder, JShotz is
+still capturing the current flows to the selected folder.** Without selecting a resume folder, Start
+recording always creates a fresh session and Downloads folder after a stop or browser restart.
 
 This workflow needs Chrome or Edge's native File System Access API. Firefox can record normally,
 but cannot resume into an arbitrary existing folder.
 
-After a browser restart, Chrome or Edge can require the folder permission again. JShotz changes
-the action to **Reconnect capture folder**; choose the same folder and the existing recording,
-screenshots, and sequence number continue unchanged.
+After a browser restart, the active recording has already ended safely. To continue a folder-backed
+flow, use **Resume capture from folder** and choose the same folder. **Reconnect capture folder**
+is for an active recording whose folder permission changes while the browser remains open.
 
 ### Modal capture behavior
 
@@ -213,21 +236,24 @@ JShotz takes one screenshot when a modal opens. A fixed modal suppresses page sc
 behind it. Only a large modal with a genuinely scrollable body produces a `modal-scrolled` capture
 after substantial movement. Buttons, input edits, and committed dropdown selections inside a modal
 each create one settled screenshot. For a modal with no scrollbar, JShotz exports a compact image
-of the modal rather than duplicating the entire page.
+of the modal rather than duplicating the entire page. Cookie-consent banners and similar wide
+in-page consent overlays remain in the full viewport image, so the affected page and its banner
+appear together as one screenshot.
 
 ---
 
 ## 6. Full-page (whole-page) capture
 
-When **"Whole-page shot"** is enabled, the following triggers capture the *entire* scrollable
-page instead of just the visible area — **without visibly scrolling your screen**:
+When **"Whole-page shots"** is enabled, the following triggers capture the *entire* scrollable
+page instead of just the visible area:
 
 - **Ctrl+Alt+Q**
 - **Capture now**
 - **Capture in 5s**
+- Automatic captures while the page is in a narrow responsive layout, including DevTools Device Mode
 
-Everything else (clicks, scrolling, field edits, navigation) stays as ordinary viewport shots,
-so your view is never disturbed by the automatic captures.
+Automatic captures on standard desktop layouts (clicks, scrolling, field edits, navigation) remain
+ordinary viewport shots, so those sessions stay lightweight.
 
 **How it works, and what to expect:**
 - For a page whose content naturally extends below the viewport, Chromium rasterizes the document
@@ -236,13 +262,16 @@ so your view is never disturbed by the automatic captures.
   scrolls just that inner panel, then returns the panel to its original position. The surrounding
   page layout stays in place.
 - Long captures are split into sequential, bounded **part N of M** screenshots at one shared
-  scale. Adjacent parts preserve the full page without a giant image, and are exported as
-  consecutive PDF pages. Compact captures crop unneeded blank canvas conservatively.
+  scale. Adjacent parts preserve the full page without a giant image and are exported as consecutive
+  PDF pages. Narrow responsive pages are divided into readable sections rather than shrinking a tall
+  mobile image to fit one landscape PDF page.
 - A progress bar appears in the popup and on the page while the capture runs. It is hidden before
   each screenshot and removed when capture completes.
-- If DevTools is already open on the tab, whole-page capture is skipped for that shot (DevTools
-  and the extension can't share the same debugging connection) and a normal single-frame
-  screenshot is taken instead.
+- Narrow responsive layouts, including Chrome DevTools Device Mode, capture overlapping visible frames
+  directly, stitch them into the same bounded parts, and restore the original document scroll position.
+  The page can scroll briefly while this runs; wait for the progress bar to end.
+- Stopping a recording cancels an in-progress whole-page capture promptly. Its unfinished frame is
+  discarded and cannot be added after the session stops.
 - Chrome may show a **"started debugging this browser"** banner for an ordinary-document capture.
   This is a hard Chrome platform notice with no way to hide it; it disappears immediately after
   the shot. App-shell stitch capture does not attach the debugger.
@@ -256,13 +285,13 @@ so your view is never disturbed by the automatic captures.
 | `Ctrl+Alt+Q` | Manual capture (page must have focus) |
 | `Alt+Shift+S` | Capture the current DevTools panel |
 | `Alt+Shift+D` | Capture in 5 seconds |
-| `Ctrl+S` | Open a named checkpoint save dialog and continue recording after saving |
-| `Ctrl+Alt+S` | Open the final save dialog, save the chosen output, and stop recording |
-| `Ctrl+N` | Save the current flow with the chosen output, then begin a separate recording |
+| `Shift+Ctrl+S` | Open a named checkpoint save dialog and continue recording after saving |
+| `Ctrl+S` | Open the final save dialog, save the chosen output, and stop recording without opening the file location |
+| `Ctrl+Alt+S` | Open the final save dialog, save the chosen output, stop recording, and open its browser-download location |
 
 The extension-command shortcuts can be assigned at `chrome://extensions/shortcuts` (or the
-Firefox equivalent). The Ctrl+S, Ctrl+Alt+S, and Ctrl+N flow controls are page shortcuts while a
-recording is active.
+Firefox equivalent). The Shift+Ctrl+S, Ctrl+S, and Ctrl+Alt+S flow controls are page shortcuts
+while a recording is active.
 
 ---
 
@@ -273,24 +302,29 @@ or use **Select all** to restore the full set. For large sessions, the popup ini
 50 newest screenshots; use **Show older screenshots** to reveal earlier ones. The current
 selection is preserved while the session is active, even when the popup closes.
 
-The same selection controls **Save checkpoint**, **Save and stop**, **Export document so far**,
-and final output created through **Stop recording**. Every output dialog accepts a custom base
-name and lets you choose PDF, Word, or both:
+The same selection controls **Save checkpoint**, **Save and stop**, **Save, stop, and open file
+location**, **Generate evidences**, and final output created through **Stop recording**. Every output
+dialog accepts a custom base name and lets you choose PDF, Word, or both:
 
 - With **Save individual PNG files** enabled, JShotz saves each captured screenshot separately.
 - **Stop without document** always retains the captured files and session manifest but skips
   PDF and Word creation for that stop operation.
 - The **Preselect PDF in output dialogs** preference changes only the initial dialog choice;
   output frames are retained so Word remains available later.
+- **Save, stop, and open file location (Ctrl+Alt+S)** reveals the final browser-download output.
+  A directly selected capture folder has no native path available to a browser extension, so JShotz
+  opens Downloads instead.
+- **Generate evidences** is available after a keep-files stop. It uses the same output folder as that
+  stopped recording and appends a timestamp when the requested evidence filename already exists.
 
 When resuming a selected folder, JShotz keeps PNG and document output available so the older and new
 screenshots stay together in that folder.
 
 The generated PDF and Word document use the page title as the heading for each captured step. Add
 an optional note of up to 50 characters under a screenshot; it appears after that heading as
-`[note]` in both document formats. Timestamp banners
-appear only when **Stamp clock + time zone on each shot** was enabled. API tables appear only on
-screenshots captured in **API + Screenshot** mode.
+`[note]` in both document formats. The action time appears immediately above the image and
+**Captured by Jobin's Screenshots** appears in the document footer; neither is overlaid on the
+captured page. API tables appear only on screenshots captured in **API + Screenshot** mode.
 
 ---
 
@@ -325,18 +359,21 @@ Downloads/
       001_<timestamp>_<label>.png
       002_<timestamp>_<label>.png
       ...
+      JShotz-interim.pdf        (updated after every fifth screenshot until final save)
       flow-manifest.json        (list of every capture plus diagnostic debugLog)
       <custom-name>.pdf         (when PDF is selected)
       <custom-name>.docx        (when Word is selected)
       <custom-name>_checkpoint.pdf / .docx   (for checkpoint saves)
+      <custom-name>_<timestamp>.pdf / .docx  (when a same-named evidence document already exists)
 ```
 
     Pausing does not create another folder. When you click **Continue recording**, new screenshots
     keep the next number and are written beside the screenshots already shown in the list.
 
-  When you use **Resume capture from folder**, the selected existing folder becomes the working
-  folder. JShotz writes the new PNGs, checkpoint and final PDF/Word documents, and updated `flow-manifest.json`
-  there instead of creating a new Downloads session folder.
+  When you use **Resume capture from folder** and then click **Start recording**, the selected existing
+  folder becomes the working folder. JShotz writes the new PNGs, checkpoint and final PDF/Word
+  documents, post-stop evidence documents, interim PDF, and updated `flow-manifest.json` there
+  instead of creating a new Downloads session folder.
 
 ---
 
@@ -360,7 +397,8 @@ extension storage until you start a new recording.
 
 - The "started debugging this browser" banner during whole-page captures cannot be hidden —
   this is a Chrome security notice, not a bug.
-- Whole-page capture is skipped while DevTools is open on the recorded tab.
+- When DevTools is open on the recorded tab, JShotz uses visible-frame stitching for long responsive
+  pages and restores the original scroll position when it finishes.
 - Multi-tab and child-window following remains active while a session is paused and when the
   background service worker restarts.
 - A horizontally-scrolling element on a page (e.g. a carousel) is captured exactly as it

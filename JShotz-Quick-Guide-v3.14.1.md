@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.14.0**
+**Version 3.14.1**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF or Word document - handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -19,29 +19,47 @@ documenting a process, a support case, or a step-by-step walkthrough.
      can show DevTools or other apps).
 3. Click **Start recording**.
 4. Use the page normally — screenshots are taken automatically as you click and scroll.
+   JShotz keeps the resulting documents in the order you acted, even when a screen waits to
+   render; each frame's title and URL come from the page being captured.
 5. To take a break without ending the session, click **Pause recording**. It becomes
    **Continue recording**; continuing keeps the same screenshots, numbering, and session folder.
-6. Need a checkpoint without stopping? Click **Save checkpoint (Ctrl+S)**. Enter a file name,
-   choose PDF, Word, or both, and JShotz keeps the current recording active.
-7. Click **Save and stop (Ctrl+Alt+S)** to enter the same choices, save the selected documents,
-   and end the recording. The download folder opens after a browser-download save completes.
-8. Click **Start new recording (Ctrl+N)** to save the current flow with a custom name and selected
-   formats, then begin a separate recording in a new session folder.
+6. Need a checkpoint without stopping? Click **Save checkpoint (Shift+Ctrl+S)**. Enter a file name,
+   choose PDF, Word, or both, and JShotz keeps the current recording active. A toast confirms
+   whether the save succeeded or failed.
+7. Need a final save without opening the file location? Press **Ctrl+S** or click **Stop recording**,
+   then choose **Yes, keep** and **Save and stop (Ctrl+S)**. It saves the selected documents, ends
+   the recording, and shows a saved-file toast.
+8. Choose **Save, stop, and open file location (Ctrl+Alt+S)** to save the selected documents, end
+   the recording, and reveal the browser-download location.
 9. When you are done with the final flow, clear unwanted frames in the **Screenshots** list, then
    click **Stop recording**. The confirmation appears directly under that button: choose **Yes,
-   keep** to choose a custom name and PDF, Word, or both, **Stop without document** to keep the
-   captured files and manifest without a document, or **No, delete all** to discard the session.
+   keep** to choose a custom name and PDF, Word, or both, then select **Save and stop (Ctrl+S)** or
+   **Save, stop, and open file location (Ctrl+Alt+S)**. Choose **Stop without document** to keep the
+   captured files and manifest without a document, or **No, delete all** to discard the session and
+   its interim backup.
+10. After keeping a stopped session, use **Generate evidences** to create another PDF, Word document,
+    or both from the checked screenshots. Enter a name, choose the formats, and JShotz writes them to
+    the same selected folder or Downloads session folder. If an output document already has that name,
+    JShotz appends its creation timestamp instead of replacing it.
 
 You can change the capture source at any time without stopping the recording.
 
-If Chrome restarts during an active recording, return to the restored page and open the JShotz
-popup. The recording reconnects to that live tab and preserves the existing screenshots, numbering,
-and session folder.
+JShotz updates one `JShotz-interim.pdf` after screenshot 5 and every five screenshots after that.
+It overwrites that same file in the selected capture folder or in the session's Downloads folder,
+so it does not create a new backup file for every checkpoint. A successful final PDF or Word save
+removes the interim PDF. **Stop without document**, a browser crash, or an accidental browser close
+keeps the latest interim PDF available.
 
-If a browser or extension crash leaves only an earlier screenshot folder, use **Resume capture from
-folder**. JShotz loads that folder's screenshots, starts at the next number, and includes the old
-and new screenshots in its checkpoint and final documents. If the selected folder has no previous PNG
-or JPEG screenshots, JShotz starts a new recording there and writes the current flow to it.
+If the browser restarts during an active recording, JShotz ends that recording safely instead of
+binding it to whichever tab is currently open. The popup reports the interruption, retains the
+stored screenshots, and offers **Generate evidences**. Start a new recording for a new flow, or use
+**Resume capture from folder** to continue a folder-backed flow.
+
+To continue a folder-backed flow after a browser or extension crash, use **Resume capture from
+folder**, choose that folder, then click **Start recording**. JShotz loads that folder's screenshots,
+starts at the next number, and includes the old and new screenshots in its checkpoint and final
+documents. If the selected folder has no previous PNG or JPEG screenshots, Start recording creates a
+new recording there and writes the current flow to it.
 
 If Chrome no longer grants write access to that selected folder, recording still continues and new
 screenshots go to the normal Downloads session folder. Use **Reconnect capture folder** when you
@@ -78,33 +96,36 @@ error card after reopening the tab.
 
 ## Getting the whole page in one shot
 
-Turn on **"Whole-page shot for Ctrl+Alt+Q and Capture now"** in settings, then use one of those
-two actions (or Capture in 5s) to capture the *entire* page — including everything below the
-fold — without enlarging or reflowing the page. Everyday automatic captures (clicks, scrolling)
-are left as normal single-screen shots so your view is never disturbed.
+Turn on **"Whole-page shots for manual captures and responsive layouts"** in settings. It captures
+the *entire* page — including everything below the fold — when you use **Capture now**, **Ctrl+Alt+Q**,
+or **Capture in 5s**. It also uses long screenshots automatically for a narrow responsive layout,
+including Chrome DevTools Device Mode. Desktop automatic captures (clicks and scrolling) remain normal
+single-screen shots.
 
-Very long pages are saved as adjacent, numbered parts instead of one oversized image; the parts
-remain in order when you export a document. A progress bar appears in the popup and on the page while
-the whole-page capture is running, then disappears when it finishes.
+Very long pages are saved as adjacent, numbered parts instead of one oversized image. Narrow responsive
+pages are divided into readable sections so their PDF evidence does not shrink to a thin strip. The parts
+remain in order when you export a document. A progress bar appears in the popup and on the page while the
+whole-page capture is running, then disappears when it finishes.
+
+Responsive layouts, including Chrome DevTools Device Mode, stitch overlapping visible frames directly. This
+preserves the responsive viewport and restores the original scroll position when it finishes. If you stop
+recording while a long capture is active, JShotz cancels it promptly and discards its unfinished frame. Do
+not interact with the page until the progress bar disappears.
 
 For ordinary documents, Chrome may show a "started debugging this browser" banner for a moment.
-That browser notice clears on its own; JShotz does not resize the page to take the capture.
 
 ---
 
 ## Saving documents while you continue
 
-Click **Save checkpoint (Ctrl+S)** at any point to open a compact save dialog. Enter the custom
+Click **Save checkpoint (Shift+Ctrl+S)** at any point to open a compact save dialog. Enter the custom
 base name, select PDF, Word, or both, and save a checkpoint without stopping the recording. The
-current screenshots, numbering, and output selection remain available for later work.
+current screenshots, numbering, and output selection remain available for later work. A toast
+reports the save result.
 
-Use **Export document so far** for the same named checkpoint output from the popup. The
-**Preselect PDF in output dialogs** option controls the initial format choice; each dialog always
-lets you choose PDF, Word, or both.
-
-Choose **Start new recording (Ctrl+N)** when the next piece of work should be a separate flow.
-JShotz keeps all files from the completed flow, saves the chosen documents using the current
-selection, and starts the new flow at screenshot 1 in a new Downloads session folder.
+The checkpoint document is written alongside the active session's other output. The **Preselect
+PDF in output dialogs** option controls the initial format choice; each dialog always lets you
+choose PDF, Word, or both.
 
 ## Modal windows
 
@@ -112,13 +133,15 @@ JShotz captures a modal once when it opens. While a fixed modal is visible, scro
 behind it does not create screenshots. A large modal with a real scrollable body is captured when
 you scroll substantially inside it; small modal scroll areas are ignored. Modal buttons, edits,
 and selected values create one settled screenshot each. Non-scrollable modals are exported as a
-compact modal-only image instead of a full-page duplicate.
+compact modal-only image instead of a full-page duplicate. Cookie-consent banners and other wide
+in-page consent overlays stay in the full viewport capture with the page behind them.
 
 ---
 
 ## Choose output screenshots and add notes
 
-Every captured screenshot starts selected for document output. Before a checkpoint or final export:
+Every captured screenshot starts selected for document output. Before a checkpoint, final export, or
+post-stop evidence generation:
 
 1. Clear the checkbox beside any screenshot you do not want in the document.
 2. Use **Select all** to include every screenshot again.
@@ -126,8 +149,9 @@ Every captured screenshot starts selected for document output. Before a checkpoi
 4. Enter an optional note of up to 50 characters under a screenshot. A saved note appears after
    that screenshot's heading in brackets in PDF and Word output.
 
-Your selection remains with the active recording when the popup closes. Only selected screenshots
-appear in checkpoint and final documents.
+Your selection remains with the active or most recently kept recording when the popup closes. Only
+selected screenshots appear in checkpoint, final, and evidence documents. Evidence generation remains
+available until you start a new recording.
 
 ---
 
@@ -137,18 +161,20 @@ appear in checkpoint and final documents.
 2. Click **Resume capture from folder** in the popup.
 3. Choose the earlier session's screenshot folder in the native folder dialog and allow read/write
    access.
-4. JShotz refreshes the **Screenshots** list with the earlier files and immediately captures the
-   current page as the next screenshot.
+4. Click **Start recording**. JShotz refreshes the **Screenshots** list with the earlier files and
+   captures the current page as the next screenshot.
 
 When the selected folder has no previous PNG or JPEG screenshots, JShotz treats it as the current
-flow's output folder instead. It immediately starts a new recording and confirms that captures are
-being written to the selected folder.
+flow's output folder instead. Start recording begins a new recording there and confirms that captures
+are being written to the selected folder. Without selecting a resume folder, Start recording always
+creates a fresh session and Downloads folder after a stop or browser restart.
 
 New PNG files, checkpoint and final PDF/Word documents, and the refreshed `flow-manifest.json` are written
 to that same selected folder. No browser tab is opened for this action. It is available in Chrome
 and Edge; Firefox can record normally but cannot write directly into an arbitrary existing folder.
-If Chrome or Edge asks for folder access again after a restart, the button becomes **Reconnect
-capture folder**. Choose the same folder to continue without resetting the current flow.
+If Chrome or Edge asks for folder access again while an active folder-backed recording remains open,
+the button becomes **Reconnect capture folder**. After a browser restart, choose **Resume capture
+from folder** instead.
 
 ---
 
@@ -158,9 +184,11 @@ capture folder**. Choose the same folder to continue without resetting the curre
 - `Alt+Shift+S`: capture the currently visible DevTools panel.
 - `Alt+Shift+D`: start a five-second countdown, then capture. Use this when you need time to
    click into DevTools.
-- `Ctrl+S`: open the checkpoint save dialog and keep recording after it is saved.
-- `Ctrl+Alt+S`: open the final save dialog, save the chosen output, and stop recording.
-- `Ctrl+N`: save the current flow with the chosen output, then start a separate recording.
+- `Shift+Ctrl+S`: open the checkpoint save dialog and keep recording after it is saved.
+- `Ctrl+S`: open the final save dialog, save the chosen output, and stop recording without opening
+   the file location.
+- `Ctrl+Alt+S`: open the final save dialog, save the chosen output, stop recording, and open its
+   browser-download location.
 
 You can change extension shortcuts at `chrome://extensions/shortcuts` or the Firefox equivalent.
 If a page was open while JShotz was installed, reloaded, or updated, refresh that page before
@@ -186,12 +214,15 @@ Everything is saved under your Downloads folder:
 Downloads/flow-captures/session_<date-time>/
 ```
 
-This includes your screenshots, selected PDF and/or Word documents, and a technical `debugLog` inside
-`flow-manifest.json` for troubleshooting. The log is stored in the extension background while
-you record, so it never interrupts a recording with a separate download prompt.
+This includes your screenshots, selected PDF and/or Word documents, evidence documents, and a technical
+`debugLog` inside `flow-manifest.json` for troubleshooting. The log is stored in the extension
+background while you record, so it never interrupts a recording with a separate download prompt.
 
 The custom base name you enter is used for `.pdf` and/or `.docx` files. Checkpoint defaults include
 `_checkpoint_<date-time>` so repeated saves do not replace earlier checkpoints.
+
+Evidence output uses the same folder as the stopped recording. If a selected evidence filename already
+exists, JShotz creates a new version by appending `_<date-time>` before its extension.
 
 When you resume from a folder, JShotz writes new files directly beside the earlier screenshots in
 the folder you selected instead of creating a new Downloads session folder.
