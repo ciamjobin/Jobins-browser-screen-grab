@@ -32,7 +32,7 @@ Automated source: `tests/content-capture.test.mjs`
 | CAP-10 | Opens the appropriate output dialog for recorder hotkeys |
 | CAP-11 | Captures a cookie consent banner with its underlying page instead of cropping it |
 | CAP-12 | Captures nested, ARIA-expanded, and accessible link controls before navigation |
-| CAP-13 | Preserves original action time through delayed click, edit, selection, scroll, and modal captures |
+| CAP-13 | Preserves original action time and emits one settled click frame through delayed capture paths |
 
 ## Document Output
 
@@ -44,7 +44,7 @@ Automated source: `tests/docx.test.mjs` and `tests/exporter.test.mjs`
 | DOC-02 | Renders screenshot notes in PDF headings |
 | DOC-03 | Removes characters that are illegal in Office Open XML text |
 | DOC-04 | Places a widescreen screenshot directly below its time metadata in PDF output |
-| DOC-05 | Places a responsive capture part at a readable width in PDF output |
+| DOC-05 | Places a tall whole-page capture part at a readable width in PDF output |
 | EXP-01 | Exports fallback PDFs as data URLs without calling createObjectURL |
 | EXP-02 | Exports fallback PDF and Word files from one stored capture |
 | EXP-03 | Includes the checkpoint request ID in exporter completion messages |
@@ -113,7 +113,9 @@ Automated source: `tests/recording-recovery.test.mjs`
 | REC-30 | Removes the Downloads interim PDF after a successful final document save |
 | REC-31 | Removes the interim PDF when the user discards the session |
 | REC-32 | Reasserts hidden download UI immediately before an automatic PNG download |
-| REC-33 | Stitches a long responsive document automatically when DevTools blocks CDP capture |
+| REC-33 | Uses one visible frame when a manual responsive capture cannot use CDP |
+| REC-34 | Captures an automatic responsive click as one visible frame |
+| REC-35 | Stops promptly while a direct whole-page capture is still in progress |
 
 ## Playwright Starter Cases
 

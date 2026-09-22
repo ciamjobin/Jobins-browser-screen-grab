@@ -15,7 +15,7 @@ const saveAndOpenEl = document.getElementById('saveAndOpenOutput');
 const cancelEl = document.getElementById('cancelOutput');
 
 const labels = {
-  checkpoint: { title: 'Save checkpoint', button: 'Save checkpoint (Shift+Ctrl+S)' },
+  checkpoint: { title: 'Save checkpoint (Ctrl+Shift+S)', button: 'Save checkpoint (Ctrl+Shift+S)' },
   final: {
     title: 'Save and stop recording',
     button: 'Save and stop (Ctrl+S)'

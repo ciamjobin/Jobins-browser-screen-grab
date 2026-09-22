@@ -34,6 +34,16 @@ h1 {
   white-space: nowrap;
 }
 
+.popup-tagline {
+  margin-left: auto;
+  color: #e00000;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: right;
+  white-space: nowrap;
+}
+
 h2 {
   margin: 16px 0 6px;
   font-size: 12px;
@@ -289,6 +299,15 @@ h2 {
   margin: 12px 0 0;
   font-size: 11px;
   color: #7b8794;
+}
+
+.shortcut-list {
+  margin: 5px 0 0;
+  padding-left: 18px;
+}
+
+.shortcut-list li {
+  margin: 2px 0;
 }
 
 #hint {

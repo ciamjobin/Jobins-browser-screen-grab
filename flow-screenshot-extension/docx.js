@@ -1,8 +1,8 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const EMU_PER_PIXEL = 9525;
-const MAX_IMAGE_WIDTH = 6.7 * 914400;
-const MAX_IMAGE_HEIGHT = 6.4 * 914400;
+const MAX_IMAGE_WIDTH = 10466 * 635;
+const MAX_IMAGE_HEIGHT = 9.65 * 914400;
 
 function bytesFor(value) {
   if (value instanceof Uint8Array) return value;
@@ -210,7 +210,7 @@ function documentXml(pages) {
     'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">',
     '<w:body>',
     sections.join(''),
-    '<w:sectPr><w:footerReference w:type="default" r:id="rId99"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:footer="360"/></w:sectPr>',
+    '<w:sectPr><w:footerReference w:type="default" r:id="rId99"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:footer="360"/></w:sectPr>',
     '</w:body></w:document>'
   ].join('');
 }

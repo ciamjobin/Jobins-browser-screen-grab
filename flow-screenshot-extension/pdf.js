@@ -1,7 +1,7 @@
 // Minimal PDF writer: one page per screenshot, each with a title heading and an embedded JPEG.
 
-const PAGE_WIDTH = 792;
-const PAGE_HEIGHT = 612;
+const PAGE_WIDTH = 595;
+const PAGE_HEIGHT = 842;
 const MARGIN = 28;
 const TITLE_SIZE = 14;
 const META_SIZE = 9;

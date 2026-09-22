@@ -72,8 +72,31 @@ let fullPageCaptureActive = false;
 let countdownTimer = 0;
 let activeDialogFingerprint = null;
 let cookieConsentSurfaces = [];
-const scrollAnchors = new WeakMap();
-const capturedDialogs = new WeakSet();
+let scrollAnchors = new WeakMap();
+let capturedDialogs = new WeakSet();
+
+function resetRecordingSession() {
+  clearTimeout(editTimer);
+  clearTimeout(selectionTimer);
+  clearTimeout(dialogTimer);
+  clearTimeout(scrollTimer);
+  clearTimeout(countdownTimer);
+  editTimer = 0;
+  selectionTimer = 0;
+  dialogTimer = 0;
+  scrollTimer = 0;
+  countdownTimer = 0;
+  lastSent = { key: '', at: 0 };
+  suppressScrollUntil = 0;
+  fullPageCaptureActive = false;
+  activeDialogFingerprint = null;
+  cookieConsentSurfaces = [];
+  scrollAnchors = new WeakMap();
+  capturedDialogs = new WeakSet();
+  document.getElementById('jshotz-countdown')?.remove();
+  document.getElementById('jshotz-full-page-progress')?.remove();
+  document.getElementById('jshotz-full-page-progress-style')?.remove();
+}
 
 function describe(element) {
   const candidates = [
@@ -165,24 +188,21 @@ function looksBusy() {
 }
 
 // A button click on a client-rendered page often swaps in a loading spinner before the real next
-// screen appears. Both are worth keeping: the interim frame shows the action was taken, the settled
-// one shows the result. Fires immediately, then again once the DOM stops changing.
+// screen appears. Wait for the settled page and capture it once, rather than recording the spinner
+// and the result as separate steps.
 async function requestCaptureAfterSettle(reason, label, actionAt) {
   // Dialogs often mount after their click handler's async state update or entrance animation.
   // Give that small window to appear so its opening frame replaces the underlying page-click frame.
   await new Promise((resolve) => setTimeout(resolve, MODAL_OPEN_GRACE_MS));
   if (activeModal()) return;
-  requestCapture(reason, label, undefined, actionAt);
 
   const deadline = Date.now() + SETTLE_MAX_WAIT_MS;
   await waitForQuiet(SETTLE_QUIET_MS, SETTLE_MAX_WAIT_MS);
   while (looksBusy() && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
-  // A distinct reason so the settled shot is not deduped against the interim one by label alone;
-  // the background still drops it if the page turned out not to have changed at all.
   if (activeModal()) return;
-  requestCapture(`${reason}-loaded`, label, undefined, actionAt);
+  requestCapture(reason, label, undefined, actionAt);
 }
 
 function describeEditedField(element) {
@@ -487,8 +507,13 @@ function linkCaptureOptions(link, dialog, event) {
   return options;
 }
 
-function isManualShortcut(event) {
-  return event.ctrlKey && event.altKey && !event.shiftKey && event.key?.toLowerCase() === 'q';
+function isNavigationalLink(link) {
+  const href = String(link.getAttribute?.('href') || '').trim();
+  if (!href && link.getAttribute?.('role') === 'link') return true;
+  if (!href || href === '#' || /^javascript:/i.test(href)) return false;
+  const currentUrl = String(window.location?.href || '');
+  const destination = String(link.href || href);
+  return !currentUrl || (destination !== currentUrl && destination !== `${currentUrl}#`);
 }
 
 function isSaveAndOpenLocationShortcut(event) {
@@ -533,11 +558,6 @@ function requestOutputDialog(mode) {
 window.addEventListener(
   'keydown',
   (event) => {
-    if (isManualShortcut(event)) {
-      preventShortcut(event);
-      requestCapture('manual-hotkey', 'Ctrl+Alt+Q');
-      return;
-    }
     if (isSaveAndOpenLocationShortcut(event)) {
       preventShortcut(event);
       if (!event.repeat) requestOutputDialog('final');
@@ -571,7 +591,14 @@ window.addEventListener(
     if (link) {
       const dialog = modalForElement(link);
       if (openDialog && !dialog) return;
-      requestCapture(dialog ? 'modal-link' : 'link', describe(link), linkCaptureOptions(link, dialog, event), actionAt);
+      const options = linkCaptureOptions(link, dialog, event);
+      if (options.opensNewTab || isNavigationalLink(link)) {
+        requestCapture(dialog ? 'modal-link' : 'link', describe(link), options, actionAt);
+      } else if (dialog) {
+        requestModalActionAfterSettle('modal-link-action', describe(link), dialog, actionAt);
+      } else {
+        requestCaptureAfterSettle('link-action', describe(link), actionAt);
+      }
       return;
     }
 
@@ -601,6 +628,20 @@ window.addEventListener(
     if (!trigger) return;
 
     if (trigger instanceof HTMLInputElement && (trigger.type === 'checkbox' || trigger.type === 'radio')) return;
+
+    const toggleRole = trigger.getAttribute?.('role');
+    if (toggleRole === 'checkbox' || toggleRole === 'radio' || toggleRole === 'switch') {
+      setTimeout(() => {
+        const state = trigger.getAttribute('aria-checked') === 'true' ? 'checked' : 'unchecked';
+        requestCapture(
+          dialog ? 'modal-toggle' : 'toggle',
+          `${describe(trigger)} = ${state}`.slice(0, 80),
+          dialog ? modalCaptureOptions(dialog) : undefined,
+          actionAt
+        );
+      }, 0);
+      return;
+    }
 
     const opensList = trigger.hasAttribute('aria-haspopup') || trigger.hasAttribute('aria-expanded');
     if (opensList) return;
@@ -714,7 +755,7 @@ window.addEventListener(
     if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) {
       const state = element.checked ? 'checked' : 'unchecked';
       requestCapture(
-        dialog ? 'modal-edited' : 'toggle',
+        dialog ? 'modal-toggle' : 'toggle',
         `${describe(element)} = ${state}`.slice(0, 80),
         dialog ? modalCaptureOptions(dialog) : undefined,
         actionAt
@@ -854,6 +895,11 @@ function showCountdown(seconds) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'RECORDING_SESSION_STARTED') {
+    resetRecordingSession();
+    sendResponse({ ok: true });
+    return false;
+  }
   if (message?.type === 'API_HOOK_CONFIG') {
     setApiCaptureEnabled(Boolean(message.enabled));
     sendResponse({ ok: true });

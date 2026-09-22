@@ -124,7 +124,7 @@ test('places a widescreen screenshot directly below its time metadata in PDF out
 
   assert.match(
     Buffer.from(pdf).toString('latin1'),
-    /q 736\.00 0 0 414\.00 28\.00 93\.00 cm \/Im0 Do Q/
+    /q 539\.00 0 0 303\.19 28\.00 433\.81 cm \/Im0 Do Q/
   );
 });
 
@@ -141,6 +141,21 @@ test('places a responsive capture part at a readable width in PDF output', () =>
 
   assert.match(
     Buffer.from(pdf).toString('latin1'),
-    /q 525\.30 0 0 479\.00 133\.35 28\.00 cm \/Im0 Do Q/
+    /q 539\.00 0 0 491\.49 28\.00 245\.51 cm \/Im0 Do Q/
   );
+});
+
+test('uses the printable A4 width for a full-page part in Word output', () => {
+  const bytes = buildDocx([{
+    title: 'Register your retirement account (part 1 of 3)',
+    url: 'https://example.test/register',
+    time: '2026-09-21 16:35 UTC',
+    width: 1200,
+    height: 1300,
+    jpeg: Uint8Array.from([0xff, 0xd8, 0xff, 0xd9])
+  }]);
+  const documentXml = new TextDecoder().decode(zipEntries(bytes).get('word/document.xml'));
+
+  assert.match(documentXml, /wp:extent cx="6645910" cy="7199736"/);
+  assert.match(documentXml, /w:pgSz w:w="11906" w:h="16838"/);
 });

@@ -83,6 +83,121 @@ function modalCropRect(modal, bitmapWidth, bitmapHeight) {
   return { x, y, width: right - x, height: bottom - y };
 }
 
+function fullPageCropRect(ctx, width, height) {
+  if (width < 32 || height < 32) return null;
+  const { data } = ctx.getImageData(0, 0, width, height);
+  const sampleStepX = Math.max(1, Math.floor(width / 400));
+  const sampleStepY = Math.max(1, Math.floor(height / 800));
+  const colorCounts = new Map();
+
+  for (let y = Math.max(0, height - 8); y < height; y += 1) {
+    for (let x = 0; x < width; x += sampleStepX) {
+      const index = (y * width + x) * 4;
+      const key = `${data[index] >> 3},${data[index + 1] >> 3},${data[index + 2] >> 3}`;
+      colorCounts.set(key, (colorCounts.get(key) || 0) + 1);
+    }
+  }
+
+  const backgroundKey = [...colorCounts.entries()]
+    .filter(([key]) => key.split(',').every((value) => Number(value) >= 27))
+    .sort((left, right) => right[1] - left[1])[0]?.[0];
+  if (!backgroundKey) return null;
+  const background = backgroundKey.split(',').map((value) => Number(value) << 3);
+  const differs = (index) =>
+    Math.abs(data[index] - background[0]) > 12 ||
+    Math.abs(data[index + 1] - background[1]) > 12 ||
+    Math.abs(data[index + 2] - background[2]) > 12;
+
+  const rowSamples = Math.ceil(width / sampleStepX);
+  let bottom = height;
+  for (let y = height - 1; y >= 0; y -= 1) {
+    let painted = 0;
+    for (let x = 0; x < width; x += sampleStepX) {
+      if (differs((y * width + x) * 4)) painted += 1;
+    }
+    if (painted > rowSamples * 0.03) {
+      bottom = y + 1;
+      break;
+    }
+  }
+
+  const columnSamples = Math.ceil(bottom / sampleStepY);
+  let right = width;
+  let paintedColumnRun = 0;
+  for (let x = width - 1; x >= 0; x -= 1) {
+    let painted = 0;
+    for (let y = 0; y < bottom; y += sampleStepY) {
+      if (differs((y * width + x) * 4)) painted += 1;
+    }
+    if (painted > columnSamples * 0.01) {
+      paintedColumnRun += 1;
+      if (paintedColumnRun >= 4) {
+        right = x + paintedColumnRun;
+        break;
+      }
+    } else {
+      paintedColumnRun = 0;
+    }
+  }
+
+  const padding = Math.max(16, Math.min(48, Math.round(Math.min(width, height) / 50)));
+  const cropWidth = Math.min(width, right + padding);
+  const cropHeight = Math.min(height, bottom + padding);
+  if (cropWidth >= width && cropHeight >= height) return null;
+  if (cropWidth < 32 || cropHeight < 32) return null;
+  return { x: 0, y: 0, width: cropWidth, height: cropHeight };
+}
+
+function paintedContentRatio(ctx, width, height) {
+  if (width < 2 || height < 2) return 0;
+  const stepX = Math.max(1, Math.floor(width / 160));
+  const stepY = Math.max(1, Math.floor(height / 120));
+  const { data } = ctx.getImageData(0, 0, width, height);
+  const corners = [
+    0,
+    (width - 1) * 4,
+    ((height - 1) * width) * 4,
+    (height * width - 1) * 4
+  ];
+  const background = [0, 1, 2].map((channel) =>
+    Math.round(corners.reduce((sum, index) => sum + data[index + channel], 0) / corners.length)
+  );
+  let painted = 0;
+  let samples = 0;
+  for (let y = 0; y < height; y += stepY) {
+    for (let x = 0; x < width; x += stepX) {
+      const index = (y * width + x) * 4;
+      if (
+        Math.abs(data[index] - background[0]) > 18 ||
+        Math.abs(data[index + 1] - background[1]) > 18 ||
+        Math.abs(data[index + 2] - background[2]) > 18
+      ) painted += 1;
+      samples += 1;
+    }
+  }
+  return samples ? painted / samples : 0;
+}
+
+async function scoreCapture(dataUrl) {
+  let bitmap;
+  let canvas;
+  try {
+    bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+    canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0);
+    return { paintedRatio: paintedContentRatio(ctx, bitmap.width, bitmap.height) };
+  } finally {
+    bitmap?.close();
+    if (canvas) {
+      canvas.width = 1;
+      canvas.height = 1;
+    }
+  }
+}
+
 const TABLE_FONT = 14;
 const TABLE_LINE = 19;
 const TABLE_PAD = 10;
@@ -201,15 +316,25 @@ async function processCapture({
   apiRows,
   titleBar,
   jpegQuality,
-  modal
+  modal,
+  trimBlankMargins
 }) {
   let bitmap;
+  let sourceCanvas;
   let imageCanvas;
   let outputCanvas;
   try {
     const blob = await (await fetch(dataUrl)).blob();
     bitmap = await createImageBitmap(blob);
-    const crop = modalCropRect(modal, bitmap.width, bitmap.height);
+    let crop = modalCropRect(modal, bitmap.width, bitmap.height);
+    if (!crop && trimBlankMargins) {
+      sourceCanvas = document.createElement('canvas');
+      sourceCanvas.width = bitmap.width;
+      sourceCanvas.height = bitmap.height;
+      const sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true });
+      sourceCtx.drawImage(bitmap, 0, 0);
+      crop = fullPageCropRect(sourceCtx, bitmap.width, bitmap.height);
+    }
     const imageWidth = crop?.width || bitmap.width;
     const imageHeight = crop?.height || bitmap.height;
     const titleHeight = titleBar ? titleBarHeight(imageWidth) : 0;
@@ -252,6 +377,10 @@ async function processCapture({
     };
   } finally {
     bitmap?.close();
+    if (sourceCanvas) {
+      sourceCanvas.width = 1;
+      sourceCanvas.height = 1;
+    }
     if (imageCanvas) {
       imageCanvas.width = 1;
       imageCanvas.height = 1;
@@ -301,7 +430,8 @@ function wrapLines(ctx, text, maxWidth) {
 
 const handlers = {
   OFFSCREEN_PING: () => ({ ok: true }),
+  OFFSCREEN_SCORE_CAPTURE: (message) => scoreCapture(message.dataUrl),
   OFFSCREEN_PROCESS: (message) => processCapture(message)
 };
 
-export { processCapture, handlers, modalCropRect };
+export { processCapture, handlers, modalCropRect, fullPageCropRect, paintedContentRatio };

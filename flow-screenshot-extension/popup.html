@@ -8,6 +8,7 @@
     <header class="popup-header">
       <h1>JShotz</h1>
       <span id="extensionVersion" class="extension-version" aria-label="JShotz version" hidden></span>
+      <span class="popup-tagline">Prompted by Jobin,<br />Coded by co-pilot!!</span>
     </header>
 
     <p id="status" class="status idle">Idle</p>
@@ -34,20 +35,27 @@
       </label>
 
       <p class="note" id="shortcutHint" hidden>
-        Press <strong>Alt+Shift+S</strong> while a DevTools Headers / Payload / Response panel is open to
+        Press <strong>Alt+Shift+K</strong> while a DevTools Headers / Payload / Response panel is open to
         capture it. Chrome ignores extension shortcuts while the DevTools window itself has focus, so use
-        <strong>Alt+Shift+D</strong> or the <strong>Capture in 5s</strong> button below and click into
+        <strong>Alt+Shift+D</strong> or the <strong>DevTools capture in 5s</strong> button below and click into
         DevTools during the countdown.
       </p>
 
-      <p class="note">
-        Press <strong>Ctrl+Alt+Q</strong> while the page is focused to capture manually. Browser-wide shortcut
-        can be assigned at extensions/shortcuts.
-      </p>
+      <div class="note" id="shortcutSummary">
+        <strong>Available shortcuts</strong>
+        <ul class="shortcut-list">
+          <li><strong>Alt+Shift+J</strong> Whole page</li>
+          <li><strong>Alt+Shift+K</strong> DevTools</li>
+          <li><strong>Alt+Shift+D</strong> Delayed DevTools</li>
+          <li><strong>Ctrl+Shift+S</strong> Save checkpoint</li>
+          <li><strong>Ctrl+S</strong> Save and stop</li>
+          <li><strong>Ctrl+Alt+S</strong> Save, stop, and open location</li>
+        </ul>
+      </div>
 
       <label class="check"><input type="checkbox" id="captureOnClick" checked /> Capture on every button click</label>
       <label class="check"><input type="checkbox" id="captureOnScroll" checked /> Capture every 60% of a screen scrolled, and at the end</label>
-      <label class="check"><input type="checkbox" id="fullPage" checked /> Whole-page shots for manual captures and responsive layouts</label>
+      <label class="check"><input type="checkbox" id="fullPage" checked /> Whole-page shots for manual captures</label>
       <label class="check"><input type="checkbox" id="savePng" checked /> Save individual PNG files</label>
       <label class="check"><input type="checkbox" id="savePdf" checked /> Preselect PDF in output dialogs</label>
     </div>
@@ -63,9 +71,9 @@
         </div>
       </div>
       <button id="pauseResume" hidden>Pause recording</button>
-      <button id="captureNow" disabled>Capture now</button>
-      <button id="captureLater" disabled>Capture in 5s</button>
-      <button id="saveFlow" class="primary" disabled>Save checkpoint (Shift+Ctrl+S)</button>
+      <button id="captureNow" disabled>Capture whole page (Alt+Shift+J)</button>
+      <button id="captureLater" disabled>DevTools capture in 5s (Alt+Shift+D)</button>
+      <button id="saveFlow" class="primary" disabled>Save checkpoint (Ctrl+Shift+S)</button>
     </div>
 
     <div class="actions completed-evidence-actions" id="completedEvidenceActions" hidden>

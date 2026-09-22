@@ -266,6 +266,7 @@ function createChrome() {
   const tabMessages = [];
   const removedDownloads = [];
   const erasedDownloads = [];
+  const badgeTexts = [];
   const existingDownloadFilenames = new Set();
   const downloadSearchQueries = [];
   let captureError = null;
@@ -288,7 +289,9 @@ function createChrome() {
     storage: { local: storage },
     action: {
       async setBadgeBackgroundColor() {},
-      async setBadgeText() {}
+      async setBadgeText({ text }) {
+        badgeTexts.push(text);
+      }
     },
     downloads: {
       async search(query = {}) {
@@ -355,6 +358,7 @@ function createChrome() {
       async sendMessage(message) {
         if (message.target !== 'offscreen') throw new Error(`Unexpected runtime message: ${message.type}`);
         if (message.type === 'OFFSCREEN_PING') return { ok: true };
+        if (message.type === 'OFFSCREEN_SCORE_CAPTURE') return { paintedRatio: 0.5 };
         if (message.type === 'OFFSCREEN_PROCESS') {
           offscreenMessages.push(message);
           const processingFailure = offscreenProcessFailure?.(message);
@@ -429,6 +433,7 @@ function createChrome() {
       async remove() {}
     },
     webNavigation: {
+      onCommitted: createEvent(),
       onCompleted: createEvent(),
       onHistoryStateUpdated: createEvent(),
       onReferenceFragmentUpdated: createEvent()
@@ -477,6 +482,7 @@ function createChrome() {
     removedDownloads,
     sessionId,
     tabMessages,
+    badgeTexts,
     setCaptureError(error) {
       captureError = error;
     },
@@ -782,10 +788,11 @@ test('waits for the rendered page before capturing a title-driven SPA transition
     const state = await sendMessage(messageListener, { type: 'GET_STATE' });
     assert.equal(state.recording, true);
     assert.equal(state.sequence, 41);
-    assert.equal(fixture.captureCount(), 1);
+    assert.equal(fixture.captureCount(), 2);
     assert.deepEqual(fixture.captureTimeline(), [
       'render-settle-start',
       'render-settle-complete',
+      'capture-visible-tab',
       'capture-visible-tab'
     ]);
   } finally {
@@ -880,11 +887,145 @@ test('waits for the rendered page before capturing a navigation link', async () 
   }
 });
 
-test('stitches a long responsive document automatically without using CDP', async () => {
+test('captures committed URL-bar navigation but ignores a late page completion', async () => {
   const originalChrome = globalThis.chrome;
-  const originalCreateImageBitmap = globalThis.createImageBitmap;
-  const originalFetch = globalThis.fetch;
-  const originalOffscreenCanvas = globalThis.OffscreenCanvas;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+
+    await fixture.chrome.webNavigation.onCompleted.listeners[0]?.({
+      tabId: fixture.liveTab.id,
+      frameId: 0,
+      url: fixture.liveTab.url
+    });
+    assert.equal(fixture.captureCount(), 0);
+
+    fixture.liveTab.title = 'Retirement news';
+    fixture.liveTab.url = 'https://example.test/news';
+    await fixture.chrome.webNavigation.onCommitted.listeners[0]({
+      tabId: fixture.liveTab.id,
+      frameId: 0,
+      url: fixture.liveTab.url
+    });
+
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(fixture.captureCount(), 2);
+    assert.equal(state.captures.at(-1).reason, 'navigation');
+    assert.equal(state.captures.at(-1).url, 'https://example.test/news');
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('coalesces a navigation title update into its committed navigation capture', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  fixture.setRenderSettlePending(true);
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    fixture.liveTab.title = 'Latest news';
+    fixture.liveTab.url = 'https://example.test/latest-news';
+
+    const navigation = fixture.chrome.webNavigation.onCommitted.listeners[0]({
+      tabId: fixture.liveTab.id,
+      frameId: 0,
+      url: fixture.liveTab.url
+    });
+    await fixture.waitForRenderSettle();
+    await fixture.chrome.tabs.onUpdated.listeners[0](fixture.liveTab.id, { title: fixture.liveTab.title });
+    fixture.resolveRenderSettle();
+    await navigation;
+
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(fixture.captureCount(), 2);
+    assert.equal(state.sequence, 41);
+    assert.equal(state.captures.at(-1).reason, 'navigation');
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('coalesces navigation triggered by a pending regular click capture', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+
+    const clickCapture = sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Continue', actionAt: Date.now() },
+      { tab: fixture.liveTab }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    fixture.liveTab.title = 'Confirmation';
+    fixture.liveTab.url = 'https://example.test/confirmation';
+    const navigation = fixture.chrome.webNavigation.onCommitted.listeners[0]({
+      tabId: fixture.liveTab.id,
+      frameId: 0,
+      url: fixture.liveTab.url
+    });
+    await Promise.all([clickCapture, navigation]);
+
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(fixture.captureCount(), 1);
+    assert.equal(state.sequence, 41);
+    assert.equal(state.captures.at(-1).reason, 'click');
+    assert.equal(state.captures.at(-1).url, 'https://example.test/confirmation');
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('captures refresh, browser history, and typed-address navigations with explicit reasons', async () => {
+  const originalChrome = globalThis.chrome;
+  const scenarios = [
+    { transitionType: 'reload', transitionQualifiers: [], reason: 'refresh' },
+    { transitionType: 'link', transitionQualifiers: ['forward_back'], reason: 'history-navigation' },
+    { transitionType: 'typed', transitionQualifiers: ['from_address_bar'], reason: 'typed-navigation' }
+  ];
+
+  try {
+    for (const [index, scenario] of scenarios.entries()) {
+      const fixture = createChrome();
+      globalThis.chrome = fixture.chrome;
+      await loadBackground();
+      const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+      await sendMessage(messageListener, { type: 'GET_STATE' });
+      fixture.liveTab.title = `Destination ${index + 1}`;
+      fixture.liveTab.url = `https://example.test/destination-${index + 1}`;
+
+      await fixture.chrome.webNavigation.onCommitted.listeners[0]({
+        tabId: fixture.liveTab.id,
+        frameId: 0,
+        url: fixture.liveTab.url,
+        transitionType: scenario.transitionType,
+        transitionQualifiers: scenario.transitionQualifiers
+      });
+
+      const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+      assert.equal(state.sequence, 41);
+      assert.equal(state.captures.at(-1).reason, scenario.reason);
+      assert.equal(state.captures.at(-1).url, fixture.liveTab.url);
+    }
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('uses one visible frame when a manual responsive capture cannot use CDP', async () => {
+  const originalChrome = globalThis.chrome;
   const fixture = createChrome();
   const responsiveDocument = {
     width: 700,
@@ -895,40 +1036,14 @@ test('stitches a long responsive document automatically without using CDP', asyn
     scrollY: 0,
     docHeight: 900
   };
-  const scrollStops = [];
-  const canvasSizes = [];
   const debuggerAttachments = [];
-
-  class TestCanvas {
-    constructor(width, height) {
-      this.width = width;
-      this.height = height;
-      canvasSizes.push({ width, height });
-    }
-
-    getContext() {
-      return {
-        fillStyle: '',
-        fillRect() {},
-        drawImage() {}
-      };
-    }
-
-    async convertToBlob() {
-      return { arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer };
-    }
-  }
+  let directCaptureCount = 0;
+  let scrollOperationCount = 0;
 
   fixture.setExecuteScriptHandler((details) => {
     const source = String(details.func);
-    if (details.args?.[0] === 640) return [{ result: true }];
     if (source.includes('const docHeight')) return [{ result: responsiveDocument }];
-    if (source.includes('[...document.images]')) return [{ result: true }];
-    if (details.args?.length === 3 && details.args[2] === 600) {
-      const [, top] = details.args;
-      scrollStops.push(top);
-      return [{ result: { ok: true, scrollX: 0, scrollY: top } }];
-    }
+    if (source.includes('window.scrollTo(') || source.includes('el.scrollTo(')) scrollOperationCount += 1;
     return undefined;
   });
   fixture.chrome.debugger = {
@@ -938,12 +1053,11 @@ test('stitches a long responsive document automatically without using CDP', asyn
       throw new Error('Another debugger is already attached to this tab.');
     },
     async detach() {},
-    async sendCommand() {}
+    async sendCommand() {
+      directCaptureCount += 1;
+    }
   };
   globalThis.chrome = fixture.chrome;
-  globalThis.createImageBitmap = async () => ({ width: 329, height: 600, close() {} });
-  globalThis.fetch = async () => ({ blob: async () => new Blob() });
-  globalThis.OffscreenCanvas = TestCanvas;
 
   try {
     await loadBackground();
@@ -951,78 +1065,52 @@ test('stitches a long responsive document automatically without using CDP', asyn
     await sendMessage(messageListener, { type: 'GET_STATE' });
     await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { fullPage: true } });
 
-    await sendMessage(
-      messageListener,
-      { type: 'CLICK_CAPTURE', reason: 'field-edited', label: 'Username updated' },
-      { tab: fixture.liveTab }
-    );
+    await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
     const captured = await sendMessage(messageListener, { type: 'GET_STATE' });
 
-    assert.equal(captured.sequence, 43);
-    assert.equal(fixture.captureCount(), 2);
-    assert.deepEqual(scrollStops, [0, 300]);
-    assert.deepEqual(debuggerAttachments, []);
-    assert.deepEqual(
-      canvasSizes.filter((size) => size.width === 329).map((size) => size.height),
-      [300, 300, 300]
-    );
-    assert.deepEqual(captured.captures.slice(-3).map((capture) => capture.reason), [
-      'field-edited',
-      'field-edited',
-      'field-edited'
-    ]);
-    assert.ok(fixture.tabMessages.some(({ message }) => message.type === 'FULL_PAGE_PROGRESS'));
+    assert.equal(captured.sequence, 41);
+    assert.equal(fixture.captureCount(), 1);
+    assert.deepEqual(debuggerAttachments, [{ tabId: fixture.liveTab.id }]);
+    assert.equal(directCaptureCount, 0);
+    assert.equal(scrollOperationCount, 0);
+    assert.equal(captured.captures.at(-1).reason, 'manual');
   } finally {
     globalThis.chrome = originalChrome;
-    globalThis.createImageBitmap = originalCreateImageBitmap;
-    globalThis.fetch = originalFetch;
-    globalThis.OffscreenCanvas = originalOffscreenCanvas;
   }
 });
 
-test('stops promptly while a responsive visible-frame stitch is still in progress', async () => {
+test('does not create headless full-page parts below the last meaningful content', async () => {
   const originalChrome = globalThis.chrome;
   const fixture = createChrome();
-  const responsiveDocument = {
-    width: 700,
-    viewportWidth: 329,
-    viewportHeight: 600,
+  const documentInfo = {
+    width: 1200,
+    viewportWidth: 1200,
+    viewportHeight: 800,
     dpr: 1,
     scrollX: 0,
     scrollY: 0,
-    docHeight: 900
+    docHeight: 5000,
+    contentHeight: 2300
   };
-  let markVisibleFrameStarted;
-  const visibleFrameStarted = new Promise((resolve) => {
-    markVisibleFrameStarted = resolve;
-  });
-  let resolveVisibleFrame;
-  const visibleFrame = new Promise((resolve) => {
-    resolveVisibleFrame = resolve;
-  });
+  const clips = [];
+  let scrollOperationCount = 0;
 
   fixture.setExecuteScriptHandler((details) => {
     const source = String(details.func);
-    if (details.args?.[0] === 640) return [{ result: true }];
-    if (source.includes('const docHeight')) return [{ result: responsiveDocument }];
+    if (source.includes('const docHeight')) return [{ result: documentInfo }];
     if (source.includes('[...document.images]')) return [{ result: true }];
-    if (details.args?.length === 3 && details.args[2] === 600) {
-      const [, top] = details.args;
-      return [{ result: { ok: true, scrollX: 0, scrollY: top } }];
-    }
+    if (source.includes('window.scrollTo(') || source.includes('el.scrollTo(')) scrollOperationCount += 1;
     return undefined;
   });
   fixture.chrome.debugger = {
     onDetach: createEvent(),
-    async attach() {
-      throw new Error('Another debugger is already attached to this tab.');
-    },
+    async attach() {},
     async detach() {},
-    async sendCommand() {}
-  };
-  fixture.chrome.tabs.captureVisibleTab = async () => {
-    markVisibleFrameStarted();
-    return visibleFrame;
+    async sendCommand(_source, method, options) {
+      assert.equal(method, 'Page.captureScreenshot');
+      clips.push(options.clip);
+      return { data: 'cHJvYmU=' };
+    }
   };
   globalThis.chrome = fixture.chrome;
 
@@ -1032,12 +1120,279 @@ test('stops promptly while a responsive visible-frame stitch is still in progres
     await sendMessage(messageListener, { type: 'GET_STATE' });
     await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { fullPage: true } });
 
-    const pendingCapture = sendMessage(
+    await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+
+    assert.equal(clips.length, 1);
+    assert.equal(clips[0].y, 0);
+    assert.equal(clips[0].height, documentInfo.contentHeight);
+    assert.equal(scrollOperationCount, 0);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('captures a taller app scroller by expansion without scrolling the visible page', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  const documentInfo = {
+    width: 1200,
+    viewportWidth: 1200,
+    viewportHeight: 800,
+    dpr: 1,
+    scrollX: 0,
+    scrollY: 0,
+    docHeight: 1807,
+    contentHeight: 1807
+  };
+  const expandedDocumentInfo = {
+    ...documentInfo,
+    docHeight: 7139,
+    contentHeight: 7139
+  };
+  const scrollerInfo = {
+    rectTop: 0,
+    rectLeft: 0,
+    rectWidth: 1200,
+    rectHeight: 800,
+    scrollHeight: 7139,
+    clientHeight: 800,
+    scrollTop: 0,
+    dpr: 1,
+    viewportHeight: 800,
+    viewportWidth: 1200
+  };
+  let documentMeasurementCount = 0;
+  let expansionCount = 0;
+  let scrollOperationCount = 0;
+  const clips = [];
+
+  fixture.setExecuteScriptHandler((details) => {
+    const source = String(details.func);
+    if (source.includes('const docHeight')) {
+      documentMeasurementCount += 1;
+      return [{ result: documentMeasurementCount === 1 ? documentInfo : expandedDocumentInfo }];
+    }
+    if (source.includes('let best = null')) return [{ result: scrollerInfo }];
+    if (source.includes('target.setAttribute(expandedAttr')) {
+      expansionCount += 1;
+      return [{ result: true }];
+    }
+    if (source.includes('window.scrollTo(') || source.includes('el.scrollTo(')) scrollOperationCount += 1;
+    return undefined;
+  });
+  fixture.chrome.debugger = {
+    onDetach: createEvent(),
+    async attach() {},
+    async detach() {},
+    async sendCommand(_source, method, options) {
+      assert.equal(method, 'Page.captureScreenshot');
+      clips.push(options.clip);
+      return { data: 'cHJvYmU=' };
+    }
+  };
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { fullPage: true } });
+
+    await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+
+    assert.equal(expansionCount, 1);
+    assert.equal(clips.length, 1);
+    assert.equal(clips[0].height, scrollerInfo.scrollHeight);
+    assert.equal(scrollOperationCount, 0);
+    assert.equal(fixture.offscreenMessages.at(-1).trimBlankMargins, true);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('drops blank trailing CDP parts after the actual page content', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalCreateImageBitmap = globalThis.createImageBitmap;
+  const originalOffscreenCanvas = globalThis.OffscreenCanvas;
+  const fixture = createChrome();
+  const documentInfo = {
+    width: 1600,
+    viewportWidth: 1600,
+    viewportHeight: 800,
+    dpr: 1,
+    scrollX: 0,
+    scrollY: 0,
+    docHeight: 9600
+  };
+  let screenshotIndex = 0;
+
+  class PixelCanvas {
+    constructor(width, height) {
+      this.width = width;
+      this.height = height;
+      this.kind = 'blank';
+    }
+
+    getContext() {
+      return {
+        drawImage: (source, _sourceX, sourceY = 0) => {
+          this.kind = source.kind === 'mixed'
+            ? sourceY < source.height / 2 ? 'content' : 'blank'
+            : source.kind;
+        },
+        getImageData: (x, y, width, height) => {
+          const data = new Uint8ClampedArray(width * height * 4);
+          const referencePixel = width === 1 && height === 1;
+          for (let index = 0; index < data.length; index += 4) {
+            const pixelX = (index / 4) % width;
+            const rightEdge = x + pixelX === this.width - 1;
+            const value = rightEdge ? 192 : this.kind === 'content' && !referencePixel ? 0 : 255;
+            data[index] = value;
+            data[index + 1] = value;
+            data[index + 2] = value;
+            data[index + 3] = 255;
+          }
+          return { data };
+        }
+      };
+    }
+
+    async convertToBlob() {
+      return new Blob([this.kind]);
+    }
+  }
+
+  globalThis.OffscreenCanvas = PixelCanvas;
+  globalThis.createImageBitmap = async (blob) => ({
+    width: 120,
+    height: 120,
+    kind: await blob.text(),
+    close() {}
+  });
+  fixture.setExecuteScriptHandler((details) => {
+    const source = String(details.func);
+    if (source.includes('const docHeight')) return [{ result: documentInfo }];
+    if (source.includes('[...document.images]')) return [{ result: true }];
+    return undefined;
+  });
+  fixture.chrome.debugger = {
+    onDetach: createEvent(),
+    async attach() {},
+    async detach() {},
+    async sendCommand() {
+      screenshotIndex += 1;
+      return { data: Buffer.from('mixed').toString('base64') };
+    }
+  };
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { fullPage: true } });
+
+    await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+
+    assert.equal(screenshotIndex, 1);
+    assert.equal(fixture.offscreenMessages.length, 3);
+    assert.equal(state.sequence, 43);
+    assert.match(state.captures.at(-1).title, /part 3 of 3\)$/);
+    assert.equal(fixture.badgeTexts.at(-1), '43');
+    assert.equal(
+      fixture.tabMessages.some(({ message }) => message.type === 'FULL_PAGE_PROGRESS'),
+      false
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
+    globalThis.createImageBitmap = originalCreateImageBitmap;
+    globalThis.OffscreenCanvas = originalOffscreenCanvas;
+  }
+});
+
+test('captures an automatic responsive click as one visible frame', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  let documentMeasurementCount = 0;
+  fixture.setExecuteScriptHandler((details) => {
+    if (String(details.func).includes('const docHeight')) documentMeasurementCount += 1;
+    return undefined;
+  });
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { fullPage: true } });
+
+    const result = await sendMessage(
       messageListener,
-      { type: 'CLICK_CAPTURE', reason: 'field-edited', label: 'Username updated' },
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Continue' },
       { tab: fixture.liveTab }
     );
-    await visibleFrameStarted;
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+
+    assert.deepEqual(result, { ok: true });
+    assert.equal(state.sequence, 41);
+    assert.equal(fixture.captureCount(), 1);
+    assert.equal(state.captures.at(-1).reason, 'click');
+    assert.equal(fixture.offscreenMessages.at(-1).fullPageInfo, undefined);
+    assert.equal(documentMeasurementCount, 0);
+    assert.equal(fixture.tabMessages.some(({ message }) => message.type === 'FULL_PAGE_PROGRESS'), false);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('stops promptly while an explicit direct full-page capture is still in progress', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  const documentInfo = {
+    width: 1200,
+    viewportWidth: 1200,
+    viewportHeight: 800,
+    dpr: 1,
+    scrollX: 0,
+    scrollY: 0,
+    docHeight: 1600
+  };
+  let markDirectCaptureStarted;
+  const directCaptureStarted = new Promise((resolve) => {
+    markDirectCaptureStarted = resolve;
+  });
+  let resolveDirectCapture;
+  const directCapture = new Promise((resolve) => {
+    resolveDirectCapture = resolve;
+  });
+
+  fixture.setExecuteScriptHandler((details) => {
+    const source = String(details.func);
+    if (source.includes('const docHeight')) return [{ result: documentInfo }];
+    if (source.includes('[...document.images]')) return [{ result: true }];
+    return undefined;
+  });
+  fixture.chrome.debugger = {
+    onDetach: createEvent(),
+    async attach() {},
+    async detach() {},
+    async sendCommand(_source, method) {
+      assert.equal(method, 'Page.captureScreenshot');
+      markDirectCaptureStarted();
+      return directCapture;
+    }
+  };
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { fullPage: true } });
+
+    const pendingCapture = sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    await directCaptureStarted;
 
     const stoppedAt = Date.now();
     const stopped = await sendMessage(messageListener, { type: 'STOP', keepFiles: false });
@@ -1047,7 +1402,7 @@ test('stops promptly while a responsive visible-frame stitch is still in progres
     assert.equal(stopped.sequence, 40);
     assert.ok(!fixture.storageSnapshot().flowRecorderLog.some((line) => line.includes('CAPTURE_DRAIN_TIMEOUT stop')));
 
-    resolveVisibleFrame('data:image/png;base64,cHJvYmU=');
+    resolveDirectCapture({ data: 'cHJvYmU=' });
     await pendingCapture;
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
@@ -1107,6 +1462,13 @@ test('captures a new-tab link from the page it opens', async () => {
     await fixture.chrome.tabs.onCreated.listeners[0](privacyTab);
     await fixture.waitForRenderSettle();
 
+    await fixture.chrome.webNavigation.onCommitted.listeners[0]({
+      tabId: privacyTab.id,
+      frameId: 0,
+      url: privacyTab.url
+    });
+    await fixture.chrome.tabs.onUpdated.listeners[0](privacyTab.id, { title: privacyTab.title });
+
     fixture.resolveRenderSettle();
     await linkClicked;
 
@@ -1114,6 +1476,7 @@ test('captures a new-tab link from the page it opens', async () => {
     assert.equal(state.captures.at(-1).title, 'Privacy and security');
     assert.equal(state.captures.at(-1).url, 'https://example.test/privacy');
     assert.equal(capturedTabId, privacyTab.id);
+    assert.equal(fixture.captureCount(), 1);
     assert.deepEqual(fixture.offscreenMessages.at(-1).titleBar, {
       title: 'Privacy and security',
       url: 'https://example.test/privacy'
@@ -1929,6 +2292,53 @@ test('uses a prepared resume folder once, then starts fresh after stopping', asy
   } finally {
     globalThis.chrome = originalChrome;
     globalThis.indexedDB = originalIndexedDb;
+  }
+});
+
+test('accepts capture and checkpoint shortcuts in a second recording on the same tab', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const commandListener = fixture.chrome.commands.onCommand.listeners[0];
+
+    const stopped = await sendMessage(messageListener, {
+      type: 'STOP',
+      keepFiles: false,
+      createPdf: false
+    });
+    assert.equal(stopped.recording, false);
+
+    const secondSession = await sendMessage(messageListener, {
+      type: 'START',
+      settings: { captureMode: 'tab', fullPage: false, savePng: false, savePdf: false }
+    });
+    assert.equal(secondSession.recording, true);
+    assert.deepEqual(secondSession.trackedTabIds, [fixture.liveTab.id]);
+    assert.equal(secondSession.sequence, 1);
+
+    await commandListener('capture-whole-page');
+    const afterWholePageHotkey = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(afterWholePageHotkey.sequence, 2);
+
+    await commandListener('capture-panel');
+    const afterDevToolsHotkey = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(afterDevToolsHotkey.sequence, 3);
+
+    const checkpoint = await sendMessage(messageListener, {
+      type: 'OPEN_OUTPUT_DIALOG',
+      mode: 'checkpoint'
+    });
+    assert.equal(checkpoint.recording, true);
+    assert.match(
+      new URL(fixture.exportRequests.at(-1).url, 'https://extension.test').pathname,
+      /output-dialog\.html$/
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
   }
 });
 

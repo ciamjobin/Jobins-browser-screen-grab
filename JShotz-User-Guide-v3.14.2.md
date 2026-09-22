@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.14.1**
+**Version 3.14.2**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as clean
 screenshots and exports PDF or Word documents. Each document shows the action time above its image
@@ -16,7 +16,7 @@ happened in a browser session.
   store pages, so JShotz cannot inject its click and scroll capture helpers there.
 - JShotz observes page fetch/XHR calls only during an **API + Screenshot** recording. Tab viewport
   and Screen/window modes leave site networking untouched.
-- Keep the browser tab focused when using the manual `Ctrl+Alt+Q` shortcut.
+- Keep the browser tab focused when using the whole-page `Alt+Shift+J` shortcut.
 - Treat **API + Screenshot** recordings as sensitive evidence. Request URLs, payloads, and
   responses can contain credentials, personal data, or other information that should not be
   shared outside the intended audience.
@@ -26,14 +26,14 @@ happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.14.1-chrome-edge.zip`.
+1. Unzip `JShotz-3.14.2-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.14.1-firefox.zip`.
+1. Unzip `JShotz-3.14.2-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -109,7 +109,7 @@ not add network details retroactively to screenshots that were captured in anoth
 - **Capture every 60% of a screen scrolled, and at the end** — automatically screenshot as you
   scroll, roughly every 60% of a screenful (so consecutive shots overlap), plus one at the very
   bottom of the page.
-- **Whole-page shots for manual captures and responsive layouts** — see [Section 6](#6-full-page-whole-page-capture).
+- **Whole-page shots for manual captures** — see [Section 6](#6-full-page-whole-page-capture).
 - **Save individual PNG files** — save each screenshot as its own PNG in the session folder.
 - **Preselect PDF in output dialogs** — starts each output dialog with PDF selected; you can
   choose PDF, Word, or both for every export.
@@ -126,8 +126,8 @@ session.
 2. Use the page normally. Screenshots are taken automatically per your settings, and you can
    also trigger one manually at any time (see below).
   JShotz retains the time each action occurred even when it waits for the page to render. The
-  screenshot list, PDF/Word output, and session manifest keep steps in action order; paired
-  interim and settled frames from one action retain their original request order.
+  screenshot list, PDF/Word output, and session manifest keep steps in action order, with one
+  settled frame for each normal automatic action.
 3. When a page you're recording opens a **new tab** (e.g. a sign-in redirect), JShotz follows
    it automatically — that tab is brought to the front and becomes part of the recording.
    Switching back to the original tab (or to any other tab that flow has opened) resumes
@@ -166,9 +166,9 @@ available until you start a new recording.
 
 | Action | How | Notes |
 |---|---|---|
-| Capture now | Click **Capture now** in the popup | Immediate, uses whichever mode is active |
-| Manual hotkey | Press **Ctrl+Alt+Q** while the page has focus | Works anywhere the page can receive keystrokes |
-| DevTools panel capture | Press **Alt+Shift+S** while a DevTools panel is open | Captures exactly what's on screen, including the DevTools panel |
+| Capture now | Click **Capture now** in the popup | Whole-page when enabled and direct capture is available; otherwise one visible frame |
+| Whole-page hotkey | Press **Alt+Shift+J** while the page has focus | Same whole-page function as **Capture now**; otherwise one visible frame when direct capture is unavailable |
+| DevTools panel capture | Press **Alt+Shift+K** while a DevTools panel is open | Captures exactly what's on screen, including the DevTools panel |
 | Capture in 5s | Click **Capture in 5s**, or press **Alt+Shift+D** | Waits 5 seconds (with an on-page countdown badge) before capturing — use this when you need time to click into DevTools first, since Chrome blocks other shortcuts while DevTools has focus |
 
 Manual captures are available only while recording is active and not paused.
@@ -244,37 +244,31 @@ appear together as one screenshot.
 
 ## 6. Full-page (whole-page) capture
 
-When **"Whole-page shots"** is enabled, the following triggers capture the *entire* scrollable
-page instead of just the visible area:
+When **"Whole-page shots for manual captures"** is enabled, the following explicit page controls
+capture the *entire* scrollable page instead of just the visible area when direct capture is available:
 
-- **Ctrl+Alt+Q**
+- **Alt+Shift+J**
 - **Capture now**
-- **Capture in 5s**
-- Automatic captures while the page is in a narrow responsive layout, including DevTools Device Mode
 
-Automatic captures on standard desktop layouts (clicks, scrolling, field edits, navigation) remain
-ordinary viewport shots, so those sessions stay lightweight.
+Automatic captures (clicks, scrolling, field edits, and navigation) always remain one ordinary
+viewport shot, including narrow responsive layouts and DevTools Device Mode.
 
 **How it works, and what to expect:**
 - For a page whose content naturally extends below the viewport, Chromium rasterizes the document
   beyond its existing viewport. JShotz does not enlarge or reflow the page to render the shot.
-- For an "app-shell" style page (a fixed header/sidebar with an inner scrolling panel), JShotz
-  scrolls just that inner panel, then returns the panel to its original position. The surrounding
-  page layout stays in place.
 - Long captures are split into sequential, bounded **part N of M** screenshots at one shared
   scale. Adjacent parts preserve the full page without a giant image and are exported as consecutive
-  PDF pages. Narrow responsive pages are divided into readable sections rather than shrinking a tall
-  mobile image to fit one landscape PDF page.
+  PDF pages.
 - A progress bar appears in the popup and on the page while the capture runs. It is hidden before
   each screenshot and removed when capture completes.
-- Narrow responsive layouts, including Chrome DevTools Device Mode, capture overlapping visible frames
-  directly, stitch them into the same bounded parts, and restore the original document scroll position.
-  The page can scroll briefly while this runs; wait for the progress bar to end.
+- If direct capture is unavailable, including in Firefox, DevTools Device Mode, a page already
+  attached to DevTools, or an app-shell page with an inner scroller, JShotz captures the current
+  visible viewport once. It never scrolls the document or an inner pane to construct the image.
 - Stopping a recording cancels an in-progress whole-page capture promptly. Its unfinished frame is
   discarded and cannot be added after the session stops.
 - Chrome may show a **"started debugging this browser"** banner for an ordinary-document capture.
   This is a hard Chrome platform notice with no way to hide it; it disappears immediately after
-  the shot. App-shell stitch capture does not attach the debugger.
+  the shot.
 
 ---
 
@@ -282,8 +276,8 @@ ordinary viewport shots, so those sessions stay lightweight.
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+Alt+Q` | Manual capture (page must have focus) |
-| `Alt+Shift+S` | Capture the current DevTools panel |
+| `Alt+Shift+J` | Whole-page capture (page must have focus) |
+| `Alt+Shift+K` | Capture the current DevTools panel |
 | `Alt+Shift+D` | Capture in 5 seconds |
 | `Shift+Ctrl+S` | Open a named checkpoint save dialog and continue recording after saving |
 | `Ctrl+S` | Open the final save dialog, save the chosen output, and stop recording without opening the file location |
@@ -397,8 +391,8 @@ extension storage until you start a new recording.
 
 - The "started debugging this browser" banner during whole-page captures cannot be hidden —
   this is a Chrome security notice, not a bug.
-- When DevTools is open on the recorded tab, JShotz uses visible-frame stitching for long responsive
-  pages and restores the original scroll position when it finishes.
+- When DevTools is open on the recorded tab, a manual whole-page request saves one visible frame
+  rather than scrolling the page to assemble a long capture.
 - Multi-tab and child-window following remains active while a session is paused and when the
   background service worker restarts.
 - A horizontally-scrolling element on a page (e.g. a carousel) is captured exactly as it

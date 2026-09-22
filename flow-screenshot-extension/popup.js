@@ -757,8 +757,8 @@ function outputPromptConfig(action) {
     return {
       checkpoint: true,
       final: false,
-      title: 'Save checkpoint',
-      button: 'Save checkpoint (Shift+Ctrl+S)',
+      title: 'Save checkpoint (Ctrl+Shift+S)',
+      button: 'Save checkpoint (Ctrl+Shift+S)',
       reveal: false,
       showLocationButton: false
     };

@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.14.1**
+**Version 3.14.2**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF or Word document - handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -18,9 +18,10 @@ documenting a process, a support case, or a step-by-step walkthrough.
    - **Screen / window** — share your whole screen, a window, or a tab (the only option that
      can show DevTools or other apps).
 3. Click **Start recording**.
-4. Use the page normally — screenshots are taken automatically as you click and scroll.
-   JShotz keeps the resulting documents in the order you acted, even when a screen waits to
-   render; each frame's title and URL come from the page being captured.
+4. Use the page normally — screenshots are taken automatically as you click and scroll. Each
+   normal action produces one settled screenshot of the currently visible page area. JShotz keeps
+   the resulting documents in the order you acted, even when a screen waits to render; each
+   frame's title and URL come from the page being captured.
 5. To take a break without ending the session, click **Pause recording**. It becomes
    **Continue recording**; continuing keeps the same screenshots, numbering, and session folder.
 6. Need a checkpoint without stopping? Click **Save checkpoint (Shift+Ctrl+S)**. Enter a file name,
@@ -88,31 +89,29 @@ error card after reopening the tab.
 | To do this | Do this |
 |---|---|
 | Capture right now | Click **Capture now** in the popup |
-| Capture with the keyboard | Press **Ctrl+Alt+Q** |
-| Capture a DevTools panel | Open the panel, press **Alt+Shift+S** |
+| Capture the whole page | Press **Alt+Shift+J**, or click **Capture now** |
+| Capture a DevTools panel | Open the panel, press **Alt+Shift+K** |
 | Capture in 5 seconds (time to click into DevTools) | Click **Capture in 5s**, or press **Alt+Shift+D** |
 
 ---
 
 ## Getting the whole page in one shot
 
-Turn on **"Whole-page shots for manual captures and responsive layouts"** in settings. It captures
-the *entire* page — including everything below the fold — when you use **Capture now**, **Ctrl+Alt+Q**,
-or **Capture in 5s**. It also uses long screenshots automatically for a narrow responsive layout,
-including Chrome DevTools Device Mode. Desktop automatic captures (clicks and scrolling) remain normal
-single-screen shots.
+Turn on **"Whole-page shots for manual captures"** in settings. **Capture now** and
+**Alt+Shift+J** and **Capture now** capture the entire scrollable document when direct Chromium capture is available.
+Automatic clicks, scrolling, field edits, and navigation always save one normal screenshot of the
+currently visible page area, including narrow responsive layouts and Chrome DevTools Device Mode.
 
-Very long pages are saved as adjacent, numbered parts instead of one oversized image. Narrow responsive
-pages are divided into readable sections so their PDF evidence does not shrink to a thin strip. The parts
-remain in order when you export a document. A progress bar appears in the popup and on the page while the
-whole-page capture is running, then disappears when it finishes.
+Very long direct captures are saved as adjacent, numbered parts instead of one oversized image. The
+parts remain in order when you export a document. A progress bar appears in the popup and on the page
+while a direct whole-page capture is running, then disappears when it finishes.
 
-Responsive layouts, including Chrome DevTools Device Mode, stitch overlapping visible frames directly. This
-preserves the responsive viewport and restores the original scroll position when it finishes. If you stop
-recording while a long capture is active, JShotz cancels it promptly and discards its unfinished frame. Do
-not interact with the page until the progress bar disappears.
+If direct whole-page capture is unavailable, including in Chrome DevTools Device Mode, Firefox, or
+when another debugger is attached, JShotz saves one visible screenshot instead. It does not scroll the
+document or an inner page pane to build a capture. **Capture in 5s** and the DevTools-panel shortcut
+also capture only the visible screen state.
 
-For ordinary documents, Chrome may show a "started debugging this browser" banner for a moment.
+For ordinary direct captures, Chrome may show a "started debugging this browser" banner for a moment.
 
 ---
 
@@ -180,8 +179,8 @@ from folder** instead.
 
 ## Shortcuts and common fixes
 
-- `Ctrl+Alt+Q`: capture manually while the page has focus.
-- `Alt+Shift+S`: capture the currently visible DevTools panel.
+- `Alt+Shift+J`: capture the whole page while the page has focus.
+- `Alt+Shift+K`: capture the currently visible DevTools panel.
 - `Alt+Shift+D`: start a five-second countdown, then capture. Use this when you need time to
    click into DevTools.
 - `Shift+Ctrl+S`: open the checkpoint save dialog and keep recording after it is saved.

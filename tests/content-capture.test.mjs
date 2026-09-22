@@ -141,12 +141,14 @@ function createContentEnvironment({ sendMessageResult = { ok: true }, now = 0 } 
   const sent = [];
   const timers = new Map();
   const mutationObservers = [];
+  const runtimeMessageListeners = [];
   let nextTimer = 1;
   let currentTime = now;
   const window = {
     ...windowEvents,
     innerHeight: 800,
     innerWidth: 1280,
+    location: { href: 'https://example.test/account' },
     scrollY: 0,
     getSelection: () => ({ toString: () => '' })
   };
@@ -180,7 +182,11 @@ function createContentEnvironment({ sendMessageResult = { ok: true }, now = 0 } 
           sent.push(message);
           return Promise.resolve(sendMessageResult);
         },
-        onMessage: { addListener() {} }
+        onMessage: {
+          addListener(listener) {
+            runtimeMessageListeners.push(listener);
+          }
+        }
       }
     },
     clearTimeout(timer) {
@@ -205,6 +211,15 @@ function createContentEnvironment({ sendMessageResult = { ok: true }, now = 0 } 
     root,
     sent,
     window,
+    dispatchRuntimeMessage(message) {
+      let response;
+      for (const listener of runtimeMessageListeners) {
+        listener(message, {}, (value) => {
+          response = value;
+        });
+      }
+      return response;
+    },
     notifyMutations() {
       for (const observer of mutationObservers) {
         if (!observer.disconnected) observer.callback([]);
@@ -459,6 +474,10 @@ test('preserves action time through delayed capture paths', async () => {
   clickEnvironment.setNow(2000);
   clickEnvironment.runTimers();
   await clickEnvironment.flush();
+  clickEnvironment.runTimers();
+  await clickEnvironment.flush();
+  assert.equal(clickEnvironment.captures().filter((capture) => capture.reason === 'click').length, 1);
+  assert.equal(clickEnvironment.captures().some((capture) => capture.reason === 'click-loaded'), false);
   assert.equal(clickEnvironment.captures().find((capture) => capture.reason === 'click').actionAt, 1000);
 
   const editEnvironment = createContentEnvironment({ now: 3000 });
@@ -619,7 +638,7 @@ test('drops a pending page-scroll capture when a modal opens', () => {
   assert.deepEqual(environment.captures().map((capture) => capture.reason), ['dialog-opened']);
 });
 
-test('opens the appropriate output dialog for recorder hotkeys', () => {
+test('handles recorder output hotkeys', () => {
   const environment = createContentEnvironment();
   const keyboardEvent = (key, { altKey = false, ctrlKey = true, shiftKey = false } = {}) => ({
     key,
@@ -666,5 +685,70 @@ test('opens the appropriate output dialog for recorder hotkeys', () => {
   assert.equal(oldFinalSave.prevented, false);
   assert.equal(oldFinalSave.stopped, false);
   assert.equal(environment.sent.length, messagesBeforeOldShortcut);
+});
 
+test('waits for static text changes after an in-page action link', async () => {
+  const environment = createContentEnvironment({ now: 1000 });
+  const resend = new FakeElement('a', {
+    attributes: { href: '#' },
+    parent: environment.body,
+    text: 'Resend security code'
+  });
+
+  environment.window.dispatch('click', { target: resend });
+  assert.equal(environment.captures().length, 0);
+
+  new FakeElement('div', {
+    parent: environment.body,
+    text: 'A new security code was sent. Please use the most recent code.'
+  });
+  environment.notifyMutations();
+  environment.runTimers();
+  await environment.flush();
+  environment.runTimers();
+  await environment.flush();
+
+  assert.equal(environment.captures().length, 1);
+  assert.equal(environment.captures()[0].reason, 'link-action');
+  assert.equal(environment.captures()[0].label, 'Resend security code');
+  assert.equal(environment.captures()[0].actionAt, 1000);
+});
+
+test('labels each native and ARIA toggle with its current state', () => {
+  const environment = createContentEnvironment({ now: 1000 });
+  const firstChoice = new FakeInputElement('input', {
+    attributes: { 'aria-label': 'Email verification', type: 'radio' },
+    parent: environment.body
+  });
+  const secondChoice = new FakeInputElement('input', {
+    attributes: { 'aria-label': 'Text verification', type: 'radio' },
+    parent: environment.body
+  });
+  firstChoice.type = 'radio';
+  secondChoice.type = 'radio';
+
+  firstChoice.checked = true;
+  environment.window.dispatch('change', { target: firstChoice });
+  environment.setNow(1100);
+  firstChoice.checked = false;
+  secondChoice.checked = true;
+  environment.window.dispatch('change', { target: secondChoice });
+
+  const paperless = new FakeElement('div', {
+    attributes: { 'aria-checked': 'false', 'aria-label': 'Paperless delivery', role: 'checkbox' },
+    parent: environment.body
+  });
+  environment.setNow(1200);
+  environment.window.dispatch('click', { target: paperless });
+  paperless.setAttribute('aria-checked', 'true');
+  environment.runTimers();
+
+  assert.deepEqual(
+    environment.captures().map(({ reason, label }) => ({ reason, label })),
+    [
+      { reason: 'toggle', label: 'Email verification = checked' },
+      { reason: 'toggle', label: 'Text verification = checked' },
+      { reason: 'toggle', label: 'Paperless delivery = checked' }
+    ]
+  );
 });

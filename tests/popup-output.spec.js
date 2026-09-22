@@ -1,5 +1,4 @@
 // @ts-check
-import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path, { extname, sep } from 'node:path';
 import { test, expect } from '@playwright/test';
@@ -12,38 +11,28 @@ const contentTypes = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8'
 };
-let popupUrl = '';
-let popupServer;
+const popupOrigin = 'https://jshotz.test';
+const popupUrl = `${popupOrigin}/popup.html`;
 
-test.beforeAll(async () => {
-  popupServer = createServer(async (request, response) => {
-    const pathname = decodeURIComponent(new URL(request.url || '/', 'http://127.0.0.1').pathname);
-    const relativePath = pathname === '/' ? 'popup.html' : pathname.replace(/^\/+/, '');
-    const filePath = path.resolve(extensionDirectory, relativePath);
-    if (filePath !== extensionDirectory && !filePath.startsWith(`${extensionDirectory}${sep}`)) {
-      response.writeHead(403).end();
-      return;
-    }
-    try {
-      const body = await readFile(filePath);
-      response.writeHead(200, { 'content-type': contentTypes[extname(filePath)] || 'application/octet-stream' });
-      response.end(body);
-    } catch {
-      response.writeHead(404).end();
-    }
-  });
-  await new Promise((resolve, reject) => {
-    popupServer.once('error', reject);
-    popupServer.listen(0, '127.0.0.1', resolve);
-  });
-  const address = popupServer.address();
-  if (!address || typeof address === 'string') throw new Error('Could not start popup test server.');
-  popupUrl = `http://127.0.0.1:${address.port}/popup.html`;
-});
-
-test.afterAll(async () => {
-  await new Promise((resolve, reject) => popupServer.close((error) => (error ? reject(error) : resolve())));
-});
+async function fulfillPopupAsset(route) {
+  const pathname = decodeURIComponent(new URL(route.request().url()).pathname);
+  const relativePath = pathname === '/' ? 'popup.html' : pathname.replace(/^\/+/, '');
+  const filePath = path.resolve(extensionDirectory, relativePath);
+  if (filePath !== extensionDirectory && !filePath.startsWith(`${extensionDirectory}${sep}`)) {
+    await route.fulfill({ status: 403 });
+    return;
+  }
+  try {
+    const body = await readFile(filePath);
+    await route.fulfill({
+      status: 200,
+      contentType: contentTypes[extname(filePath)] || 'application/octet-stream',
+      body
+    });
+  } catch {
+    await route.fulfill({ status: 404 });
+  }
+}
 
 const reconnectedFolderState = {
   recording: true,
@@ -132,7 +121,7 @@ async function openPopup(page, state = reconnectedFolderState, activeTabId = nul
       },
       runtime: {
         id: 'jshotz-test-extension',
-        getManifest: () => ({ version: '3.14.1' }),
+        getManifest: () => ({ version: '3.14.2' }),
         sendMessage: async (message) => {
           window.__popupMessages.push(message);
           if (message.type === 'STOP') {
@@ -172,6 +161,7 @@ async function openPopup(page, state = reconnectedFolderState, activeTabId = nul
       }
     };
   }, { state, activeTabId });
+  await page.route(`${popupOrigin}/**`, fulfillPopupAsset);
   await page.goto(popupUrl);
   const recordingElsewhere = Boolean(
     state.recording &&
@@ -189,7 +179,7 @@ async function openPopup(page, state = reconnectedFolderState, activeTabId = nul
 
 test('shows the current extension version in the popup header', async ({ page }) => {
   await openPopup(page);
-  await expect(page.getByLabel('JShotz version')).toHaveText('v3.14.1');
+  await expect(page.getByLabel('JShotz version')).toHaveText('v3.14.2');
 });
 
 test('does not expose recording controls on an unrelated tab', async ({ page }) => {
@@ -207,6 +197,11 @@ test('keeps recording controls available on tracked flow tabs', async ({ page })
 
   await expect(page.getByRole('button', { name: 'Stop recording' })).toBeEnabled();
   await expect(page.locator('#pauseResume')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Capture whole page (Alt+Shift+J)' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'DevTools capture in 5s (Alt+Shift+D)' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Save checkpoint (Ctrl+Shift+S)' })).toBeEnabled();
+  await expect(page.locator('#shortcutSummary')).toContainText('Alt+Shift+K DevTools');
+  await expect(page.locator('#shortcutSummary')).toContainText('Ctrl+S Save and stop');
 });
 
 test('shows separate final save actions and removes obsolete popup actions', async ({ page }) => {
@@ -231,8 +226,8 @@ test('Ctrl+Shift+S opens only the checkpoint filename panel', async ({ page }) =
   await page.keyboard.press('Control+Shift+S');
 
   await expect(page.locator('#mainActions')).toBeHidden();
-  await expect(page.locator('#outputPromptTitle')).toHaveText('Save checkpoint');
-  await expect(page.getByRole('button', { name: 'Save checkpoint (Shift+Ctrl+S)' })).toBeVisible();
+  await expect(page.locator('#outputPromptTitle')).toHaveText('Save checkpoint (Ctrl+Shift+S)');
+  await expect(page.getByRole('button', { name: 'Save checkpoint (Ctrl+Shift+S)' })).toBeVisible();
   await expect(page.locator('#saveWithNameAndOpen')).toBeHidden();
 });
 

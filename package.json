@@ -1,6 +1,6 @@
 {
   "name": "my-playwright-project",
-  "version": "3.14.1",
+  "version": "3.14.2",
   "type": "module",
   "description": "",
   "main": "index.js",
