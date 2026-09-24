@@ -26,8 +26,8 @@ const MONITOR_SETTLE_MS = 350;
 const MONITOR_MAX_SETTLE_MS = 1500;
 const AUTOMATIC_FRAME_WATCHDOG_MS = 25000;
 const MIN_CHANGED_PIXEL_RATIO = 0.0008;
-const MAX_BUFFERED_FRAMES = 12;
-const MAX_BUFFERED_BYTES = 48 * 1024 * 1024;
+const MAX_BUFFERED_FRAMES = 100;
+const MAX_BUFFERED_BYTES = 512 * 1024 * 1024;
 
 function setState(text, kind) {
   stateEl.textContent = text;
@@ -67,12 +67,13 @@ function frameDataUrl(type = 'image/png', quality) {
   return frameCanvas.toDataURL(type, quality);
 }
 
-function frameBlob(type = 'image/jpeg', quality = 0.9) {
+function frameBlob(type = 'image/jpeg', quality = 0.82) {
   if (!stream || !video.videoWidth) return Promise.resolve(null);
-  frameCanvas.width = video.videoWidth;
-  frameCanvas.height = video.videoHeight;
-  frameCanvas.getContext('2d', { alpha: false }).drawImage(video, 0, 0);
-  return new Promise((resolve) => frameCanvas.toBlob(resolve, type, quality));
+  const captureCanvas = document.createElement('canvas');
+  captureCanvas.width = video.videoWidth;
+  captureCanvas.height = video.videoHeight;
+  captureCanvas.getContext('2d', { alpha: false }).drawImage(video, 0, 0);
+  return new Promise((resolve) => captureCanvas.toBlob(resolve, type, quality));
 }
 
 function blobDataUrl(blob) {
@@ -87,14 +88,12 @@ function blobDataUrl(blob) {
 async function bufferFrame() {
   const blob = await frameBlob();
   if (!blob) return { error: 'No active screen stream.' };
+  if (bufferedFrames.size >= MAX_BUFFERED_FRAMES || bufferedBytes + blob.size > MAX_BUFFERED_BYTES) {
+    return { error: 'The screen capture buffer is full. Wait for pending screenshots to finish.' };
+  }
   const frameId = `screen-${Date.now()}-${nextFrameId++}`;
   bufferedFrames.set(frameId, blob);
   bufferedBytes += blob.size;
-  while (bufferedFrames.size > MAX_BUFFERED_FRAMES || bufferedBytes > MAX_BUFFERED_BYTES) {
-    const [oldestId, oldest] = bufferedFrames.entries().next().value;
-    bufferedFrames.delete(oldestId);
-    bufferedBytes -= oldest.size;
-  }
   return { frameId };
 }
 

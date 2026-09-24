@@ -1,0 +1,566 @@
+%PDF-1.4
+%0000
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+4 0 obj
+<< /Type /Pages /Count 10 /Kids [6 0 R 8 0 R 10 0 R 12 0 R 14 0 R 16 0 R 18 0 R 20 0 R 22 0 R 24 0 R] >>
+endobj
+5 0 obj
+<< /Length 4250 >>
+stream
+BT /F2 21 Tf 0.38 0 0 rg 1 0 0 1 46 788 Tm (JShotz User Guide) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 748 Tm (Version 3.14.4) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 727 Tm (JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 713 Tm (clean) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 699 Tm (screenshots and exports PDF or Word documents. Each document shows the action time above its) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 685 Tm (image) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 671 Tm (and recorder attribution in the footer, with an optional table of API calls captured under) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 657 Tm (each) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 643 Tm (step. It's built for documenting test flows, support tickets, and step-by-step evidence of) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 629 Tm (what) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 615 Tm (happened in a browser session.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 576 Tm (Before you begin) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 545 Tm (- Record ordinary web pages. Browsers protect internal pages such as chrome:// and extension) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 531 Tm (store pages, so JShotz cannot inject its click and scroll capture helpers there.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 517 Tm (- JShotz observes page fetch/XHR calls only during an API + Screenshot recording. Tab) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 503 Tm (viewport) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 489 Tm (and Screen/window modes leave site networking untouched.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 475 Tm (- Keep the browser tab focused when using the whole-page Alt+Shift+J shortcut.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 461 Tm (- Treat API + Screenshot recordings as sensitive evidence. Request URLs, payloads, and) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 447 Tm (responses can contain credentials, personal data, or other information that should not be) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 433 Tm (shared outside the intended audience.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 394 Tm (1. Installing the extension) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 363 Tm (Chrome / Edge) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 349 Tm (- Unzip JShotz-3.14.4-chrome-edge.zip.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 335 Tm (- Go to chrome://extensions \(or edge://extensions\).) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 321 Tm (- Turn on Developer mode \(top-right toggle\).) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 307 Tm (- Click Load unpacked and select the unzipped folder that contains manifest.json.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 293 Tm (- If updating, remove or disable the old version first so only one JShotz copy is loaded.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 272 Tm (Firefox) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 258 Tm (- Unzip JShotz-3.14.4-firefox.zip.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 244 Tm (- Go to about:debugging#/runtime/this-firefox.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 230 Tm (- Click Load Temporary Add-on and select the manifest.json inside the unzipped folder.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 216 Tm (- Firefox 128+ is required.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 195 Tm (Once loaded, pin the JShotz icon to your toolbar for easy access.) Tj ET
+BT /F2 12 Tf 0.45 0 0 rg 1 0 0 1 46 170 Tm (Updating JShotz) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 143 Tm (After reloading or updating the extension, refresh every tab that was already open before) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 129 Tm (you) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 115 Tm (record with it. Closing and reopening the target tab is the most reliable option. Chrome) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 101 Tm (keeps) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 87 Tm (the old page script alive until the tab reloads and may show Extension context invalidated) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 73 Tm (in) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 5010 >>
+stream
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 794 Tm (the extension's error list. Delete that old error card after refreshing the tab; it does not) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 780 Tm (indicate a problem with a newly opened or refreshed recording page.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 741 Tm (2. The popup) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 710 Tm (Click the JShotz icon to open the popup. It has three parts:) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 689 Tm (- Status line - shows Idle, Recording - N screenshot\(s\), Paused - N screenshot\(s\),) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 675 Tm (an interrupted-recording backup notice, or an error message.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 661 Tm (- Settings - capture source and a compact Capture options list. Expand the list to check or) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 647 Tm (clear behavior options. Settings lock once recording starts, except the capture source,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 633 Tm (which can) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 619 Tm (be changed mid-recording.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 605 Tm (- Actions - Start/Stop, Pause/Continue, Capture now, Capture DevTools, Save checkpoint, and) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 591 Tm (Resume capture from folder.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 577 Tm (- Screenshots list - a live list of what's been captured so far in the current session and) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 563 Tm (checkboxes that choose the screenshots included in output, plus an optional 50-character) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 549 Tm (note) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 535 Tm (for each screenshot.) Tj ET
+BT /F2 12 Tf 0.45 0 0 rg 1 0 0 1 46 510 Tm (Folder access fallback) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 483 Tm (If a resumed capture folder no longer allows writes, JShotz keeps recording instead of) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 469 Tm (dropping) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 455 Tm (screenshots. New PNG files are saved in the normal Downloads session folder while the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 441 Tm (restored and) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 427 Tm (new frames remain available for final documents. The popup changes its folder button to) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 413 Tm (Reconnect) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 399 Tm (capture folder; select the original folder to write subsequent PNGs and final documents) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 385 Tm (there) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 371 Tm (again. An empty selected folder is also valid: JShotz reconnects to it and confirms that the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 357 Tm (current flow is being captured there.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 336 Tm (Open this popup from the browser toolbar after loading JShotz as an extension. Opening) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 322 Tm (popup.html directly from its source folder cannot start a recording because browser) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 308 Tm (extension) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 294 Tm (APIs are unavailable there.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 255 Tm (3. Capture source \(modes\)) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 224 Tm (| Mode | What it captures | Notes |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 212 Tm (| --- | --- | --- |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 200 Tm (| Tab viewport only | The visible area of the recorded tab | Default mode, works) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 188 Tm (everywhere |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 176 Tm (| API + Screenshot | Same as Tab, plus a table of intercepted fetch/XHR calls under each) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 164 Tm (screenshot | Shows request URL, origin/referer, payload, and response; failed calls are) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 152 Tm (highlighted |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 140 Tm (| Screen / window \(DevTools + taskbar\) | A shared screen, window, or tab surface via the) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 128 Tm (browser's own share picker | Automatically buffers settled visual changes, including) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 116 Tm (opened API requests, detail tabs, and panel scrolling |) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 97 Tm (You can switch modes without stopping the recording. Pick a different option from the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 83 Tm (dropdown at any time. Switching to Screen/window mode opens a small picker window - click) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 69 Tm (Share in it and choose what to share. The tab being recorded is automatically brought to) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Length 4913 >>
+stream
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 794 Tm (the front first, since the picker needs a real click.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 773 Tm (If Screen/window mode's share source ends \(you click "Stop sharing", or close the shared) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 759 Tm (window\), the recording automatically falls back to Tab-viewport captures rather than) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 745 Tm (failing.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 724 Tm (While Screen/window mode is active, JShotz watches the shared pixels because browser) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 710 Tm (security does) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 696 Tm (not expose the native DevTools DOM to extensions. A screenshot is buffered when an API) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 682 Tm (request opens,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 668 Tm (the Headers, Payload, or Response view changes, or scrolling pauses. Buffered frames are) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 654 Tm (processed in) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 640 Tm (order, so image conversion and file writing do not cause quick DevTools updates to be lost.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 626 Tm (JShotz) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 612 Tm (retains up to 100 accepted screen frames during a processing backlog and never evicts an) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 598 Tm (earlier) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 584 Tm (accepted frame to make room for a later one.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 563 Tm (API mode begins collecting newly observed fetch and XHR calls while it is selected. It does) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 549 Tm (not add network details retroactively to screenshots that were captured in another mode.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 510 Tm (4. Settings) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 479 Tm (The five behavior settings are inside the collapsed Capture options checkable list. Its) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 465 Tm (summary) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 451 Tm (shows how many options are selected; expand it to review or change individual options.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 430 Tm (- Capture on every button click - automatically screenshot after clicks on buttons, links,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 416 Tm (checkboxes, and similar controls. Link destinations wait for their rendered page state) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 402 Tm (before) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 388 Tm (JShotz takes the screenshot. Its title and URL are read from that rendered page, and stale) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 374 Tm (browser events are skipped rather than being attached to a later screen.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 360 Tm (- Capture every 60% of a screen scrolled, and at the end - automatically screenshot as you) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 346 Tm (scroll, roughly every 60% of a screenful \(so consecutive shots overlap\), plus one at the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 332 Tm (very) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 318 Tm (bottom of the page.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 304 Tm (- Whole-page shots for manual captures - see [Section 6].) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 290 Tm (- Save individual PNG files - save each screenshot as its own PNG in the session folder.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 276 Tm (- Preselect PDF in output dialogs - starts each output dialog with PDF selected; you can) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 262 Tm (choose PDF, Word, or both for every export.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 241 Tm (During a recording, the behavior checkboxes are locked so the session stays consistent. The) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 227 Tm (Capture source menu remains available, allowing you to switch modes without ending the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 213 Tm (session.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 174 Tm (5. Starting, capturing, and stopping) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 143 Tm (- Open the tab you want to record, then click Start recording in the popup. JShotz displays) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 129 Tm (a) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 115 Tm (timestamped folder suggestion such as JShotz2026-09-2414-30-00-000. Keep it or enter your) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 101 Tm (own) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 87 Tm (evidence-folder name, then confirm Start recording. If JShotz has used that folder name) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 73 Tm (before,) Tj ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 9 0 R >>
+endobj
+11 0 obj
+<< /Length 6256 >>
+stream
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 794 Tm (select Reuse existing folder, Create a new folder with timestamp appended, or Provide a) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 780 Tm (new unique folder name. JShotz checks its own folder registry silently without opening the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 766 Tm (browser's Downloads notification.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 752 Tm (- Use the page normally. Screenshots are taken automatically per your settings, and you can) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 738 Tm (also trigger one manually at any time \(see below\).) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 724 Tm (JShotz retains the time each action occurred even when it waits for the page to render. The) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 710 Tm (screenshot list, PDF/Word output, and session manifest keep steps in action order, with one) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 696 Tm (settled frame for each normal automatic action.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 682 Tm (- When a page you're recording opens a new tab \(e.g. a sign-in redirect\), JShotz follows) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 668 Tm (it automatically - that tab is brought to the front and becomes part of the recording.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 654 Tm (Switching back to the original tab \(or to any other tab that flow has opened\) resumes) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 640 Tm (capturing from wherever you actually are. This also covers external or target="blank") Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 626 Tm (links whose browser tab does not expose an opener relationship.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 612 Tm (- To temporarily suspend screenshots without ending the session, click Pause recording.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 598 Tm (The button changes to Continue recording. While paused, JShotz keeps the screenshot list,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 584 Tm (output selections, capture numbering, session folder, and tracked tabs or child windows.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 570 Tm (Click) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 556 Tm (Continue recording to add subsequent screenshots to that same session.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 542 Tm (If the browser restarts or crashes during a recording, JShotz ends that session safely) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 528 Tm (rather) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 514 Tm (than attaching it to an arbitrary open tab. The popup reports the interruption, retains the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 500 Tm (stored screenshots, and offers Generate evidences. Start a new recording for a new flow, or) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 486 Tm (use Resume capture from folder to continue a folder-backed flow.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 472 Tm (- When you're done, click Stop recording. Use the Screenshots list to clear any frames) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 458 Tm (you do not want in output. Select all starts checked and automatically clears when any) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 444 Tm (individual screenshot is unchecked. This choice remains for the current recording if the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 430 Tm (popup) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 416 Tm (closes and is reopened. You'll then be asked whether to keep the files:) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 402 Tm (- Yes, keep - prompts for a custom file name and PDF, Word, or both. It then saves all PNGs,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 388 Tm (the manifest, and selected documents. Each document contains only the checked screenshots.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 374 Tm (Choose Save and stop \(Ctrl+S\) to finish without opening the file location and receive a) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 360 Tm (saved-file toast, or Save, stop, and open file location \(Ctrl+Alt+S\) to reveal the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 346 Tm (browser-download folder after final output completes. While accepted captures are still) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 332 Tm (being) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 318 Tm (processed, the popup displays The document is being created. Please wait.... JShotz drains) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 304 Tm (queued captures into the final list before creating documents.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 290 Tm (- Stop without document - keeps the captured PNGs, session manifest, and current interim) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 276 Tm (PDF, but ends the recording without creating a final document.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 262 Tm (- No, delete all - asks you to confirm, then removes everything from that session, including) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 248 Tm (its interim PDF.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 227 Tm (After a keep-files stop, the completed screenshot list stays available in the popup. Click) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 213 Tm (Generate) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 199 Tm (evidences to choose a custom base name, select PDF, Word, or both, and create another) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 185 Tm (document from) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 171 Tm (the checked screenshots. JShotz writes evidence documents into the same selected folder or) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 157 Tm (Downloads) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 143 Tm (session directory used by that recording. If an output document with the requested name) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 129 Tm (already exists,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 115 Tm (JShotz appends the creation timestamp to make a new version instead of replacing it.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 101 Tm (Evidence remains) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 87 Tm (available until you start a new recording.) Tj ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 11 0 R >>
+endobj
+13 0 obj
+<< /Length 5139 >>
+stream
+BT /F2 12 Tf 0.45 0 0 rg 1 0 0 1 46 794 Tm (Manual capture options) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 767 Tm (| Action | How | Notes |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 755 Tm (| --- | --- | --- |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 743 Tm (| Capture now | Click Capture now in the popup | Whole-page when enabled and direct) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 731 Tm (capture is available; otherwise one visible frame |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 719 Tm (| Whole-page hotkey | Press Alt+Shift+J while the page has focus | Same whole-page) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 707 Tm (function as Capture now; otherwise one visible frame when direct capture is unavailable) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 695 Tm (|) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 683 Tm (| DevTools panel capture | Press Alt+Shift+K while a DevTools panel is open | Captures) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 671 Tm (exactly what's on screen, including the DevTools panel |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 659 Tm (| Capture DevTools | In Screen / window mode with DevTools open, click Capture DevTools,) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 647 Tm (or press Alt+Shift+D | Captures the shared screen immediately; the button and shortcut) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 635 Tm (do nothing until DevTools and screen sharing are both active |) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 616 Tm (Manual captures are available only while recording is active and not paused.) Tj ET
+BT /F2 12 Tf 0.45 0 0 rg 1 0 0 1 46 591 Tm (Saving while continuing) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 564 Tm (Use Save checkpoint \(Shift+Ctrl+S\) to open a checkpoint save dialog without stopping the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 550 Tm (active) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 536 Tm (recording. Enter a custom base name and select PDF, Word, or both. The screenshot list,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 522 Tm (numbering,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 508 Tm (output selection, and current session folder remain unchanged. A toast confirms whether the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 494 Tm (checkpoint save succeeded or failed.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 473 Tm (Use Save and stop \(Ctrl+S\) to open the final save dialog. Once its selected documents are) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 459 Tm (saved,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 445 Tm (JShotz ends the recording using the same keep-files behavior as Stop recording. A toast) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 431 Tm (confirms) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 417 Tm (the saved file name without opening its location.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 396 Tm (Use Save, stop, and open file location \(Ctrl+Alt+S\) to open the same final save dialog. Once) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 382 Tm (its) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 368 Tm (selected documents are saved, JShotz ends the recording and opens the browser-download) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 354 Tm (location.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 340 Tm (For a directly selected capture folder, browser security does not expose the folder's native) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 326 Tm (path;) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 312 Tm (JShotz opens Downloads instead.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 291 Tm (The recorded JPEG frames are retained for output, regardless of the initial PDF preference,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 277 Tm (so a) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 263 Tm (later dialog can create PDF, Word, or both. After a keep-files stop, Generate evidences uses) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 249 Tm (those) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 235 Tm (retained frames and the current checked screenshots to create additional documents.) Tj ET
+BT /F2 12 Tf 0.45 0 0 rg 1 0 0 1 46 210 Tm (Automatic interim backup) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 183 Tm (After screenshot 5 and every five screenshots after that, JShotz updates one) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 169 Tm (JShotz-interim.pdf. It overwrites the existing file in the selected capture folder or the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 155 Tm (session's Downloads folder, so repeated backups do not create a growing set of files. The) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 141 Tm (latest) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 127 Tm (interim PDF remains available if the browser crashes, closes accidentally, or the recording) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 113 Tm (stops) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 99 Tm (without a document. A successful final PDF/Word save, or a successful post-stop Generate) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 85 Tm (evidences save, removes the interim PDF.) Tj ET
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 13 0 R >>
+endobj
+15 0 obj
+<< /Length 4725 >>
+stream
+BT /F2 12 Tf 0.45 0 0 rg 1 0 0 1 46 794 Tm (Resume capture from folder) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 767 Tm (Use this action when a browser or extension crash leaves a prior set of screenshots but the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 753 Tm (active) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 739 Tm (recording cannot be recovered automatically:) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 718 Tm (- Open the page where the flow should continue.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 704 Tm (- In the idle popup, click Resume capture from folder.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 690 Tm (- Choose the exact earlier screenshot folder in the native folder dialog and grant) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 676 Tm (read/write) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 662 Tm (access.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 648 Tm (- Click Start recording.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 627 Tm (JShotz reloads the Screenshots list from that folder and captures the current page with the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 613 Tm (next) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 599 Tm (sequence number. The earlier and new screenshots are selected for checkpoint and final Stop) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 585 Tm (recording output. New PNGs, PDF/Word documents, and flow-manifest.json are written directly) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 571 Tm (into the selected folder, and JShotz does not open a browser tab for this action.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 550 Tm (If the selected folder has no previous PNG or JPEG screenshots, Start recording starts a new) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 536 Tm (recording) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 522 Tm (in that folder instead. It displays: No previous screenshots found in selected folder,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 508 Tm (JShotz is) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 494 Tm (still capturing the current flows to the selected folder. Without selecting a resume folder,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 480 Tm (Start) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 466 Tm (recording always creates a fresh session and Downloads folder after a stop or browser) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 452 Tm (restart.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 431 Tm (This workflow needs Chrome or Edge's native File System Access API. Firefox can record) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 417 Tm (normally,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 403 Tm (but cannot resume into an arbitrary existing folder.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 382 Tm (After a browser restart, the active recording has already ended safely. To continue a) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 368 Tm (folder-backed) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 354 Tm (flow, use Resume capture from folder and choose the same folder. Reconnect capture folder) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 340 Tm (is for an active recording whose folder permission changes while the browser remains open.) Tj ET
+BT /F2 12 Tf 0.45 0 0 rg 1 0 0 1 46 315 Tm (Modal capture behavior) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 288 Tm (JShotz takes one screenshot when a modal opens. A fixed modal suppresses page scrolling) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 274 Tm (captures) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 260 Tm (behind it. Only a large modal with a genuinely scrollable body produces a modal-scrolled) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 246 Tm (capture) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 232 Tm (after substantial movement. Buttons, input edits, and committed dropdown selections inside a) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 218 Tm (modal) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 204 Tm (each create one settled screenshot. For a modal with no scrollbar, JShotz exports a compact) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 190 Tm (image) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 176 Tm (of the modal rather than duplicating the entire page. Cookie-consent banners and similar) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 162 Tm (wide) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 148 Tm (in-page consent overlays remain in the full viewport image, so the affected page and its) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 134 Tm (banner) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 120 Tm (appear together as one screenshot.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 81 Tm (6. Full-page \(whole-page\) capture) Tj ET
+endstream
+endobj
+16 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 15 0 R >>
+endobj
+17 0 obj
+<< /Length 5066 >>
+stream
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 794 Tm (When "Whole-page shots for manual captures" is enabled, the following explicit page controls) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 780 Tm (capture the entire scrollable page instead of just the visible area when direct capture is) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 766 Tm (available:) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 745 Tm (- Alt+Shift+J) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 731 Tm (- Capture now) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 710 Tm (Automatic captures \(clicks, scrolling, field edits, and navigation\) always remain one) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 696 Tm (ordinary) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 682 Tm (viewport shot, including narrow responsive layouts and DevTools Device Mode.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 661 Tm (How it works, and what to expect:) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 647 Tm (- For a page whose content naturally extends below the viewport, Chromium rasterizes the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 633 Tm (document) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 619 Tm (beyond its existing viewport. JShotz does not enlarge or reflow the page to render the shot.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 605 Tm (- Long captures are split into sequential, bounded part N of M screenshots at one shared) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 591 Tm (scale. Adjacent parts preserve the full page without a giant image and are exported as) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 577 Tm (consecutive) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 563 Tm (PDF pages.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 549 Tm (- A progress bar appears in the popup and on the page while the capture runs. It is hidden) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 535 Tm (before) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 521 Tm (each screenshot and removed when capture completes.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 507 Tm (- If direct capture is unavailable, including in Firefox, DevTools Device Mode, a page) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 493 Tm (already) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 479 Tm (attached to DevTools, or an app-shell page with an inner scroller, JShotz captures the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 465 Tm (current) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 451 Tm (visible viewport once. It never scrolls the document or an inner pane to construct the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 437 Tm (image.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 423 Tm (- Stopping a recording cancels an in-progress whole-page capture promptly. Its unfinished) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 409 Tm (frame is) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 395 Tm (discarded and cannot be added after the session stops.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 381 Tm (- Chrome may show a "started debugging this browser" banner for an ordinary-document) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 367 Tm (capture.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 353 Tm (This is a hard Chrome platform notice with no way to hide it; it disappears immediately) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 339 Tm (after) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 325 Tm (the shot.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 286 Tm (7. Keyboard shortcuts) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 255 Tm (| Shortcut | Action |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 243 Tm (| --- | --- |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 231 Tm (| Alt+Shift+J | Whole-page capture \(page must have focus\) |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 219 Tm (| Alt+Shift+K | Capture the current DevTools panel |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 207 Tm (| Alt+Shift+D | Capture in 5 seconds |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 195 Tm (| Shift+Ctrl+S | Open a named checkpoint save dialog and continue recording after saving) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 183 Tm (|) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 171 Tm (| Ctrl+S | Open the final save dialog, save the chosen output, and stop recording) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 159 Tm (without opening the file location |) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 147 Tm (| Ctrl+Alt+S | Open the final save dialog, save the chosen output, stop recording, and) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 135 Tm (open its browser-download location |) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 116 Tm (The extension-command shortcuts can be assigned at chrome://extensions/shortcuts \(or the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 102 Tm (Firefox equivalent\). The Shift+Ctrl+S, Ctrl+S, and Ctrl+Alt+S flow controls are page) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 88 Tm (shortcuts) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 74 Tm (while a recording is active.) Tj ET
+endstream
+endobj
+18 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 17 0 R >>
+endobj
+19 0 obj
+<< /Length 5482 >>
+stream
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 794 Tm (8. Output selection, notes, and saved files) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 763 Tm (Every capture starts selected for document output. Clear the checkbox beside an unwanted) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 749 Tm (screenshot,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 735 Tm (or use Select all to restore the full set. For large sessions, the popup initially shows the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 721 Tm (50 newest screenshots; use Show older screenshots to reveal earlier ones. The current) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 707 Tm (selection is preserved while the session is active, even when the popup closes.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 686 Tm (The same selection controls Save checkpoint, Save and stop, Save, stop, and open file) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 672 Tm (location, Generate evidences, and final output created through Stop recording. Every output) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 658 Tm (dialog accepts a custom base name and lets you choose PDF, Word, or both:) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 637 Tm (- With Save individual PNG files enabled, JShotz saves each captured screenshot separately.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 623 Tm (- Stop without document always retains the captured files and session manifest but skips) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 609 Tm (PDF and Word creation for that stop operation.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 595 Tm (- The Preselect PDF in output dialogs preference changes only the initial dialog choice;) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 581 Tm (output frames are retained so Word remains available later.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 567 Tm (- Save, stop, and open file location \(Ctrl+Alt+S\) reveals the final browser-download output.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 553 Tm (A directly selected capture folder has no native path available to a browser extension, so) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 539 Tm (JShotz) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 525 Tm (opens Downloads instead.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 511 Tm (- Generate evidences is available after a keep-files stop. It uses the same output folder as) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 497 Tm (that) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 483 Tm (stopped recording and appends a timestamp when the requested evidence filename already) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 469 Tm (exists.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 448 Tm (When resuming a selected folder, JShotz keeps PNG and document output available so the older) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 434 Tm (and new) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 420 Tm (screenshots stay together in that folder.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 399 Tm (The generated PDF and Word document use the page title as the heading for each captured) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 385 Tm (step. Add) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 371 Tm (an optional note of up to 50 characters under a screenshot; it appears after that heading as) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 357 Tm ([note] in both document formats. The action time appears immediately above the image and) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 343 Tm (Captured by Jobin's Screenshots appears in the document footer; neither is overlaid on the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 329 Tm (captured page. API tables appear only on screenshots captured in API + Screenshot mode.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 290 Tm (9. Troubleshooting) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 259 Tm (- After installing, reloading, or updating JShotz, refresh any target tab that was already) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 245 Tm (open.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 231 Tm (This removes old injected page scripts and avoids an Extension context invalidated error.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 217 Tm (- If the popup says JShotz is unavailable, reload the extension in the browser's extension) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 203 Tm (page,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 189 Tm (then close and reopen the popup.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 175 Tm (- If the Screen/window share picker is cancelled or the shared source closes, recording) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 161 Tm (continues) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 147 Tm (with Tab viewport captures. Select Screen/window again when you are ready to share a) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 133 Tm (surface.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 119 Tm (- During a whole-page capture, wait for the progress bar to complete before capturing again.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 105 Tm (Capture now is temporarily disabled while that work is in progress.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 91 Tm (- If a page does not record clicks or scrolling, confirm that it is an ordinary website) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 77 Tm (rather) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 63 Tm (than a browser-protected page, then refresh the tab and start a new recording.) Tj ET
+endstream
+endobj
+20 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 19 0 R >>
+endobj
+21 0 obj
+<< /Length 4698 >>
+stream
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 794 Tm (- If JShotz says Capture skipped: JShotz needs access to the current page, Chrome has) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 780 Tm (revoked) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 766 Tm (its temporary tab access, commonly after a cross-site redirect. Open the JShotz popup in the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 752 Tm (current tab, then continue recording. For automatic capture across websites, open JShotz's) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 738 Tm (extension details and set Site access to On all sites. The skipped-capture detail stays) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 724 Tm (in the final manifest's debugLog; it does not create a separate download.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 685 Tm (8. Where your files go) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 654 Tm (Each recording creates a folder in your browser's default download location:) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 628 Tm (Downloads/) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 616 Tm (Jshotz/) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 604 Tm (JShotz<timestamp>/ \(or the session folder name you entered\)) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 592 Tm (001<timestamp><label>.png) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 580 Tm (002<timestamp><label>.png) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 568 Tm (...) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 556 Tm (JShotz-interim.pdf \(updated after every fifth screenshot until final save\)) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 544 Tm (flow-manifest.json \(list of every capture plus diagnostic debugLog\)) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 532 Tm (<custom-name>.pdf \(when PDF is selected\)) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 520 Tm (<custom-name>.docx \(when Word is selected\)) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 508 Tm (<custom-name>checkpoint.pdf / .docx \(for checkpoint saves\)) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 496 Tm (<custom-name><timestamp>.pdf / .docx \(when a same-named evidence document already) Tj ET
+BT /F3 8 Tf 0.12 0.16 0.22 rg 1 0 0 1 46 484 Tm (exists\)) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 460 Tm (Pausing does not create another folder. When you click Continue recording, new screenshots) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 446 Tm (keep the next number and are written beside the screenshots already shown in the list.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 425 Tm (When you use Resume capture from folder and then click Start recording, the selected) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 411 Tm (existing) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 397 Tm (folder becomes the working folder. JShotz writes the new PNGs, checkpoint and final PDF/Word) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 383 Tm (documents, post-stop evidence documents, interim PDF, and updated flow-manifest.json there) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 369 Tm (instead of creating a new Downloads session folder.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 330 Tm (9. The debug log) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 299 Tm (JShotz keeps the newest 1,000 diagnostic lines in background extension storage while) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 285 Tm (recording.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 271 Tm (This prevents a separate diagnostic-file download or save prompt from interrupting pause,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 257 Tm (continue, capture, mode-switch, checkpoint-export, or error handling. When you keep a) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 243 Tm (session,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 229 Tm (the same entries are included as debugLog in flow-manifest.json beside the screenshots.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 208 Tm (The log lists capture triggers, mode, success/failure, timing, mode switches, recovery) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 194 Tm (events,) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 180 Tm (and errors. If you ever need help diagnosing an issue, share the relevant debugLog lines) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 166 Tm (from) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 152 Tm (the final manifest.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 131 Tm (If you choose "delete all," no diagnostic file is downloaded. The in-progress log remains in) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 117 Tm (extension storage until you start a new recording.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 78 Tm (10. Known limitations) Tj ET
+endstream
+endobj
+22 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 21 0 R >>
+endobj
+23 0 obj
+<< /Length 2256 >>
+stream
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 794 Tm (- The "started debugging this browser" banner during whole-page captures cannot be hidden -) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 780 Tm (this is a Chrome security notice, not a bug.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 766 Tm (- When DevTools is open on the recorded tab, a manual whole-page request saves one visible) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 752 Tm (frame) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 738 Tm (rather than scrolling the page to assemble a long capture.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 724 Tm (- Multi-tab and child-window following remains active while a session is paused and when the) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 710 Tm (background service worker restarts.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 696 Tm (- A horizontally-scrolling element on a page \(e.g. a carousel\) is captured exactly as it) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 682 Tm (appears at the time - whole-page capture only extends vertically.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 668 Tm (- Reloading or updating JShotz requires refreshing any already-open recording tabs before) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 654 Tm (use.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 640 Tm (- Resume capture from folder requires Chrome or Edge; Firefox does not provide writable) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 626 Tm (native) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 612 Tm (folder handles to extensions.) Tj ET
+BT /F2 15 Tf 0.45 0 0 rg 1 0 0 1 46 573 Tm (11. Getting help) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 542 Tm (If something isn't working as expected:) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 528 Tm (- Note the approximate time and what you were doing \(which button, which page\).) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 514 Tm (- Open flow-manifest.json from that session's folder and find the matching debugLog lines.) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 500 Tm (- Share the page URL \(or a general description if it's private\), the log excerpt, and - if) Tj ET
+BT /F1 10 Tf 0.1 0.1 0.16 rg 1 0 0 1 46 486 Tm (relevant - the screenshot in question.) Tj ET
+endstream
+endobj
+24 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 23 0 R >>
+endobj
+25 0 obj
+<< /Type /Catalog /Pages 4 0 R >>
+endobj
+26 0 obj
+<< /Title (JShotz User Guide 3.14.4) /Author (JShotz) >>
+endobj
+xref
+0 27
+0000000000 65535 f
+0000000015 00000 n
+0000000085 00000 n
+0000000160 00000 n
+0000000228 00000 n
+0000000348 00000 n
+0000004650 00000 n
+0000004796 00000 n
+0000009858 00000 n
+0000010004 00000 n
+0000014969 00000 n
+0000015116 00000 n
+0000021425 00000 n
+0000021573 00000 n
+0000026765 00000 n
+0000026913 00000 n
+0000031691 00000 n
+0000031839 00000 n
+0000036958 00000 n
+0000037106 00000 n
+0000042641 00000 n
+0000042789 00000 n
+0000047540 00000 n
+0000047688 00000 n
+0000049997 00000 n
+0000050145 00000 n
+0000050195 00000 n
+trailer
+<< /Size 27 /Root 25 0 R /Info 26 0 R >>
+startxref
+50268
+%%EOF

@@ -31,12 +31,14 @@ test('buffers a screen frame after a meaningful visual change settles', async ()
   let sample = new Uint8ClampedArray(128 * 72 * 4);
   const fullFrame = 'data:image/jpeg;base64,YnVmZmVyZWQtZnJhbWU=';
   let canvasIndex = 0;
+  const blobCanvasIds = [];
   const document = {
     getElementById(id) {
       return { share, state, preview: video }[id];
     },
     createElement() {
-      const isFrameCanvas = canvasIndex++ === 0;
+      const canvasId = canvasIndex++;
+      const isFrameCanvas = canvasId === 0;
       return {
         width: 0,
         height: 0,
@@ -52,6 +54,7 @@ test('buffers a screen frame after a meaningful visual change settles', async ()
           return isFrameCanvas ? fullFrame : '';
         },
         toBlob(callback, type) {
+          blobCanvasIds.push(canvasId);
           callback(new Blob(['buffered-frame'], { type }));
         }
       };
@@ -147,6 +150,23 @@ test('buffers a screen frame after a meaningful visual change settles', async ()
     );
   });
   assert.equal(response.dataUrl, fullFrame);
+
+  const queuedFrames = await Promise.all(Array.from({ length: 100 }, () =>
+    new Promise((resolveResponse) => {
+      runtimeListeners[0]({ target: 'screen', type: 'SCREEN_BUFFER_CAPTURE' }, {}, resolveResponse);
+    })
+  ));
+  assert.equal(new Set(blobCanvasIds.slice(-100)).size, 100);
+  for (const queuedFrame of queuedFrames) {
+    const queuedResponse = await new Promise((resolveResponse) => {
+      runtimeListeners[0](
+        { target: 'screen', type: 'SCREEN_TAKE_BUFFERED', frameId: queuedFrame.frameId },
+        {},
+        resolveResponse
+      );
+    });
+    assert.equal(queuedResponse.dataUrl, fullFrame);
+  }
 
   for (let sampleNumber = 0; sampleNumber < 7; sampleNumber += 1) {
     now += 250;

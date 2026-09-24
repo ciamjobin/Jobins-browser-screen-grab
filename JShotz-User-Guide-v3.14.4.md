@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.14.3**
+**Version 3.14.4**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as clean
 screenshots and exports PDF or Word documents. Each document shows the action time above its image
@@ -26,14 +26,14 @@ happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.14.3-chrome-edge.zip`.
+1. Unzip `JShotz-3.14.4-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.14.3-firefox.zip`.
+1. Unzip `JShotz-3.14.4-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -99,7 +99,9 @@ window), the recording automatically falls back to Tab-viewport captures rather 
 While Screen/window mode is active, JShotz watches the shared pixels because browser security does
 not expose the native DevTools DOM to extensions. A screenshot is buffered when an API request opens,
 the Headers, Payload, or Response view changes, or scrolling pauses. Buffered frames are processed in
-order, so image conversion and file writing do not cause quick DevTools updates to be lost.
+order, so image conversion and file writing do not cause quick DevTools updates to be lost. JShotz
+retains up to 100 accepted screen frames during a processing backlog and never evicts an earlier
+accepted frame to make room for a later one.
 
 API mode begins collecting newly observed `fetch` and XHR calls while it is selected. It does
 not add network details retroactively to screenshots that were captured in another mode.
@@ -133,7 +135,10 @@ session.
 
 1. Open the tab you want to record, then click **Start recording** in the popup. JShotz displays a
   timestamped folder suggestion such as `JShotz_2026-09-24_14-30-00-000`. Keep it or enter your own
-  evidence-folder name, then confirm **Start recording**.
+  evidence-folder name, then confirm **Start recording**. If JShotz has used that folder name before,
+  select **Reuse existing folder**, **Create a new folder with timestamp appended**, or **Provide a
+  new unique folder name**. JShotz checks its own folder registry silently without opening the
+  browser's Downloads notification.
 2. Use the page normally. Screenshots are taken automatically per your settings, and you can
    also trigger one manually at any time (see below).
   JShotz retains the time each action occurred even when it waits for the page to render. The
@@ -160,7 +165,9 @@ session.
      the manifest, and selected documents. Each document contains only the checked screenshots.
      Choose **Save and stop (Ctrl+S)** to finish without opening the file location and receive a
      saved-file toast, or **Save, stop, and open file location (Ctrl+Alt+S)** to reveal the
-     browser-download folder after final output completes.
+    browser-download folder after final output completes. While accepted captures are still being
+    processed, the popup displays **The document is being created. Please wait...**. JShotz drains
+    queued captures into the final list before creating documents.
    - **Stop without document** — keeps the captured PNGs, session manifest, and current interim
      PDF, but ends the recording without creating a final document.
    - **No, delete all** — asks you to confirm, then removes everything from that session, including

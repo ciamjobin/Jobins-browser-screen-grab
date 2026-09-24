@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.14.3**
+**Version 3.14.4**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF or Word document - handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -20,7 +20,9 @@ documenting a process, a support case, or a step-by-step walkthrough.
        processed in order after you open an API request, switch detail tabs, or pause scrolling.
 3. Click **Start recording**. JShotz suggests a timestamped evidence folder name. Keep it or enter
    your own name, then click **Start recording** in the folder prompt. New sessions are stored under
-   `Downloads/Jshotz/<folder name>/`.
+   `Downloads/Jshotz/<folder name>/`. If that name was used before, choose **Reuse existing folder**,
+   **Create a new folder with timestamp appended**, or **Provide a new unique folder name**. This
+   check is silent and does not open the browser's Downloads notification.
 4. Use the page normally — screenshots are taken automatically as you click and scroll. Each
    normal action produces one settled screenshot of the currently visible page area. JShotz keeps
    the resulting documents in the order you acted, even when a screen waits to render; each
@@ -98,7 +100,9 @@ error card after reopening the tab.
 
 In **Screen / window** mode, JShotz also captures settled visual changes in DevTools automatically.
 This covers opening each API request, switching among Headers, Payload, and Response, and scrolling
-those panels. Frames are buffered before document processing so quick follow-up actions are retained.
+those panels. Up to 100 frames are buffered before document processing so quick follow-up actions
+are retained. When stopping with documents, wait for **The document is being created. Please wait...**;
+JShotz drains accepted frames into the final list before creating PDF or Word output.
 
 ---
 

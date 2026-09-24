@@ -75,8 +75,15 @@
           <span>Downloads / Jshotz /</span>
           <input id="sessionFolderName" type="text" maxlength="100" autocomplete="off" />
         </label>
+        <fieldset id="sessionFolderConflict" class="folder-conflict" hidden>
+          <legend>This folder already exists. Choose how to continue:</legend>
+          <label><input type="radio" name="folderConflictChoice" value="reuse" checked /> Reuse existing folder</label>
+          <label><input type="radio" name="folderConflictChoice" value="timestamp" /> Create a new folder with timestamp appended</label>
+          <label><input type="radio" name="folderConflictChoice" value="rename" /> Provide a new unique folder name</label>
+          <input id="uniqueSessionFolderName" type="text" maxlength="100" autocomplete="off" aria-label="New unique folder name" disabled />
+        </fieldset>
         <div class="actions">
-          <button id="sessionFolderStart" class="primary">Start recording</button>
+          <button id="sessionFolderStart" class="primary">Continue</button>
           <button id="sessionFolderCancel">Cancel</button>
         </div>
       </div>

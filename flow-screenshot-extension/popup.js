@@ -22,6 +22,9 @@ const sessionFolderPromptEl = document.getElementById('sessionFolderPrompt');
 const sessionFolderNameEl = document.getElementById('sessionFolderName');
 const sessionFolderStartEl = document.getElementById('sessionFolderStart');
 const sessionFolderCancelEl = document.getElementById('sessionFolderCancel');
+const sessionFolderConflictEl = document.getElementById('sessionFolderConflict');
+const uniqueSessionFolderNameEl = document.getElementById('uniqueSessionFolderName');
+const folderConflictChoiceEls = [...document.querySelectorAll('input[name="folderConflictChoice"]')];
 const captureOptionsSummaryEl = document.getElementById('captureOptionsSummary');
 const outputFilenameEl = document.getElementById('outputFilename');
 const outputPromptTitleEl = document.getElementById('outputPromptTitle');
@@ -248,6 +251,26 @@ function suggestedSessionFolderName(date = new Date()) {
     `JShotz_${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
     `_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}-${pad(date.getMilliseconds(), 3)}`
   );
+}
+
+function timestampedConflictFolderName(folderName, date = new Date()) {
+  const suffix = suggestedSessionFolderName(date).slice('JShotz_'.length);
+  return `${folderName.slice(0, Math.max(1, 99 - suffix.length))}_${suffix}`;
+}
+
+function resetSessionFolderConflict() {
+  sessionFolderConflictEl.hidden = true;
+  uniqueSessionFolderNameEl.value = '';
+  uniqueSessionFolderNameEl.disabled = true;
+  folderConflictChoiceEls.find(({ value }) => value === 'reuse').checked = true;
+}
+
+async function checkedSessionFolderName(folderName) {
+  const result = await send('CHECK_SESSION_FOLDER', { sessionFolderName: folderName });
+  return {
+    exists: Boolean(result?.exists),
+    folderName: String(result?.folderName || folderName).trim()
+  };
 }
 
 function updateCaptureOptionsSummary() {
@@ -667,6 +690,7 @@ toggleEl.addEventListener('click', async () => {
     }
     awaitingChoice = true;
     toggleEl.disabled = true;
+    resetSessionFolderConflict();
     sessionFolderNameEl.value = suggestedSessionFolderName();
     sessionFolderPromptEl.hidden = false;
     sessionFolderNameEl.focus();
@@ -677,7 +701,7 @@ toggleEl.addEventListener('click', async () => {
 });
 
 sessionFolderStartEl.addEventListener('click', async () => {
-  const sessionFolderName = sessionFolderNameEl.value.trim();
+  let sessionFolderName = sessionFolderNameEl.value.trim();
   if (!sessionFolderName) {
     showToast('Enter a name for the evidence folder.', 'error');
     sessionFolderNameEl.focus();
@@ -685,6 +709,42 @@ sessionFolderStartEl.addEventListener('click', async () => {
   }
   sessionFolderStartEl.disabled = true;
   try {
+    if (sessionFolderConflictEl.hidden) {
+      const checked = await checkedSessionFolderName(sessionFolderName);
+      sessionFolderName = checked.folderName;
+      if (checked.exists) {
+        sessionFolderNameEl.value = sessionFolderName;
+        uniqueSessionFolderNameEl.value = `${sessionFolderName}_new`;
+        sessionFolderConflictEl.hidden = false;
+        return;
+      }
+    } else {
+      const choice = folderConflictChoiceEls.find(({ checked }) => checked)?.value;
+      if (choice === 'timestamp') {
+        sessionFolderName = timestampedConflictFolderName(sessionFolderName);
+        const checked = await checkedSessionFolderName(sessionFolderName);
+        if (checked.exists) {
+          showToast('The timestamped folder also exists. Try again.', 'error');
+          return;
+        }
+        sessionFolderName = checked.folderName;
+      } else if (choice === 'rename') {
+        const uniqueName = uniqueSessionFolderNameEl.value.trim();
+        if (!uniqueName) {
+          showToast('Enter a new unique folder name.', 'error');
+          uniqueSessionFolderNameEl.focus();
+          return;
+        }
+        const checked = await checkedSessionFolderName(uniqueName);
+        if (checked.exists) {
+          showToast('That folder already exists. Enter a unique folder name.', 'error');
+          uniqueSessionFolderNameEl.focus();
+          uniqueSessionFolderNameEl.select();
+          return;
+        }
+        sessionFolderName = checked.folderName;
+      }
+    }
     await beginRecording(sessionFolderName);
   } catch (error) {
     showActionError('Start recording', error);
@@ -695,9 +755,19 @@ sessionFolderStartEl.addEventListener('click', async () => {
 
 sessionFolderCancelEl.addEventListener('click', () => {
   sessionFolderPromptEl.hidden = true;
+  resetSessionFolderConflict();
   awaitingChoice = false;
   toggleEl.disabled = false;
 });
+
+sessionFolderNameEl.addEventListener('input', resetSessionFolderConflict);
+
+for (const choiceEl of folderConflictChoiceEls) {
+  choiceEl.addEventListener('change', () => {
+    uniqueSessionFolderNameEl.disabled = choiceEl.value !== 'rename' || !choiceEl.checked;
+    if (!uniqueSessionFolderNameEl.disabled) uniqueSessionFolderNameEl.focus();
+  });
+}
 
 sessionFolderNameEl.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
@@ -732,14 +802,16 @@ async function finishRecording(
   confirmEl.hidden = true;
   filenamePromptEl.hidden = true;
   deleteConfirmEl.hidden = true;
-  awaitingChoice = false;
+  awaitingChoice = true;
   toggleEl.disabled = true;
   const selectedFolderName = renderedState?.outputFolder?.name || null;
   const opensDownloadLocation = reveal && !selectedFolderName;
   statusEl.textContent = keepFiles
-    ? 'Finishing up \u2014 writing files and opening the folder\u2026'
+    ? 'The document is being created. Please wait...'
     : 'Deleting captured files\u2026';
-  if (keepFiles && !opensDownloadLocation) statusEl.textContent = 'Finishing up - writing files...';
+  if (keepFiles && opensDownloadLocation) {
+    statusEl.textContent = 'The document is being created. Please wait. The folder will open when ready...';
+  }
   const payload = {
     keepFiles,
     outputFilename,
@@ -764,6 +836,7 @@ async function finishRecording(
   } catch (error) {
     showActionError('Could not stop recording', error);
   } finally {
+    awaitingChoice = false;
     mainActionsEl.classList.remove('awaiting-stop-choice');
     mainActionsEl.hidden = false;
     toggleEl.disabled = false;

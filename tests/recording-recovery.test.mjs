@@ -722,6 +722,34 @@ test('stores a newly named session under Downloads Jshotz', async () => {
   }
 });
 
+test('checks existing session folders without opening or searching browser downloads', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await fixture.setStorage({ jshotzSessionFolders: ['Claims_Evidence'] });
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+
+    const existing = await sendMessage(messageListener, {
+      type: 'CHECK_SESSION_FOLDER',
+      sessionFolderName: 'claims evidence'
+    });
+    const available = await sendMessage(messageListener, {
+      type: 'CHECK_SESSION_FOLDER',
+      sessionFolderName: 'New evidence'
+    });
+
+    assert.deepEqual(existing, { exists: true, folderName: 'claims_evidence' });
+    assert.deepEqual(available, { exists: false, folderName: 'New_evidence' });
+    assert.deepEqual(fixture.downloadSearchQueries, []);
+    assert.deepEqual(fixture.downloadUiEvents, []);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
 test('buffers screen frames before earlier screenshots finish processing', async () => {
   const originalChrome = globalThis.chrome;
   const fixture = createChrome();
@@ -770,6 +798,70 @@ test('buffers screen frames before earlier screenshots finish processing', async
   } finally {
     fixture.releaseOffscreenProcessing();
     await Promise.allSettled([first, second].filter(Boolean));
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('waits for queued screen captures before stopping and creating evidence', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+  let first;
+  let second;
+  let stopping;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        streamActive: true,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'screen',
+          savePng: false
+        }
+      }
+    });
+    fixture.blockOffscreenProcessing();
+
+    first = sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'First queued action' },
+      { tab: fixture.liveTab }
+    );
+    second = sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Second queued action' },
+      { tab: fixture.liveTab }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    let stopResolved = false;
+    stopping = sendMessage(messageListener, {
+      type: 'STOP',
+      keepFiles: true,
+      createPdf: false
+    }).then((state) => {
+      stopResolved = true;
+      return state;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(stopResolved, false);
+
+    fixture.releaseOffscreenProcessing();
+    const [stopped] = await Promise.all([stopping, first, second]);
+    assert.equal(stopped.recording, false);
+    assert.equal(stopped.captures.length, 42);
+    assert.deepEqual(stopped.captures.slice(-2).map(({ label }) => label), [
+      'First queued action',
+      'Second queued action'
+    ]);
+  } finally {
+    fixture.releaseOffscreenProcessing();
+    await Promise.allSettled([first, second, stopping].filter(Boolean));
     globalThis.chrome = originalChrome;
   }
 });

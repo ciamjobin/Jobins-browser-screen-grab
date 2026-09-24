@@ -13,6 +13,7 @@ const STATE_KEY = 'flowRecorderState';
 const PDF_EXCLUSIONS_KEY = 'flowRecorderPdfExcludedSequences';
 const SESSION_CONTROL_KEY = 'flowRecorderSessionControl';
 const SESSION_TRACKING_KEY = 'flowRecorderSessionTracking';
+const SESSION_FOLDERS_KEY = 'jshotzSessionFolders';
 const FRAMES_KEY = 'flowRecorderFrames';
 const FRAME_PREFIX = `${FRAMES_KEY}:`;
 const OFFSCREEN_PATH = 'offscreen.html';
@@ -20,6 +21,7 @@ const OFFSCREEN_PATH = 'offscreen.html';
 // captureVisibleTab is rate limited; serialize captures and pace them.
 let captureChain = Promise.resolve();
 let pendingCaptureCount = 0;
+let captureDrainInProgress = false;
 let interimOutputChain = Promise.resolve();
 let interimOutputRunning = false;
 let queuedInterimOutputRequest = null;
@@ -287,6 +289,28 @@ function defaultSessionFolderName(date = new Date()) {
 function sessionDownloadDirectory(state) {
   const folderName = sanitize(state?.sessionFolderName || state?.sessionId || defaultSessionFolderName(), 100);
   return `Jshotz/${folderName}`;
+}
+
+async function sessionFolderExists(requestedName) {
+  const folderName = sanitize(requestedName, 100);
+  const stored = await chrome.storage.local.get(SESSION_FOLDERS_KEY);
+  const knownFolders = Array.isArray(stored[SESSION_FOLDERS_KEY]) ? stored[SESSION_FOLDERS_KEY] : [];
+  const normalizedName = folderName.toLocaleLowerCase();
+  const exists = knownFolders.some(
+    (name) => String(name).toLocaleLowerCase() === normalizedName
+  );
+  return { exists, folderName };
+}
+
+async function rememberSessionFolder(folderName) {
+  const stored = await chrome.storage.local.get(SESSION_FOLDERS_KEY);
+  const knownFolders = Array.isArray(stored[SESSION_FOLDERS_KEY]) ? stored[SESSION_FOLDERS_KEY] : [];
+  const withoutDuplicate = knownFolders.filter(
+    (name) => String(name).toLocaleLowerCase() !== folderName.toLocaleLowerCase()
+  );
+  await chrome.storage.local.set({
+    [SESSION_FOLDERS_KEY]: [...withoutDuplicate, folderName].slice(-500)
+  });
 }
 
 function outputRequestId() {
@@ -678,7 +702,8 @@ function createCaptureRequest(reason, label, state, modal, target, actionAt, req
   };
 }
 
-function captureNow(reason, label, requestedState, modal, target) {
+function captureNow(reason, label, requestedState, modal, target, allowDuringDrain = false) {
+  if (captureDrainInProgress && !allowDuringDrain) return captureChain;
   const captureTarget = target ? { ...target } : {};
   prepareNewTabLinkTarget(captureTarget, reason);
   const ownsResultingNavigation = USER_ACTION_REASONS.has(reason);
@@ -3577,6 +3602,7 @@ async function startRecording(tab, settings, outputFolderName = null, requestedS
   });
   sessionRecoveryPending = false;
   recoveredSessionId = sessionId;
+  await rememberSessionFolder(sessionFolderName);
 
   // The declared content scripts only load on navigation, so seed the already-open page.
   await injectRecordingScripts(tab.id, merged.captureApi);
@@ -4149,7 +4175,8 @@ async function stopRecording(
 ) {
   const stateBeforeStop = await getState();
   const capturesWerePending = pendingCaptureCount > 0;
-  if (capturesWerePending && stateBeforeStop.recording && stateBeforeStop.sessionId) {
+  captureDrainInProgress = Boolean(keepFiles && stateBeforeStop.recording);
+  if (!keepFiles && capturesWerePending && stateBeforeStop.recording && stateBeforeStop.sessionId) {
     await chrome.storage.local.set({
       [SESSION_CONTROL_KEY]: {
         sessionId: stateBeforeStop.sessionId,
@@ -4164,9 +4191,13 @@ async function stopRecording(
 
   // Anything still queued would be lost, so give it a final frame to sit under.
   if (keepFiles && apiQueue.length && !capturesWerePending) {
-    await captureNow('final-api-calls');
+    await captureNow('final-api-calls', undefined, undefined, undefined, undefined, true);
   }
-  if (capturesWerePending) {
+  if (capturesWerePending && keepFiles) {
+    logLine(`CAPTURE_DRAIN_STARTED stop pending=${pendingCaptureCount}`);
+    await captureChain.catch(() => {});
+    logLine(`CAPTURE_DRAIN_COMPLETED stop pending=${pendingCaptureCount}`);
+  } else if (capturesWerePending) {
     let drainTimer;
     try {
       const drained = await Promise.race([
@@ -4182,6 +4213,16 @@ async function stopRecording(
   } else {
     await captureChain.catch(() => {});
   }
+  if (stateBeforeStop.recording && stateBeforeStop.sessionId) {
+    await chrome.storage.local.set({
+      [SESSION_CONTROL_KEY]: {
+        sessionId: stateBeforeStop.sessionId,
+        paused: true,
+        captureGeneration: stateBeforeStop.captureGeneration + 1
+      }
+    });
+  }
+  captureDrainInProgress = false;
   await interimOutputChain.catch(() => {});
   const state = await getState();
   if (keepFiles) await setDownloadUi(false);
@@ -4587,6 +4628,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse(await withDevToolsStatus(await recoverRecordingSession()));
         break;
 
+      case 'CHECK_SESSION_FOLDER':
+        sendResponse(await sessionFolderExists(message.sessionFolderName));
+        break;
+
       case 'SCREEN_READY': {
         const state = await getState();
         const accepted = Boolean(
@@ -4625,6 +4670,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const accepted = Boolean(
           message.source === 'screen-window' &&
           state.recording &&
+          !captureDrainInProgress &&
           !state.paused &&
           state.settings.captureMode === 'screen' &&
           state.streamActive &&

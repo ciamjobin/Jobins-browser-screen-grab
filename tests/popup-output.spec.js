@@ -110,10 +110,15 @@ const interruptedEvidenceState = {
   }
 };
 
-async function openPopup(page, state = reconnectedFolderState, activeTabId = null) {
-  await page.addInitScript(({ state, activeTabId }) => {
+async function openPopup(page, state = reconnectedFolderState, activeTabId = null, existingSessionFolders = []) {
+  await page.addInitScript(({ state, activeTabId, existingSessionFolders }) => {
     let currentState = JSON.parse(JSON.stringify(state));
     const copyState = () => JSON.parse(JSON.stringify(currentState));
+    const sanitizeFolderName = (value) => String(value || 'untitled')
+      .replace(/[\\/:*?"<>|#]+/g, '-')
+      .replace(/\s+/g, '_')
+      .replace(/-+/g, '-')
+      .slice(0, 100);
     window.__popupMessages = [];
     window.chrome = {
       tabs: {
@@ -124,6 +129,15 @@ async function openPopup(page, state = reconnectedFolderState, activeTabId = nul
         getManifest: () => ({ version: '3.14.3' }),
         sendMessage: async (message) => {
           window.__popupMessages.push(message);
+          if (message.type === 'CHECK_SESSION_FOLDER') {
+            const folderName = sanitizeFolderName(message.sessionFolderName);
+            return {
+              folderName,
+              exists: existingSessionFolders.some(
+                (name) => sanitizeFolderName(name).toLowerCase() === folderName.toLowerCase()
+              )
+            };
+          }
           if (message.type === 'STOP') {
             currentState = {
               ...currentState,
@@ -160,7 +174,7 @@ async function openPopup(page, state = reconnectedFolderState, activeTabId = nul
         }
       }
     };
-  }, { state, activeTabId });
+  }, { state, activeTabId, existingSessionFolders });
   await page.route(`${popupOrigin}/**`, fulfillPopupAsset);
   await page.goto(popupUrl);
   const recordingElsewhere = Boolean(
@@ -264,6 +278,30 @@ test('Ctrl+S saves and stops with a toast without opening the file location', as
   expect(stopMessage.reveal).toBe(false);
 });
 
+test('keeps the document creation wait message visible while pending captures drain', async ({ page }) => {
+  await openPopup(page, { ...reconnectedFolderState, outputFolder: null });
+  await page.evaluate(() => {
+    const sendMessage = window.chrome.runtime.sendMessage;
+    window.chrome.runtime.sendMessage = async (message) => {
+      if (message.type === 'STOP') {
+        await new Promise((resolve) => {
+          window.__releaseStop = resolve;
+        });
+      }
+      return sendMessage(message);
+    };
+  });
+
+  await page.keyboard.press('Control+S');
+  await page.keyboard.press('Control+S');
+  await expect(page.locator('#status')).toHaveText('The document is being created. Please wait...');
+  await page.waitForTimeout(1200);
+  await expect(page.locator('#status')).toHaveText('The document is being created. Please wait...');
+
+  await page.evaluate(() => window.__releaseStop());
+  await expect(page.locator('#toast')).toHaveText('Saved as session_reconnected.pdf');
+});
+
 test('Ctrl+Alt+S saves, stops, and requests the file location', async ({ page }) => {
   await openPopup(page, { ...reconnectedFolderState, outputFolder: null });
 
@@ -334,7 +372,64 @@ test('prompts for a timestamped Downloads evidence folder before a new recording
   const startMessage = await page.evaluate(() =>
     window.__popupMessages.find((message) => message.type === 'START')
   );
-  expect(startMessage.sessionFolderName).toBe('Retirement plan evidence');
+  expect(startMessage.sessionFolderName).toBe('Retirement_plan_evidence');
+});
+
+test('offers to reuse an existing evidence folder', async ({ page }) => {
+  await openPopup(page, { ...reconnectedFolderState, recording: false, captures: [] }, null, ['Claims_Evidence']);
+
+  await page.locator('#toggle').click();
+  await page.locator('#sessionFolderName').fill('Claims Evidence');
+  await page.locator('#sessionFolderStart').click();
+  await expect(page.locator('#sessionFolderConflict')).toBeVisible();
+  await expect(page.getByLabel('Reuse existing folder')).toBeChecked();
+
+  await page.locator('#sessionFolderStart').click();
+  const startMessage = await page.evaluate(() =>
+    window.__popupMessages.find((message) => message.type === 'START')
+  );
+  expect(startMessage.sessionFolderName).toBe('Claims_Evidence');
+});
+
+test('can append a timestamp when an evidence folder already exists', async ({ page }) => {
+  await openPopup(page, { ...reconnectedFolderState, recording: false, captures: [] }, null, ['Claims_Evidence']);
+
+  await page.locator('#toggle').click();
+  await page.locator('#sessionFolderName').fill('Claims Evidence');
+  await page.locator('#sessionFolderStart').click();
+  await page.getByLabel('Create a new folder with timestamp appended').check();
+  await page.locator('#sessionFolderStart').click();
+
+  const startMessage = await page.evaluate(() =>
+    window.__popupMessages.find((message) => message.type === 'START')
+  );
+  expect(startMessage.sessionFolderName).toMatch(
+    /^Claims_Evidence_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}$/
+  );
+});
+
+test('requires a unique replacement when an evidence folder already exists', async ({ page }) => {
+  await openPopup(
+    page,
+    { ...reconnectedFolderState, recording: false, captures: [] },
+    null,
+    ['Claims_Evidence', 'Claims_Evidence_New']
+  );
+
+  await page.locator('#toggle').click();
+  await page.locator('#sessionFolderName').fill('Claims Evidence');
+  await page.locator('#sessionFolderStart').click();
+  await page.getByLabel('Provide a new unique folder name').check();
+  await page.locator('#uniqueSessionFolderName').fill('Claims Evidence New');
+  await page.locator('#sessionFolderStart').click();
+  await expect(page.locator('#toast')).toHaveText('That folder already exists. Enter a unique folder name.');
+
+  await page.locator('#uniqueSessionFolderName').fill('Claims Evidence September');
+  await page.locator('#sessionFolderStart').click();
+  const startMessage = await page.evaluate(() =>
+    window.__popupMessages.find((message) => message.type === 'START')
+  );
+  expect(startMessage.sessionFolderName).toBe('Claims_Evidence_September');
 });
 
 test('shows capture checkboxes in a collapsed checkable listbox', async ({ page }) => {
