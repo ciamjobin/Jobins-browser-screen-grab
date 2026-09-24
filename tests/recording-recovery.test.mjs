@@ -257,6 +257,7 @@ function createChrome() {
   const injectedFiles = [];
   const downloadRequests = [];
   const offscreenMessages = [];
+  const screenMessages = [];
   const exportRequests = [];
   const revealedDownloads = [];
   const revealRecordingStates = [];
@@ -264,6 +265,7 @@ function createChrome() {
   const downloadLifecycleEvents = [];
   const downloadActivity = [];
   const tabMessages = [];
+  const windowUpdates = [];
   const removedDownloads = [];
   const erasedDownloads = [];
   const badgeTexts = [];
@@ -272,6 +274,8 @@ function createChrome() {
   let captureError = null;
   let downloadShowError = null;
   let offscreenProcessFailure = null;
+  let offscreenProcessGate = null;
+  let releaseOffscreenProcess = null;
   let captureCount = 0;
   let nextExportWindowId = 1000;
   let completeOutputDuringWindowCreate = false;
@@ -356,11 +360,27 @@ function createChrome() {
       onStartup: createEvent(),
       onInstalled: createEvent(),
       async sendMessage(message) {
+        if (message.target === 'screen') {
+          screenMessages.push(message);
+          if (message.type === 'SCREEN_BUFFER_CAPTURE') return { frameId: `frame-${screenMessages.length}` };
+          if (message.type === 'SCREEN_CAPTURE') {
+            return { dataUrl: `data:image/png;base64,${Buffer.from(`live-${screenMessages.length}`).toString('base64')}` };
+          }
+          if (message.type === 'SCREEN_PING') return { ok: true };
+          if (message.type === 'SCREEN_TAKE_BUFFERED') {
+            return { dataUrl: `data:image/png;base64,${Buffer.from(message.frameId).toString('base64')}` };
+          }
+          if (message.type === 'SCREEN_SUPPRESS_MONITOR') return { ok: true };
+          if (message.type === 'SCREEN_FRAME_PROCESSED') return { ok: true };
+          if (message.type === 'SCREEN_STOP') return { ok: true };
+          throw new Error(`Unexpected screen message: ${message.type}`);
+        }
         if (message.target !== 'offscreen') throw new Error(`Unexpected runtime message: ${message.type}`);
         if (message.type === 'OFFSCREEN_PING') return { ok: true };
         if (message.type === 'OFFSCREEN_SCORE_CAPTURE') return { paintedRatio: 0.5 };
         if (message.type === 'OFFSCREEN_PROCESS') {
           offscreenMessages.push(message);
+          if (offscreenProcessGate) await offscreenProcessGate;
           const processingFailure = offscreenProcessFailure?.(message);
           if (processingFailure) {
             return { error: processingFailure.message || String(processingFailure) };
@@ -400,6 +420,10 @@ function createChrome() {
     },
     windows: {
       onRemoved: createEvent(),
+      async update(windowId, changes) {
+        windowUpdates.push({ windowId, changes });
+        return { id: windowId, ...changes };
+      },
       async create(options) {
         const win = { id: nextExportWindowId++ };
         exportRequests.push(options);
@@ -477,11 +501,14 @@ function createChrome() {
     injectedFiles,
     liveTab,
     offscreenMessages,
+    screenMessages,
+    storage,
     revealRecordingStates,
     revealedDownloads,
     removedDownloads,
     sessionId,
     tabMessages,
+    windowUpdates,
     badgeTexts,
     setCaptureError(error) {
       captureError = error;
@@ -514,6 +541,16 @@ function createChrome() {
     },
     setOffscreenProcessFailure(failure) {
       offscreenProcessFailure = failure;
+    },
+    blockOffscreenProcessing() {
+      offscreenProcessGate = new Promise((resolve) => {
+        releaseOffscreenProcess = resolve;
+      });
+    },
+    releaseOffscreenProcessing() {
+      releaseOffscreenProcess?.();
+      offscreenProcessGate = null;
+      releaseOffscreenProcess = null;
     },
     setExecuteScriptHandler(handler) {
       executeScriptHandler = handler;
@@ -646,6 +683,156 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
     assert.ok(manifest.debugLog.some((line) => line.includes('CAPTURE_SKIPPED manual')));
   } finally {
     console.error = originalConsoleError;
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('stores a newly named session under Downloads Jshotz', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  const initialState = fixture.storageSnapshot().flowRecorderState;
+  await fixture.setStorage({
+    flowRecorderState: {
+      ...initialState,
+      recording: false,
+      sequence: 0,
+      captures: []
+    }
+  });
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const started = await sendMessage(messageListener, {
+      type: 'START',
+      sessionFolderName: 'Retirement Plan Evidence',
+      settings: { captureMode: 'tab', fullPage: false, savePng: true, savePdf: true }
+    });
+
+    assert.equal(started.recording, true);
+    assert.equal(started.sessionFolderName, 'Retirement_Plan_Evidence');
+    assert.ok(
+      fixture.downloadRequests.some(({ filename }) =>
+        filename.startsWith('Jshotz/Retirement_Plan_Evidence/') && filename.endsWith('.png')
+      )
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('buffers screen frames before earlier screenshots finish processing', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+  let first;
+  let second;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        streamActive: true,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'screen',
+          savePng: false
+        }
+      }
+    });
+    fixture.blockOffscreenProcessing();
+
+    first = sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Headers' },
+      { tab: fixture.liveTab }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    second = sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Payload' },
+      { tab: fixture.liveTab }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length, 2);
+    assert.equal(fixture.screenMessages.filter(({ type }) => type === 'SCREEN_TAKE_BUFFERED').length, 1);
+
+    fixture.releaseOffscreenProcessing();
+    await Promise.all([first, second]);
+    assert.equal(fixture.screenMessages.filter(({ type }) => type === 'SCREEN_TAKE_BUFFERED').length, 2);
+    assert.equal(fixture.offscreenMessages.length, 2);
+    assert.notEqual(fixture.offscreenMessages[0].dataUrl, fixture.offscreenMessages[1].dataUrl);
+  } finally {
+    fixture.releaseOffscreenProcessing();
+    await Promise.allSettled([first, second].filter(Boolean));
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('queues an automatically buffered DevTools visual update', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        streamActive: true,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'screen',
+          savePng: false
+        }
+      }
+    });
+
+    const rejected = await sendMessage(messageListener, {
+      type: 'SCREEN_FRAME_BUFFERED',
+      frameId: 'untrusted-frame',
+      actionAt: 1200
+    });
+    assert.deepEqual(rejected, { ok: true, accepted: false });
+
+    const result = await sendMessage(messageListener, {
+      type: 'SCREEN_FRAME_BUFFERED',
+      source: 'screen-window',
+      frameId: 'visual-frame-1',
+      actionAt: 1234,
+      label: 'DevTools panel updated'
+    });
+    assert.deepEqual(result, { ok: true, accepted: true });
+
+    const pageActivity = await sendMessage(messageListener, { type: 'PAGE_VISUAL_ACTIVITY' });
+    assert.deepEqual(pageActivity, { ok: true });
+    assert.ok(fixture.screenMessages.some(
+      ({ type, durationMs }) => type === 'SCREEN_SUPPRESS_MONITOR' && durationMs === 1000
+    ));
+
+    let state;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      state = await sendMessage(messageListener, { type: 'GET_STATE' });
+      if (state.captures.at(-1)?.reason === 'devtools-update') break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(fixture.screenMessages.some(
+      ({ type, frameId }) => type === 'SCREEN_TAKE_BUFFERED' && frameId === 'visual-frame-1'
+    ));
+    assert.ok(fixture.screenMessages.some(
+      ({ type, frameId }) => type === 'SCREEN_FRAME_PROCESSED' && frameId === 'visual-frame-1'
+    ));
+    assert.equal(fixture.offscreenMessages.at(-1).dataUrl.includes('dmlzdWFsLWZyYW1lLTE='), true);
+    assert.equal(state.captures.at(-1).reason, 'devtools-update');
+    assert.equal(state.captures.at(-1).label, 'DevTools panel updated');
+  } finally {
     globalThis.chrome = originalChrome;
   }
 });
@@ -840,6 +1027,51 @@ test('skips a stale title change instead of labeling a later page with it', asyn
   }
 });
 
+test('captures a same-URL title change while an action screenshot is still processing', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+  let actionCapture;
+  let titleCapture;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    fixture.blockOffscreenProcessing();
+
+    actionCapture = sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Open account summary' },
+      { tab: fixture.liveTab }
+    );
+    for (let attempt = 0; attempt < 100 && fixture.offscreenMessages.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fixture.offscreenMessages.length, 1);
+
+    fixture.liveTab.title = 'Account summary';
+    titleCapture = fixture.chrome.tabs.onUpdated.listeners[0](fixture.liveTab.id, {
+      title: fixture.liveTab.title
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fixture.offscreenMessages.length, 1);
+
+    fixture.releaseOffscreenProcessing();
+    await Promise.all([actionCapture, titleCapture]);
+
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.sequence, 42);
+    assert.equal(state.captures.at(-1).reason, 'title-change');
+    assert.equal(state.captures.at(-1).title, 'Account summary');
+    assert.equal(state.captures.at(-1).url, fixture.liveTab.url);
+  } finally {
+    fixture.releaseOffscreenProcessing();
+    await Promise.allSettled([actionCapture, titleCapture].filter(Boolean));
+    globalThis.chrome = originalChrome;
+  }
+});
+
 test('waits for the rendered page before capturing a navigation link', async () => {
   const originalChrome = globalThis.chrome;
   const fixture = createChrome();
@@ -953,7 +1185,7 @@ test('coalesces a navigation title update into its committed navigation capture'
   }
 });
 
-test('coalesces navigation triggered by a pending regular click capture', async () => {
+test('queues a settled navigation follow-up for a pending regular click capture', async () => {
   const originalChrome = globalThis.chrome;
   const fixture = createChrome();
   globalThis.chrome = fixture.chrome;
@@ -979,10 +1211,215 @@ test('coalesces navigation triggered by a pending regular click capture', async 
     await Promise.all([clickCapture, navigation]);
 
     const state = await sendMessage(messageListener, { type: 'GET_STATE' });
-    assert.equal(fixture.captureCount(), 1);
+    assert.equal(fixture.captureCount(), 3);
     assert.equal(state.sequence, 41);
     assert.equal(state.captures.at(-1).reason, 'click');
     assert.equal(state.captures.at(-1).url, 'https://example.test/confirmation');
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('captures a slow redirected landing page after the action frame is saved', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  let visibleCaptureCount = 0;
+  fixture.chrome.tabs.captureVisibleTab = async () => {
+    visibleCaptureCount += 1;
+    return `data:image/png;base64,${Buffer.from(fixture.liveTab.url).toString('base64')}`;
+  };
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+
+    await sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Sign in', actionAt: Date.now() },
+      { tab: fixture.liveTab }
+    );
+    const afterAction = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(afterAction.sequence, 41);
+    assert.equal(afterAction.captures.at(-1).url, 'https://example.test/recovered');
+
+    fixture.liveTab.title = 'Landing page';
+    fixture.liveTab.url = 'https://landing.example.test/home';
+    await fixture.chrome.webNavigation.onCommitted.listeners[0]({
+      tabId: fixture.liveTab.id,
+      frameId: 0,
+      url: fixture.liveTab.url,
+      transitionType: 'link',
+      transitionQualifiers: ['server_redirect']
+    });
+
+    const landed = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(landed.sequence, 42);
+    assert.equal(landed.captures.at(-1).reason, 'navigation');
+    assert.equal(landed.captures.at(-1).url, 'https://landing.example.test/home');
+    assert.equal(visibleCaptureCount, 3);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('uses post-render live screen frames for redirected landing pages', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        streamActive: true,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'screen',
+          savePng: false
+        }
+      }
+    });
+
+    await sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Continue', actionAt: Date.now() },
+      { tab: fixture.liveTab }
+    );
+    fixture.liveTab.title = 'Redirected landing';
+    fixture.liveTab.url = 'https://landing.example.test/redirected';
+    await fixture.chrome.webNavigation.onCommitted.listeners[0]({
+      tabId: fixture.liveTab.id,
+      frameId: 0,
+      url: fixture.liveTab.url,
+      transitionType: 'link',
+      transitionQualifiers: ['server_redirect']
+    });
+
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.captures.at(-1).reason, 'navigation');
+    assert.equal(state.captures.at(-1).url, fixture.liveTab.url);
+    assert.equal(
+      fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length,
+      1
+    );
+    assert.equal(
+      fixture.screenMessages.filter(({ type }) => type === 'SCREEN_CAPTURE').length,
+      2
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('captures only the final landing page in an API-mode redirect chain', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  fixture.chrome.tabs.captureVisibleTab = async () =>
+    `data:image/png;base64,${Buffer.from(fixture.liveTab.url).toString('base64')}`;
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'api',
+          captureApi: true,
+          savePng: false
+        }
+      }
+    });
+
+    fixture.liveTab.title = 'Authorizing';
+    fixture.liveTab.url = 'https://example.test/authorize';
+    const authorize = fixture.chrome.webNavigation.onCommitted.listeners[0]({
+      tabId: fixture.liveTab.id,
+      frameId: 0,
+      url: fixture.liveTab.url,
+      transitionType: 'link',
+      transitionQualifiers: ['server_redirect']
+    });
+    fixture.liveTab.title = 'Plan home';
+    fixture.liveTab.url = 'https://landing.example.test/plan-home';
+    const landing = fixture.chrome.webNavigation.onCommitted.listeners[0]({
+      tabId: fixture.liveTab.id,
+      frameId: 0,
+      url: fixture.liveTab.url,
+      transitionType: 'link',
+      transitionQualifiers: ['server_redirect']
+    });
+    await Promise.all([authorize, landing]);
+
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.sequence, 41);
+    assert.equal(state.captures.at(-1).mode, 'api');
+    assert.equal(state.captures.at(-1).reason, 'navigation');
+    assert.equal(state.captures.at(-1).url, 'https://landing.example.test/plan-home');
+    assert.ok(
+      fixture.storageSnapshot().flowRecorderLog.some((line) =>
+        line.includes('CAPTURE_SKIPPED_STALE navigation') && line.includes('/authorize')
+      )
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('marks a lost screen stream unavailable and restores it after sharing resumes', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        streamActive: true,
+        screenWindowId: 77,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'screen'
+        }
+      }
+    });
+
+    const ended = await sendMessage(messageListener, {
+      type: 'SCREEN_ENDED',
+      source: 'screen-window'
+    });
+    assert.deepEqual(ended, { ok: true, accepted: true });
+    let state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.streamActive, false);
+    assert.match(state.lastError, /Screen sharing stopped/);
+    assert.deepEqual(fixture.windowUpdates.at(-1), {
+      windowId: 77,
+      changes: { state: 'normal', focused: true }
+    });
+
+    const ready = await sendMessage(messageListener, {
+      type: 'SCREEN_READY',
+      source: 'screen-window'
+    });
+    assert.deepEqual(ready, { ok: true, accepted: true });
+    state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.streamActive, true);
+    assert.equal(state.lastError, null);
+    assert.deepEqual(fixture.windowUpdates.at(-1), {
+      windowId: 77,
+      changes: { state: 'minimized' }
+    });
   } finally {
     globalThis.chrome = originalChrome;
   }
@@ -1462,21 +1899,22 @@ test('captures a new-tab link from the page it opens', async () => {
     await fixture.chrome.tabs.onCreated.listeners[0](privacyTab);
     await fixture.waitForRenderSettle();
 
-    await fixture.chrome.webNavigation.onCommitted.listeners[0]({
+    fixture.resolveRenderSettle();
+    await linkClicked;
+    fixture.setRenderSettlePending(false);
+    const navigation = fixture.chrome.webNavigation.onCommitted.listeners[0]({
       tabId: privacyTab.id,
       frameId: 0,
       url: privacyTab.url
     });
     await fixture.chrome.tabs.onUpdated.listeners[0](privacyTab.id, { title: privacyTab.title });
-
-    fixture.resolveRenderSettle();
-    await linkClicked;
+    await navigation;
 
     const state = await sendMessage(messageListener, { type: 'GET_STATE' });
     assert.equal(state.captures.at(-1).title, 'Privacy and security');
     assert.equal(state.captures.at(-1).url, 'https://example.test/privacy');
     assert.equal(capturedTabId, privacyTab.id);
-    assert.equal(fixture.captureCount(), 1);
+    assert.equal(fixture.captureCount(), 3);
     assert.deepEqual(fixture.offscreenMessages.at(-1).titleBar, {
       title: 'Privacy and security',
       url: 'https://example.test/privacy'
@@ -1686,12 +2124,12 @@ test('saves a checkpoint without stopping and continues the same recording', asy
     assert.equal(fixture.exportRequests.length, 1);
     assert.match(
       new URL(fixture.exportRequests[0].url, 'https://extension.test').searchParams.get('filename'),
-      new RegExp(`flow-captures/${previousSessionId}/`)
+      new RegExp(`Jshotz/${previousSessionId}/`)
     );
     assert.equal(fixture.revealedDownloads.length, 0);
     assert.ok(
       fixture.storageSnapshot().flowRecorderLog.some((line) =>
-        line.includes(`FILE_SAVE status=completed type=pdf destination=downloads filename=flow-captures/${previousSessionId}/`)
+        line.includes(`FILE_SAVE status=completed type=pdf destination=downloads filename=Jshotz/${previousSessionId}/`)
       )
     );
 
@@ -1808,7 +2246,7 @@ test('keeps the interim PDF when stopping without a final document', async () =>
       JSON.parse(new URL(fixture.exportRequests[0].url, 'https://extension.test').searchParams.get('outputs')),
       [{
         format: 'pdf',
-        filename: `flow-captures/${fixture.sessionId}/JShotz-interim.pdf`,
+        filename: `Jshotz/${fixture.sessionId}/JShotz-interim.pdf`,
         overwrite: true
       }]
     );
@@ -1861,7 +2299,7 @@ test('removes the interim PDF after a successful final document save', async () 
       JSON.parse(new URL(fixture.exportRequests[0].url, 'https://extension.test').searchParams.get('outputs')),
       [{
         format: 'pdf',
-        filename: `flow-captures/${fixture.sessionId}/JShotz-interim.pdf`,
+        filename: `Jshotz/${fixture.sessionId}/JShotz-interim.pdf`,
         overwrite: true
       }]
     );
@@ -2337,6 +2775,52 @@ test('accepts capture and checkpoint shortcuts in a second recording on the same
       new URL(fixture.exportRequests.at(-1).url, 'https://extension.test').pathname,
       /output-dialog\.html$/
     );
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('captures Alt+Shift+D when DevTools was open before the screen recording started', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  let devToolsAttached = false;
+  fixture.chrome.debugger = {
+    onDetach: createEvent(),
+    async getTargets() {
+      return [{ tabId: fixture.liveTab.id, attached: devToolsAttached }];
+    },
+    async attach() {},
+    async detach() {},
+    async sendCommand() {
+      throw new Error('CDP capture is not expected for screen mode.');
+    }
+  };
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const commandListener = fixture.chrome.commands.onCommand.listeners[0];
+    const recovered = await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.storage.set({
+      flowRecorderState: {
+        ...fixture.storage.snapshot().flowRecorderState,
+        settings: { ...recovered.settings, captureMode: 'screen' },
+        streamActive: true
+      }
+    });
+
+    const available = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(available.devToolsOpen, true);
+    await commandListener('capture-later');
+    const captured = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(captured.sequence, recovered.sequence + 1);
+
+    const popupResponse = await sendMessage(messageListener, { type: 'CAPTURE_LATER' });
+    assert.equal(popupResponse.devToolsOpen, true);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const capturedFromPopup = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(capturedFromPopup.sequence, recovered.sequence + 2);
   } finally {
     globalThis.chrome = originalChrome;
   }

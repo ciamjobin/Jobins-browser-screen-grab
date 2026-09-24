@@ -6,6 +6,7 @@ const MARGIN = 28;
 const TITLE_SIZE = 14;
 const META_SIZE = 9;
 const FOOTER_SIZE = 8;
+const HEADER_SIZE = 8;
 const FOOTER_TEXT = "Captured by Jobin's Screenshots";
 const IMAGE_META_GAP = 8;
 
@@ -214,7 +215,17 @@ function documentFooter() {
   );
 }
 
-function contentStream(page, table, drawImage) {
+function pageNumberHeader(pageNumber, pageCount) {
+  const text = `Page ${pageNumber} of ${pageCount}`;
+  const width = text.length * HEADER_SIZE * 0.52;
+  const x = PAGE_WIDTH - MARGIN - width;
+  return (
+    `BT /F2 ${HEADER_SIZE} Tf 0.35 0.35 0.35 rg 1 0 0 1 ${x.toFixed(2)} ${(PAGE_HEIGHT - MARGIN + 4).toFixed(2)} Tm ` +
+    `${pdfText(text, 40)} Tj ET`
+  );
+}
+
+function contentStream(page, table, drawImage, pageNumber, pageCount) {
   const titleY = PAGE_HEIGHT - MARGIN - TITLE_SIZE;
 
   if (!drawImage) {
@@ -225,6 +236,7 @@ function contentStream(page, table, drawImage) {
     return [
       `BT /F1 ${TITLE_SIZE} Tf 0 0 0 rg 1 0 0 1 ${MARGIN} ${titleY} Tm ${pdfText(title, 110)} Tj ET`,
       table ? apiTableOps(table, titleY - 10 - table.height, heading) : '',
+      pageNumberHeader(pageNumber, pageCount),
       documentFooter()
     ].join('\n');
   }
@@ -252,6 +264,7 @@ function contentStream(page, table, drawImage) {
     '0 0 0 rg',
     `q ${box.width} 0 0 ${box.height} ${box.x} ${box.y} cm /Im0 Do Q`,
     table ? apiTableOps(table, MARGIN, 'API calls in this step') : '',
+    pageNumberHeader(pageNumber, pageCount),
     documentFooter()
   ].join('\n');
 }
@@ -317,8 +330,10 @@ export function buildPdf(pages) {
     ]);
   });
 
-  for (const sheet of sheets) {
-    const stream = encodeLatin1(contentStream(sheet.page, sheet.table, sheet.drawImage));
+  for (const [sheetIndex, sheet] of sheets.entries()) {
+    const stream = encodeLatin1(
+      contentStream(sheet.page, sheet.table, sheet.drawImage, sheetIndex + 1, sheets.length)
+    );
     const xobject = sheet.drawImage ? `/XObject << /Im0 ${sheet.imageNum} 0 R >> ` : '';
 
     objects[sheet.pageNum - 1] = encodeLatin1(

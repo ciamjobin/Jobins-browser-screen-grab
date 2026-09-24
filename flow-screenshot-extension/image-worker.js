@@ -354,19 +354,21 @@ async function processCapture({
       imageCtx.drawImage(bitmap, 0, titleHeight);
     }
 
-    outputCanvas = document.createElement('canvas');
-    outputCanvas.width = imageCanvas.width;
-    outputCanvas.height = imageCanvas.height + (table?.height ?? 0);
+    if (table) {
+      outputCanvas = document.createElement('canvas');
+      outputCanvas.width = imageCanvas.width;
+      outputCanvas.height = imageCanvas.height + table.height;
 
-    const ctx = outputCanvas.getContext('2d');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, outputCanvas.width, outputCanvas.height);
-    ctx.drawImage(imageCanvas, 0, 0);
-    if (table) drawApiTable(ctx, table, imageCanvas.height, outputCanvas.width);
+      const ctx = outputCanvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, outputCanvas.width, outputCanvas.height);
+      ctx.drawImage(imageCanvas, 0, 0);
+      drawApiTable(ctx, table, imageCanvas.height, outputCanvas.width);
+    }
 
     const quality = Number.isFinite(jpegQuality) ? Math.max(0, Math.min(1, jpegQuality)) : 0.82;
     return {
-      pngDataUrl: wantPng ? outputCanvas.toDataURL('image/png') : null,
+      pngDataUrl: wantPng ? (outputCanvas || imageCanvas).toDataURL('image/png') : null,
       jpeg: wantJpeg
         ? {
             base64: imageCanvas.toDataURL('image/jpeg', quality).split(',')[1],

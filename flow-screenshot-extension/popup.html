@@ -35,10 +35,9 @@
       </label>
 
       <p class="note" id="shortcutHint" hidden>
-        Press <strong>Alt+Shift+K</strong> while a DevTools Headers / Payload / Response panel is open to
-        capture it. Chrome ignores extension shortcuts while the DevTools window itself has focus, so use
-        <strong>Alt+Shift+D</strong> or the <strong>DevTools capture in 5s</strong> button below and click into
-        DevTools during the countdown.
+        JShotz automatically buffers settled DevTools changes, including opened API requests, detail tabs,
+        and scrolling. Use <strong>Alt+Shift+K</strong> for an extra capture, or <strong>Alt+Shift+D</strong>
+        when the DevTools window has focus and Chrome blocks extension shortcuts.
       </p>
 
       <div class="note" id="shortcutSummary">
@@ -53,15 +52,34 @@
         </ul>
       </div>
 
-      <label class="check"><input type="checkbox" id="captureOnClick" checked /> Capture on every button click</label>
-      <label class="check"><input type="checkbox" id="captureOnScroll" checked /> Capture every 60% of a screen scrolled, and at the end</label>
-      <label class="check"><input type="checkbox" id="fullPage" checked /> Whole-page shots for manual captures</label>
-      <label class="check"><input type="checkbox" id="savePng" checked /> Save individual PNG files</label>
-      <label class="check"><input type="checkbox" id="savePdf" checked /> Preselect PDF in output dialogs</label>
+      <details id="captureOptions" class="check-listbox">
+        <summary>
+          <span>Capture options</span>
+          <span id="captureOptionsSummary">5 selected</span>
+        </summary>
+        <div class="check-listbox-options" role="listbox" aria-label="Capture options" aria-multiselectable="true">
+          <label class="check" role="option" aria-selected="true"><input type="checkbox" id="captureOnClick" checked /> Capture on every button click</label>
+          <label class="check" role="option" aria-selected="true"><input type="checkbox" id="captureOnScroll" checked /> Capture every 60% of a screen scrolled, and at the end</label>
+          <label class="check" role="option" aria-selected="true"><input type="checkbox" id="fullPage" checked /> Whole-page shots for manual captures</label>
+          <label class="check" role="option" aria-selected="true"><input type="checkbox" id="savePng" checked /> Save individual PNG files</label>
+          <label class="check" role="option" aria-selected="true"><input type="checkbox" id="savePdf" checked /> Preselect PDF in output dialogs</label>
+        </div>
+      </details>
     </div>
 
     <div class="actions" id="mainActions">
       <button id="toggle" class="primary">Start recording</button>
+      <div class="confirm session-folder-prompt" id="sessionFolderPrompt" hidden>
+        <p>Name this evidence folder</p>
+        <label class="field">
+          <span>Downloads / Jshotz /</span>
+          <input id="sessionFolderName" type="text" maxlength="100" autocomplete="off" />
+        </label>
+        <div class="actions">
+          <button id="sessionFolderStart" class="primary">Start recording</button>
+          <button id="sessionFolderCancel">Cancel</button>
+        </div>
+      </div>
       <div class="confirm" id="confirm" hidden>
         <p>Keep the files captured in this session?</p>
         <div class="actions">
@@ -72,7 +90,7 @@
       </div>
       <button id="pauseResume" hidden>Pause recording</button>
       <button id="captureNow" disabled>Capture whole page (Alt+Shift+J)</button>
-      <button id="captureLater" disabled>DevTools capture in 5s (Alt+Shift+D)</button>
+      <button id="captureLater" disabled>Capture DevTools (Alt+Shift+D)</button>
       <button id="saveFlow" class="primary" disabled>Save checkpoint (Ctrl+Shift+S)</button>
     </div>
 

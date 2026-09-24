@@ -121,7 +121,7 @@ async function openPopup(page, state = reconnectedFolderState, activeTabId = nul
       },
       runtime: {
         id: 'jshotz-test-extension',
-        getManifest: () => ({ version: '3.14.2' }),
+        getManifest: () => ({ version: '3.14.3' }),
         sendMessage: async (message) => {
           window.__popupMessages.push(message);
           if (message.type === 'STOP') {
@@ -179,7 +179,7 @@ async function openPopup(page, state = reconnectedFolderState, activeTabId = nul
 
 test('shows the current extension version in the popup header', async ({ page }) => {
   await openPopup(page);
-  await expect(page.getByLabel('JShotz version')).toHaveText('v3.14.2');
+  await expect(page.getByLabel('JShotz version')).toHaveText('v3.14.3');
 });
 
 test('does not expose recording controls on an unrelated tab', async ({ page }) => {
@@ -193,15 +193,31 @@ test('does not expose recording controls on an unrelated tab', async ({ page }) 
 });
 
 test('keeps recording controls available on tracked flow tabs', async ({ page }) => {
-  await openPopup(page, { ...reconnectedFolderState, trackedTabIds: [7, 8] }, 8);
+  await openPopup(
+    page,
+    {
+      ...reconnectedFolderState,
+      trackedTabIds: [7, 8],
+      streamActive: true,
+      devToolsOpen: true,
+      settings: { ...reconnectedFolderState.settings, captureMode: 'screen' }
+    },
+    8
+  );
 
   await expect(page.getByRole('button', { name: 'Stop recording' })).toBeEnabled();
   await expect(page.locator('#pauseResume')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Capture whole page (Alt+Shift+J)' })).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'DevTools capture in 5s (Alt+Shift+D)' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Capture DevTools (Alt+Shift+D)' })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Save checkpoint (Ctrl+Shift+S)' })).toBeEnabled();
   await expect(page.locator('#shortcutSummary')).toContainText('Alt+Shift+K DevTools');
   await expect(page.locator('#shortcutSummary')).toContainText('Ctrl+S Save and stop');
+});
+
+test('disables instant DevTools capture until DevTools is open', async ({ page }) => {
+  await openPopup(page, { ...reconnectedFolderState, trackedTabIds: [7] }, 7);
+
+  await expect(page.getByRole('button', { name: 'Capture DevTools (Alt+Shift+D)' })).toBeDisabled();
 });
 
 test('shows separate final save actions and removes obsolete popup actions', async ({ page }) => {
@@ -302,4 +318,32 @@ test('shows browser-restart interruption status with retained evidence', async (
   await expect(page.getByRole('button', { name: 'Start recording' })).toBeEnabled();
   await expect(page.locator('#pauseResume')).toBeHidden();
   await expect(page.getByRole('button', { name: 'Generate evidences' })).toBeVisible();
+});
+
+test('prompts for a timestamped Downloads evidence folder before a new recording', async ({ page }) => {
+  await openPopup(page, { ...reconnectedFolderState, recording: false, captures: [] });
+
+  await page.locator('#toggle').click();
+  await expect(page.locator('#sessionFolderPrompt')).toBeVisible();
+  await expect(page.locator('#sessionFolderName')).toHaveValue(
+    /^JShotz_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}$/
+  );
+
+  await page.locator('#sessionFolderName').fill('Retirement plan evidence');
+  await page.locator('#sessionFolderStart').click();
+  const startMessage = await page.evaluate(() =>
+    window.__popupMessages.find((message) => message.type === 'START')
+  );
+  expect(startMessage.sessionFolderName).toBe('Retirement plan evidence');
+});
+
+test('shows capture checkboxes in a collapsed checkable listbox', async ({ page }) => {
+  await openPopup(page, { ...reconnectedFolderState, recording: false });
+
+  await expect(page.locator('#captureOptions')).not.toHaveAttribute('open', '');
+  await expect(page.locator('#captureOptionsSummary')).toHaveText('4 selected');
+  await page.locator('#captureOptions > summary').click();
+  await page.locator('#captureOnScroll').uncheck();
+  await expect(page.locator('#captureOptionsSummary')).toHaveText('3 selected');
+  await expect(page.locator('#captureOnScroll').locator('xpath=..')).toHaveAttribute('aria-selected', 'false');
 });

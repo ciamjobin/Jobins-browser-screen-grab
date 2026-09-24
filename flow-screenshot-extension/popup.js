@@ -18,6 +18,11 @@ const mainActionsEl = document.getElementById('mainActions');
 const confirmEl = document.getElementById('confirm');
 const filenamePromptEl = document.getElementById('filenamePrompt');
 const deleteConfirmEl = document.getElementById('deleteConfirm');
+const sessionFolderPromptEl = document.getElementById('sessionFolderPrompt');
+const sessionFolderNameEl = document.getElementById('sessionFolderName');
+const sessionFolderStartEl = document.getElementById('sessionFolderStart');
+const sessionFolderCancelEl = document.getElementById('sessionFolderCancel');
+const captureOptionsSummaryEl = document.getElementById('captureOptionsSummary');
 const outputFilenameEl = document.getElementById('outputFilename');
 const outputPromptTitleEl = document.getElementById('outputPromptTitle');
 const outputPdfEl = document.getElementById('outputPdf');
@@ -235,6 +240,42 @@ function readSettings() {
     savePng: controls.savePng.checked,
     savePdf: controls.savePdf.checked
   };
+}
+
+function suggestedSessionFolderName(date = new Date()) {
+  const pad = (value, width = 2) => String(value).padStart(width, '0');
+  return (
+    `JShotz_${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}-${pad(date.getMilliseconds(), 3)}`
+  );
+}
+
+function updateCaptureOptionsSummary() {
+  const optionControls = Object.values(controls).filter((control) => control.type === 'checkbox');
+  const selectedCount = optionControls.filter((control) => control.checked).length;
+  captureOptionsSummaryEl.textContent = `${selectedCount} selected`;
+  for (const control of optionControls) {
+    control.closest('[role="option"]')?.setAttribute('aria-selected', String(control.checked));
+  }
+}
+
+async function beginRecording(sessionFolderName) {
+  const state = await getPopupState();
+  const startsFromResumeFolder = Boolean(state.pendingResumeFolder?.name);
+  const started = await send('START', {
+    settings: readSettings(),
+    ...(startsFromResumeFolder ? {} : { sessionFolderName })
+  });
+  sessionFolderPromptEl.hidden = true;
+  awaitingChoice = false;
+  if (startsFromResumeFolder && started.recording) {
+    captureSelectionSessionId = null;
+    knownCaptureSequences = new Set();
+    selectedCaptureSequences = new Set();
+  }
+  render(started);
+  if (started.notice) showToast(started.notice);
+  else if (started.lastError) showToast(started.lastError, 'error');
 }
 
 function captureSequences(captures = currentCaptures) {
@@ -540,6 +581,7 @@ function render(state) {
   apply(controls.fullPage, () => (controls.fullPage.checked = settings.fullPage !== false));
   apply(controls.savePng, () => (controls.savePng.checked = settings.savePng !== false));
   apply(controls.savePdf, () => (controls.savePdf.checked = settings.savePdf !== false));
+  updateCaptureOptionsSummary();
   settingsEl.classList.toggle('locked', sessionRecording);
   for (const control of Object.values(controls)) {
     control.disabled = standalonePopup || recordingElsewhere;
@@ -585,7 +627,7 @@ function render(state) {
   pauseResumeEl.disabled = !recording;
   pauseResumeEl.textContent = paused ? 'Continue recording' : 'Pause recording';
   captureNowEl.disabled = !recording || paused || Boolean(state?.fullPageProgress?.active);
-  captureLaterEl.disabled = !recording || paused;
+  captureLaterEl.disabled = !recording || paused || !state?.devToolsOpen;
   saveFlowEl.disabled = !recording || !state?.captures?.length;
   updateResumeCaptureButton(state);
   updateCompletedEvidenceButton(state);
@@ -619,23 +661,54 @@ toggleEl.addEventListener('click', async () => {
       deleteConfirmEl.hidden = true;
       return;
     }
-    const startsFromResumeFolder = Boolean(state.pendingResumeFolder?.name);
-    const started = await send('START', { settings: readSettings() });
-    if (startsFromResumeFolder && started.recording) {
-      captureSelectionSessionId = null;
-      knownCaptureSequences = new Set();
-      selectedCaptureSequences = new Set();
+    if (state.pendingResumeFolder?.name) {
+      await beginRecording();
+      return;
     }
-    render(started);
-    if (started.notice) {
-      showToast(started.notice);
-    } else if (started.lastError) {
-      showToast(started.lastError, 'error');
-    }
+    awaitingChoice = true;
+    toggleEl.disabled = true;
+    sessionFolderNameEl.value = suggestedSessionFolderName();
+    sessionFolderPromptEl.hidden = false;
+    sessionFolderNameEl.focus();
+    sessionFolderNameEl.select();
   } catch {
     showRuntimeError();
   }
 });
+
+sessionFolderStartEl.addEventListener('click', async () => {
+  const sessionFolderName = sessionFolderNameEl.value.trim();
+  if (!sessionFolderName) {
+    showToast('Enter a name for the evidence folder.', 'error');
+    sessionFolderNameEl.focus();
+    return;
+  }
+  sessionFolderStartEl.disabled = true;
+  try {
+    await beginRecording(sessionFolderName);
+  } catch (error) {
+    showActionError('Start recording', error);
+  } finally {
+    sessionFolderStartEl.disabled = false;
+  }
+});
+
+sessionFolderCancelEl.addEventListener('click', () => {
+  sessionFolderPromptEl.hidden = true;
+  awaitingChoice = false;
+  toggleEl.disabled = false;
+});
+
+sessionFolderNameEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    sessionFolderStartEl.click();
+  }
+});
+
+for (const control of Object.values(controls)) {
+  if (control.type === 'checkbox') control.addEventListener('change', updateCaptureOptionsSummary);
+}
 
 pauseResumeEl.addEventListener('click', async () => {
   const state = await getPopupState();
@@ -980,10 +1053,8 @@ selectAllCapturesEl.addEventListener('change', () => {
 outputPdfEl.addEventListener('change', updateCaptureSelectionControls);
 outputDocxEl.addEventListener('change', updateCaptureSelectionControls);
 
-// The popup closes as soon as focus moves to DevTools, so the countdown lives in the background.
 captureLaterEl.addEventListener('click', async () => {
-  render(await send('CAPTURE_LATER'));
-  statusEl.textContent = 'Capturing in 5s \u2014 click into DevTools now\u2026';
+  await send('CAPTURE_LATER');
   window.close();
 });
 

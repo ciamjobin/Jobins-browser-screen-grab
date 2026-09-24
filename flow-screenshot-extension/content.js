@@ -69,23 +69,21 @@ let dialogTimer = 0;
 let scrollTimer = 0;
 let suppressScrollUntil = 0;
 let fullPageCaptureActive = false;
-let countdownTimer = 0;
 let activeDialogFingerprint = null;
 let cookieConsentSurfaces = [];
 let scrollAnchors = new WeakMap();
 let capturedDialogs = new WeakSet();
+let lastPageVisualActivityAt = 0;
 
 function resetRecordingSession() {
   clearTimeout(editTimer);
   clearTimeout(selectionTimer);
   clearTimeout(dialogTimer);
   clearTimeout(scrollTimer);
-  clearTimeout(countdownTimer);
   editTimer = 0;
   selectionTimer = 0;
   dialogTimer = 0;
   scrollTimer = 0;
-  countdownTimer = 0;
   lastSent = { key: '', at: 0 };
   suppressScrollUntil = 0;
   fullPageCaptureActive = false;
@@ -93,7 +91,6 @@ function resetRecordingSession() {
   cookieConsentSurfaces = [];
   scrollAnchors = new WeakMap();
   capturedDialogs = new WeakSet();
-  document.getElementById('jshotz-countdown')?.remove();
   document.getElementById('jshotz-full-page-progress')?.remove();
   document.getElementById('jshotz-full-page-progress-style')?.remove();
 }
@@ -119,6 +116,13 @@ function sendRuntimeMessage(message) {
   try {
     Promise.resolve(chrome.runtime.sendMessage(message)).catch(() => {});
   } catch {}
+}
+
+function reportPageVisualActivity() {
+  const now = Date.now();
+  if (now - lastPageVisualActivityAt < 150) return;
+  lastPageVisualActivityAt = now;
+  sendRuntimeMessage({ type: 'PAGE_VISUAL_ACTIVITY' });
 }
 
 function isScrollCapture(reason) {
@@ -580,6 +584,7 @@ window.addEventListener(
 window.addEventListener(
   'click',
   (event) => {
+    reportPageVisualActivity();
     const target = clickPathElements(event)[0];
     if (!target) return;
     const actionAt = Date.now();
@@ -669,6 +674,7 @@ const SCROLL_MIN_TRAVEL = 40;
 document.addEventListener(
   'scroll',
   (event) => {
+    reportPageVisualActivity();
     const actionAt = Date.now();
     const target = event.target;
     const isDocument = target === document || target === document.documentElement || target === document.body;
@@ -736,6 +742,7 @@ document.addEventListener(
 window.addEventListener(
   'change',
   (event) => {
+    reportPageVisualActivity();
     const actionAt = Date.now();
     const element = event.target;
     const openDialog = activeModal();
@@ -768,6 +775,7 @@ window.addEventListener(
 window.addEventListener(
   'input',
   (event) => {
+    reportPageVisualActivity();
     const element = event.target;
     if (
       (element instanceof HTMLInputElement && element.type !== 'checkbox' && element.type !== 'radio') ||
@@ -793,9 +801,6 @@ if (document.documentElement.hasAttribute('data-flow-recorder-hook')) {
   sendRuntimeMessage({ type: 'API_HOOK_READY' });
 }
 
-// Shows a shrinking countdown so the user knows exactly when "Capture in 5s" will fire, even after
-// the popup has closed and focus has moved to DevTools.
-const COUNTDOWN_ID = 'jshotz-countdown';
 const FULL_PAGE_PROGRESS_ID = 'jshotz-full-page-progress';
 const FULL_PAGE_PROGRESS_STYLE_ID = 'jshotz-full-page-progress-style';
 
@@ -862,38 +867,6 @@ function clearFullPageProgress() {
   document.getElementById(FULL_PAGE_PROGRESS_STYLE_ID)?.remove();
 }
 
-function showCountdown(seconds) {
-  document.getElementById(COUNTDOWN_ID)?.remove();
-  clearTimeout(countdownTimer);
-
-  const badge = document.createElement('div');
-  badge.id = COUNTDOWN_ID;
-  badge.style.cssText = [
-    'position:fixed', 'top:16px', 'right:16px', 'z-index:2147483647',
-    'background:#1a1a2e', 'color:#fff', 'font:600 14px/1.4 system-ui,sans-serif',
-    'padding:8px 14px', 'border-radius:999px', 'box-shadow:0 2px 10px rgba(0,0,0,.35)',
-    'pointer-events:none', 'display:flex', 'align-items:center', 'gap:8px'
-  ].join(';');
-
-  const dot = document.createElement('span');
-  dot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:#ff5555;flex:none;';
-  const label = document.createElement('span');
-  badge.append(dot, label);
-  document.documentElement.append(badge);
-
-  let remaining = seconds;
-  const tick = () => {
-    label.textContent = remaining > 0 ? `Capturing in ${remaining}s\u2026` : 'Capturing\u2026';
-    if (remaining <= 0) {
-      countdownTimer = setTimeout(() => badge.remove(), 400);
-      return;
-    }
-    remaining -= 1;
-    countdownTimer = setTimeout(tick, 1000);
-  };
-  tick();
-}
-
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'RECORDING_SESSION_STARTED') {
     resetRecordingSession();
@@ -905,7 +878,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true });
     return false;
   }
-  if (message?.type === 'SHOW_COUNTDOWN') showCountdown(message.seconds);
   if (message?.type === 'FULL_PAGE_PROGRESS') showFullPageProgress(message.progress);
   if (message?.type === 'FULL_PAGE_PROGRESS_VISIBILITY') {
     setFullPageProgressVisibility(Boolean(message.hidden)).then(() => sendResponse({ ok: true }));

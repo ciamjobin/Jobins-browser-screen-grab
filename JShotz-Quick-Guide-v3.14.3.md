@@ -1,6 +1,6 @@
 # JShotz Quick Guide
 
-**Version 3.14.2**
+**Version 3.14.3**
 
 JShotz records your browsing as a series of screenshots and turns them into a PDF or Word document - handy for
 documenting a process, a support case, or a step-by-step walkthrough.
@@ -15,9 +15,12 @@ documenting a process, a support case, or a step-by-step walkthrough.
    - **Tab viewport only** — screenshots of the page you're on.
    - **API + Screenshot** — same, plus a table of the page's network calls under each shot. JShotz
      observes page network calls only while this source is selected.
-   - **Screen / window** — share your whole screen, a window, or a tab (the only option that
-     can show DevTools or other apps).
-3. Click **Start recording**.
+    - **Screen / window** — share your whole screen, a window, or a tab (the only option that
+       can show DevTools or other apps). Visible DevTools changes are buffered immediately and
+       processed in order after you open an API request, switch detail tabs, or pause scrolling.
+3. Click **Start recording**. JShotz suggests a timestamped evidence folder name. Keep it or enter
+   your own name, then click **Start recording** in the folder prompt. New sessions are stored under
+   `Downloads/Jshotz/<folder name>/`.
 4. Use the page normally — screenshots are taken automatically as you click and scroll. Each
    normal action produces one settled screenshot of the currently visible page area. JShotz keeps
    the resulting documents in the order you acted, even when a screen waits to render; each
@@ -91,7 +94,11 @@ error card after reopening the tab.
 | Capture right now | Click **Capture now** in the popup |
 | Capture the whole page | Press **Alt+Shift+J**, or click **Capture now** |
 | Capture a DevTools panel | Open the panel, press **Alt+Shift+K** |
-| Capture in 5 seconds (time to click into DevTools) | Click **Capture in 5s**, or press **Alt+Shift+D** |
+| Capture DevTools immediately | In **Screen / window** mode with DevTools open, click **Capture DevTools**, or press **Alt+Shift+D** |
+
+In **Screen / window** mode, JShotz also captures settled visual changes in DevTools automatically.
+This covers opening each API request, switching among Headers, Payload, and Response, and scrolling
+those panels. Frames are buffered before document processing so quick follow-up actions are retained.
 
 ---
 
@@ -108,7 +115,7 @@ while a direct whole-page capture is running, then disappears when it finishes.
 
 If direct whole-page capture is unavailable, including in Chrome DevTools Device Mode, Firefox, or
 when another debugger is attached, JShotz saves one visible screenshot instead. It does not scroll the
-document or an inner page pane to build a capture. **Capture in 5s** and the DevTools-panel shortcut
+document or an inner page pane to build a capture. **Capture DevTools** and the DevTools-panel shortcut
 also capture only the visible screen state.
 
 For ordinary direct captures, Chrome may show a "started debugging this browser" banner for a moment.
@@ -210,8 +217,11 @@ screenshot are retained in the active recording and written as `[note]` after it
 Everything is saved under your Downloads folder:
 
 ```
-Downloads/flow-captures/session_<date-time>/
+Downloads/Jshotz/JShotz_<date-time>/
 ```
+
+JShotz prompts for this session-folder name before recording and pre-fills the timestamped standard.
+You can replace it with an evidence name that suits the flow.
 
 This includes your screenshots, selected PDF and/or Word documents, evidence documents, and a technical
 `debugLog` inside `flow-manifest.json` for troubleshooting. The log is stored in the extension

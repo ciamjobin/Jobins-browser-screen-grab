@@ -276,6 +276,57 @@ h2 {
   padding: 3px 0;
 }
 
+.check-listbox {
+  margin-top: 10px;
+  border: 1px solid #cbd2d9;
+  border-radius: 3px;
+  background: #fff;
+}
+
+.check-listbox summary {
+  display: flex;
+  justify-content: space-between;
+  padding: 7px 8px;
+  color: #334e68;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.check-listbox summary::-webkit-details-marker {
+  display: none;
+}
+
+.check-listbox summary::after {
+  content: '\25BE';
+  margin-left: 8px;
+}
+
+.check-listbox[open] summary::after {
+  content: '\25B4';
+}
+
+#captureOptionsSummary {
+  margin-left: auto;
+  color: #7b8794;
+  font-weight: 400;
+}
+
+.check-listbox-options {
+  max-height: 155px;
+  overflow-y: auto;
+  padding: 4px 8px 7px;
+  border-top: 1px solid #e4e7eb;
+}
+
+.check-listbox-options .check {
+  padding: 5px 0;
+}
+
+.session-folder-prompt {
+  grid-column: 1 / -1;
+}
+
 .settings.locked {
   opacity: 0.55;
   pointer-events: none;

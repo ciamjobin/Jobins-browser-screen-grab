@@ -1,6 +1,67 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fullPageCropRect, modalCropRect, paintedContentRatio } from '../flow-screenshot-extension/image-worker.js';
+import {
+  fullPageCropRect,
+  modalCropRect,
+  paintedContentRatio,
+  processCapture
+} from '../flow-screenshot-extension/image-worker.js';
+
+test('reuses one full-size canvas when an API table is not needed', async () => {
+  const originalDocument = globalThis.document;
+  const originalFetch = globalThis.fetch;
+  const originalCreateImageBitmap = globalThis.createImageBitmap;
+  let canvasCount = 0;
+  let bitmapClosed = false;
+
+  globalThis.fetch = async () => ({ blob: async () => ({}) });
+  globalThis.createImageBitmap = async () => ({
+    width: 1280,
+    height: 720,
+    close() {
+      bitmapClosed = true;
+    }
+  });
+  globalThis.document = {
+    createElement(tagName) {
+      assert.equal(tagName, 'canvas');
+      canvasCount += 1;
+      return {
+        width: 0,
+        height: 0,
+        getContext() {
+          return { drawImage() {}, fillRect() {}, fillStyle: '' };
+        },
+        toDataURL(type) {
+          return type === 'image/png'
+            ? 'data:image/png;base64,cG5n'
+            : 'data:image/jpeg;base64,anBlZw==';
+        }
+      };
+    }
+  };
+
+  try {
+    const result = await processCapture({
+      dataUrl: 'data:image/png;base64,c291cmNl',
+      wantPng: true,
+      wantJpeg: true,
+      apiRows: [],
+      titleBar: null,
+      modal: null,
+      trimBlankMargins: false
+    });
+
+    assert.equal(canvasCount, 1);
+    assert.equal(result.pngDataUrl, 'data:image/png;base64,cG5n');
+    assert.equal(result.jpeg.base64, 'anBlZw==');
+    assert.equal(bitmapClosed, true);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.fetch = originalFetch;
+    globalThis.createImageBitmap = originalCreateImageBitmap;
+  }
+});
 
 test('maps compact modal CSS bounds to screenshot pixels with a surrounding gutter', () => {
   const crop = modalCropRect(

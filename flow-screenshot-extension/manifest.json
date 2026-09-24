@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JShotz",
-  "version": "3.14.2",
+  "version": "3.14.3",
   "description": "Records clean screenshots with action time above each image and recorder attribution in document footers, with an API Name/Origin/Payload/Response table under each step, and exports titled PDF and Word documents.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -63,7 +63,7 @@
     },
     "capture-later": {
       "suggested_key": { "default": "Alt+Shift+D" },
-      "description": "Capture in 5s (time to click into DevTools first)"
+      "description": "Capture the open DevTools panel immediately"
     }
   }
 }

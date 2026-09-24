@@ -55,7 +55,9 @@ test('builds a Word document with screenshot headings, bracketed notes, and embe
   assert.ok(entries.has('_rels/.rels'));
   assert.ok(entries.has('docProps/core.xml'));
   assert.ok(entries.has('docProps/app.xml'));
+  assert.ok(entries.has('docProps/custom.xml'));
   assert.ok(entries.has('word/document.xml'));
+  assert.ok(entries.has('word/header1.xml'));
   assert.ok(entries.has('word/footer1.xml'));
   assert.ok(entries.has('word/styles.xml'));
   assert.ok(entries.has('word/settings.xml'));
@@ -66,15 +68,28 @@ test('builds a Word document with screenshot headings, bracketed notes, and embe
   assert.match(documentXml, /Sign in \[Use the shared account\]/);
   assert.match(documentXml, /https:\/\/example\.test\/login\?team=QA/);
   assert.match(documentXml, /r:embed="rId3"/);
+  assert.match(documentXml, /w:headerReference w:type="default" r:id="rId98"/);
   assert.match(documentXml, /w:footerReference w:type="default" r:id="rId99"/);
   assert.match(documentXml, /Time of action: 2026-09-13 10:00 UTC/);
   assert.match(documentXml, /w:spacing w:after="20"/);
   const relationships = new TextDecoder().decode(entries.get('word/_rels/document.xml.rels'));
   assert.match(relationships, /styles\.xml/);
   assert.match(relationships, /settings\.xml/);
+  assert.match(relationships, /rId98.*header1\.xml/);
   assert.match(relationships, /rId99.*footer1\.xml/);
+  const headerXml = new TextDecoder().decode(entries.get('word/header1.xml'));
+  assert.match(headerXml, /w:jc w:val="right"/);
+  assert.match(headerXml, /w:instr=" PAGE "/);
+  assert.match(headerXml, /w:instr=" NUMPAGES "/);
   assert.match(new TextDecoder().decode(entries.get('word/footer1.xml')), /Captured by Jobin&apos;s Screenshots/);
-  assert.match(new TextDecoder().decode(entries.get('docProps/core.xml')), /JShotz evidence/);
+  const coreXml = new TextDecoder().decode(entries.get('docProps/core.xml'));
+  assert.match(coreXml, /JShotz evidence/);
+  assert.match(coreXml, /<cp:category>Internal<\/cp:category>/);
+  assert.match(coreXml, /<cp:contentStatus>Internal<\/cp:contentStatus>/);
+  assert.match(
+    new TextDecoder().decode(entries.get('docProps/custom.xml')),
+    /name="Classification"><vt:lpwstr>Internal<\/vt:lpwstr>/
+  );
 });
 
 test('removes characters that are illegal in Office Open XML text', () => {
@@ -109,6 +124,33 @@ test('renders screenshot notes in PDF headings', () => {
   const pdfText = Buffer.from(pdf).toString('latin1');
   assert.match(pdfText, /Sign in \[Use the shared account\]/);
   assert.match(pdfText, /Captured by Jobin's Screenshots/);
+  assert.match(pdfText, /Page 1 of 1/);
+});
+
+test('numbers every physical PDF sheet including API continuation pages', () => {
+  const pdf = buildPdf([{
+    title: 'Network evidence',
+    url: 'https://example.test/',
+    time: '2026-09-24 10:00 UTC',
+    width: 1,
+    height: 1,
+    jpeg: Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]),
+    apiRows: Array.from({ length: 80 }, (_, index) => ({
+      name: `Request ${index + 1}`,
+      origin: 'https://example.test/',
+      payload: 'payload '.repeat(20),
+      response: 'response '.repeat(30)
+    }))
+  }]);
+
+  const pdfText = Buffer.from(pdf).toString('latin1');
+  const countMatch = /\/Count (\d+)/.exec(pdfText);
+  assert.ok(countMatch);
+  const pageCount = Number(countMatch[1]);
+  assert.ok(pageCount > 1);
+  for (let page = 1; page <= pageCount; page += 1) {
+    assert.match(pdfText, new RegExp(`Page ${page} of ${pageCount}`));
+  }
 });
 
 test('places a widescreen screenshot directly below its time metadata in PDF output', () => {

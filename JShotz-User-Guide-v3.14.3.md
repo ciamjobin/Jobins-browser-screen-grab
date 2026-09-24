@@ -1,6 +1,6 @@
 # JShotz User Guide
 
-**Version 3.14.2**
+**Version 3.14.3**
 
 JShotz is a browser extension for Chrome, Edge, and Firefox that records a browsing flow as clean
 screenshots and exports PDF or Word documents. Each document shows the action time above its image
@@ -26,14 +26,14 @@ happened in a browser session.
 ## 1. Installing the extension
 
 **Chrome / Edge**
-1. Unzip `JShotz-3.14.2-chrome-edge.zip`.
+1. Unzip `JShotz-3.14.3-chrome-edge.zip`.
 2. Go to `chrome://extensions` (or `edge://extensions`).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped folder that contains `manifest.json`.
 5. If updating, remove or disable the old version first so only one JShotz copy is loaded.
 
 **Firefox**
-1. Unzip `JShotz-3.14.2-firefox.zip`.
+1. Unzip `JShotz-3.14.3-firefox.zip`.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on** and select the `manifest.json` inside the unzipped folder.
 4. Firefox 128+ is required.
@@ -56,9 +56,10 @@ Click the JShotz icon to open the popup. It has three parts:
 
 - **Status line** — shows *Idle*, *Recording · N screenshot(s)*, *Paused · N screenshot(s)*,
   an interrupted-recording backup notice, or an error message.
-- **Settings** — capture source and behavior options (locked once recording starts, except the
-  capture source, which can be changed mid-recording).
-- **Actions** — Start/Stop, Pause/Continue, Capture now, Capture in 5s, Save checkpoint, and
+- **Settings** — capture source and a compact **Capture options** list. Expand the list to check or
+  clear behavior options. Settings lock once recording starts, except the capture source, which can
+  be changed mid-recording.
+- **Actions** — Start/Stop, Pause/Continue, Capture now, Capture DevTools, Save checkpoint, and
   Resume capture from folder.
 - **Screenshots list** — a live list of what's been captured so far in the current session and
   checkboxes that choose the screenshots included in output, plus an optional 50-character note
@@ -85,7 +86,7 @@ APIs are unavailable there.
 |---|---|---|
 | **Tab viewport only** | The visible area of the recorded tab | Default mode, works everywhere |
 | **API + Screenshot** | Same as Tab, plus a table of intercepted `fetch`/XHR calls under each screenshot | Shows request URL, origin/referer, payload, and response; failed calls are highlighted |
-| **Screen / window (DevTools + taskbar)** | A shared screen, window, or tab surface via the browser's own share picker | The only mode that can show DevTools, the taskbar, or other applications |
+| **Screen / window (DevTools + taskbar)** | A shared screen, window, or tab surface via the browser's own share picker | Automatically buffers settled visual changes, including opened API requests, detail tabs, and panel scrolling |
 
 **You can switch modes without stopping the recording.** Pick a different option from the
 dropdown at any time. Switching *to* Screen/window mode opens a small picker window — click
@@ -95,12 +96,20 @@ the front first, since the picker needs a real click.
 If Screen/window mode's share source ends (you click "Stop sharing", or close the shared
 window), the recording automatically falls back to Tab-viewport captures rather than failing.
 
+While Screen/window mode is active, JShotz watches the shared pixels because browser security does
+not expose the native DevTools DOM to extensions. A screenshot is buffered when an API request opens,
+the Headers, Payload, or Response view changes, or scrolling pauses. Buffered frames are processed in
+order, so image conversion and file writing do not cause quick DevTools updates to be lost.
+
 API mode begins collecting newly observed `fetch` and XHR calls while it is selected. It does
 not add network details retroactively to screenshots that were captured in another mode.
 
 ---
 
 ## 4. Settings
+
+The five behavior settings are inside the collapsed **Capture options** checkable list. Its summary
+shows how many options are selected; expand it to review or change individual options.
 
 - **Capture on every button click** — automatically screenshot after clicks on buttons, links,
   checkboxes, and similar controls. Link destinations wait for their rendered page state before
@@ -122,7 +131,9 @@ session.
 
 ## 5. Starting, capturing, and stopping
 
-1. Open the tab you want to record, then click **Start recording** in the popup.
+1. Open the tab you want to record, then click **Start recording** in the popup. JShotz displays a
+  timestamped folder suggestion such as `JShotz_2026-09-24_14-30-00-000`. Keep it or enter your own
+  evidence-folder name, then confirm **Start recording**.
 2. Use the page normally. Screenshots are taken automatically per your settings, and you can
    also trigger one manually at any time (see below).
   JShotz retains the time each action occurred even when it waits for the page to render. The
@@ -169,7 +180,7 @@ available until you start a new recording.
 | Capture now | Click **Capture now** in the popup | Whole-page when enabled and direct capture is available; otherwise one visible frame |
 | Whole-page hotkey | Press **Alt+Shift+J** while the page has focus | Same whole-page function as **Capture now**; otherwise one visible frame when direct capture is unavailable |
 | DevTools panel capture | Press **Alt+Shift+K** while a DevTools panel is open | Captures exactly what's on screen, including the DevTools panel |
-| Capture in 5s | Click **Capture in 5s**, or press **Alt+Shift+D** | Waits 5 seconds (with an on-page countdown badge) before capturing — use this when you need time to click into DevTools first, since Chrome blocks other shortcuts while DevTools has focus |
+| Capture DevTools | In **Screen / window** mode with DevTools open, click **Capture DevTools**, or press **Alt+Shift+D** | Captures the shared screen immediately; the button and shortcut do nothing until DevTools and screen sharing are both active |
 
 Manual captures are available only while recording is active and not paused.
 
@@ -348,8 +359,8 @@ Each recording creates a folder in your browser's default download location:
 
 ```
 Downloads/
-  flow-captures/
-    session_<timestamp>/
+  Jshotz/
+    JShotz_<timestamp>/         (or the session folder name you entered)
       001_<timestamp>_<label>.png
       002_<timestamp>_<label>.png
       ...
