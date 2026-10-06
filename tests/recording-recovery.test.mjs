@@ -1456,6 +1456,9 @@ test('defers interim PDF assembly until a capture burst drains', async () => {
       const state = await sendMessage(messageListener, { type: 'GET_STATE' });
       return state.interimOutput?.captureSequence === 6;
     }, 'The deferred interim PDF did not finish.');
+    const completedState = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(completedState.interimOutput.captureCount, 6);
+    assert.equal(completedState.interimOutputError, null);
   } finally {
     fixture.releaseOffscreenProcessing();
     globalThis.chrome = originalChrome;

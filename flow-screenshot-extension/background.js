@@ -3557,7 +3557,7 @@ async function writeInterimOutput(sessionId, requestedSequence) {
       interimOutputError: null
     });
     logFileSave('completed', 'interim-pdf', filename, selectedFolder ? 'selected-folder' : 'downloads');
-    logLine(`INTERIM_OUTPUT captures=${frames.length} file=${filename}`);
+    logLine(`INTERIM_OUTPUT captures=${captureCount} file=${filename}`);
     return next.interimOutput;
   } catch (error) {
     logFileSave('failed', 'interim-pdf', filename, selectedFolder ? 'selected-folder' : 'downloads');
