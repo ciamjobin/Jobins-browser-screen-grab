@@ -106,7 +106,10 @@ function filenameTail(value) {
 
 function titleFromFileName(name, sequence) {
   const withoutExtension = name.replace(/\.[^.]+$/, '');
-  const withoutPrefix = withoutExtension.replace(/^\d+_[^_]+_/, '');
+  const timestampPrefix = /^\d+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:-\d{3})?_/.exec(withoutExtension);
+  const withoutPrefix = timestampPrefix
+    ? withoutExtension.slice(timestampPrefix[0].length)
+    : withoutExtension.replace(/^\d+_[^_]+_/, '');
   return withoutPrefix.replace(/[_-]+/g, ' ').trim() || `Screenshot ${sequence}`;
 }
 
@@ -240,6 +243,25 @@ export async function writeCaptureFolderFile(directoryHandle, name, contents) {
     await writable.abort?.().catch(() => {});
     throw error;
   }
+}
+
+export async function writeCaptureFolderManifest(directoryHandle, sessionId, captures, metadata = {}) {
+  const existing = await readSessionManifest(directoryHandle);
+  const screenshots = new Map(manifestEntries(existing));
+  for (const capture of captures) {
+    const filename = filenameTail(capture?.filename);
+    if (filename) screenshots.set(filename, capture);
+  }
+  const orderedScreenshots = [...screenshots.values()].sort(compareCaptureFlow);
+  const manifest = {
+    ...existing,
+    ...metadata,
+    sessionId: sessionId || existing?.sessionId || null,
+    screenshotCount: orderedScreenshots.length,
+    screenshots: orderedScreenshots
+  };
+  await writeCaptureFolderFile(directoryHandle, 'flow-manifest.json', JSON.stringify(manifest, null, 2));
+  return manifest;
 }
 
 export async function removeCaptureFolderFiles(directoryHandle, names) {

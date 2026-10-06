@@ -320,14 +320,14 @@ export function buildPdf(pages) {
   objects[3] = encodeLatin1('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
 
   pages.forEach((page, index) => {
-    objects[imageNums[index] - 1] = concat([
+    objects[imageNums[index] - 1] = [
       encodeLatin1(
         `<< /Type /XObject /Subtype /Image /Width ${page.width} /Height ${page.height} ` +
           `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${page.jpeg.length} >>\nstream\n`
       ),
       page.jpeg,
       encodeLatin1('\nendstream')
-    ]);
+    ];
   });
 
   for (const [sheetIndex, sheet] of sheets.entries()) {
@@ -355,7 +355,11 @@ export function buildPdf(pages) {
 
   objects.forEach((body, index) => {
     offsets.push(offset);
-    const parts = [encodeLatin1(`${index + 1} 0 obj\n`), body, encodeLatin1('\nendobj\n')];
+    const parts = [
+      encodeLatin1(`${index + 1} 0 obj\n`),
+      ...(Array.isArray(body) ? body : [body]),
+      encodeLatin1('\nendobj\n')
+    ];
     for (const part of parts) {
       chunks.push(part);
       offset += part.length;

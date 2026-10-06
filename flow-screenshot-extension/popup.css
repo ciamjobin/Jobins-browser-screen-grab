@@ -121,6 +121,22 @@ h2 {
   color: #a15c00;
 }
 
+.memory-status {
+  margin: -7px 0 10px;
+  color: #54656d;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.memory-status.pressure-elevated {
+  color: #9a5800;
+}
+
+.memory-status.pressure-high {
+  color: #b42318;
+  font-weight: 600;
+}
+
 .toast {
   position: fixed;
   right: 14px;
@@ -210,8 +226,13 @@ h2 {
 }
 
 #toggle,
+#continueRecording,
 #saveFlow {
   grid-column: 1 / -1;
+}
+
+#mainActions.awaiting-session-folder > :not(#toggle):not(#sessionFolderPrompt) {
+  display: none;
 }
 
 #mainActions.awaiting-stop-choice > :not(#toggle):not(#confirm) {
@@ -257,6 +278,21 @@ h2 {
   border: 1px solid #cbd2d9;
   border-radius: 3px;
   font-size: 12px;
+}
+
+.mode-switch option {
+  color: #0d47a1;
+  font-weight: 700;
+}
+
+.mode-switch option:disabled {
+  color: #8a94a3;
+  font-weight: 700;
+}
+
+.mode-switch select:invalid {
+  color: #8a94a3;
+  font-weight: 700;
 }
 
 .field input[type='text'],

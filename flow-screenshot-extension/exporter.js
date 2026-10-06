@@ -14,15 +14,6 @@ function base64ToBytes(base64) {
   return bytes;
 }
 
-function dataUrl(bytes, mimeType) {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return `data:${mimeType};base64,${btoa(binary)}`;
-}
-
 async function hideDownloadUi() {
   if (typeof chrome.downloads?.setUiOptions !== 'function') return;
   try {
@@ -167,28 +158,37 @@ async function run() {
     }
 
     stateEl.textContent = `Assembling ${includedFrames.length} page(s)\u2026`;
-    const pages = includedFrames.map((frame) => ({
-      title: frame.title,
-      note: frame.note,
-      apiRows: frame.apiRows || [],
-      ...fieldsFor(frame),
-      width: frame.width,
-      height: frame.height,
-      jpeg: base64ToBytes(frame.base64)
-    }));
+    const pages = includedFrames.map((frame) => {
+      const page = {
+        title: frame.title,
+        note: frame.note,
+        apiRows: frame.apiRows || [],
+        ...fieldsFor(frame),
+        width: frame.width,
+        height: frame.height,
+        jpeg: base64ToBytes(frame.base64)
+      };
+      frame.base64 = '';
+      return page;
+    });
     const downloadIds = [];
     for (const output of outputFiles) {
       const bytes = buildOutput(output.format, pages);
-      await hideDownloadUi();
-      const downloadId = await chrome.downloads.download({
-        url: dataUrl(bytes, outputMimeType(output.format)),
-        filename: output.filename,
-        ...(output.overwrite ? { conflictAction: 'overwrite' } : {}),
-        saveAs: false
-      });
-      const outcome = await waitForDownload(downloadId);
-      if (outcome !== 'complete') throw new Error(`${output.format.toUpperCase()} download ${outcome}.`);
-      downloadIds.push(downloadId);
+      const objectUrl = URL.createObjectURL(new Blob([bytes], { type: outputMimeType(output.format) }));
+      try {
+        await hideDownloadUi();
+        const downloadId = await chrome.downloads.download({
+          url: objectUrl,
+          filename: output.filename,
+          ...(output.overwrite ? { conflictAction: 'overwrite' } : {}),
+          saveAs: false
+        });
+        const outcome = await waitForDownload(downloadId);
+        if (outcome !== 'complete') throw new Error(`${output.format.toUpperCase()} download ${outcome}.`);
+        downloadIds.push(downloadId);
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
     }
 
     stateEl.textContent = `Saved ${includedFrames.length} page(s).`;

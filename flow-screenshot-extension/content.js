@@ -158,6 +158,7 @@ const BUSY_SELECTOR = [
   '[class*="loader" i]'
 ].join(',');
 const BUSY_TEXT_PATTERN = /please\s+wait|loading|retrieving/i;
+const EXIT_ACTION_PATTERN = /\b(?:log\s*out|sign\s*out)\b/i;
 
 // A button click on a client-rendered page often swaps in a loading spinner before the real next
 // screen appears; capturing right away would just record the spinner. Waits until the DOM stops
@@ -631,6 +632,12 @@ window.addEventListener(
 
     const trigger = closestClickTarget(event, INTERACTIVE_SELECTOR);
     if (!trigger) return;
+
+    const triggerLabel = describe(trigger);
+    if (EXIT_ACTION_PATTERN.test(triggerLabel)) {
+      requestCapture(dialog ? 'modal-click' : 'click', triggerLabel, dialog ? modalCaptureOptions(dialog) : undefined, actionAt);
+      return;
+    }
 
     if (trigger instanceof HTMLInputElement && (trigger.type === 'checkbox' || trigger.type === 'radio')) return;
 

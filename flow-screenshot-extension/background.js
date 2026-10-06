@@ -3,11 +3,13 @@ import {
   imageFileToDataUrl,
   removeCaptureFolderFiles,
   scanCaptureFolder,
+  writeCaptureFolderManifest,
   writeCaptureFolderFile
 } from './capture-folder.js';
 import { handlers as localImageWorkerHandlers } from './image-worker.js';
 import { buildDocx } from './docx.js';
 import { buildPdf } from './pdf.js';
+import { getMemoryStatus, readRuntimeMemory } from './memory-monitor.js';
 
 const STATE_KEY = 'flowRecorderState';
 const PDF_EXCLUSIONS_KEY = 'flowRecorderPdfExcludedSequences';
@@ -21,6 +23,9 @@ const OFFSCREEN_PATH = 'offscreen.html';
 // captureVisibleTab is rate limited; serialize captures and pace them.
 let captureChain = Promise.resolve();
 let pendingCaptureCount = 0;
+let screenMemorySnapshot = null;
+let viewportBufferChain = Promise.resolve();
+let pendingViewportBufferCount = 0;
 let captureDrainInProgress = false;
 let interimOutputChain = Promise.resolve();
 let interimOutputRunning = false;
@@ -130,6 +135,7 @@ const defaultState = {
   settings: {
     // 'tab' = viewport only, 'api' = viewport + API table, 'screen' = desktop stream (DevTools/taskbar)
     captureMode: 'tab',
+    devToolsCaptureRequested: false,
     captureOnClick: true,
     captureOnScroll: true,
     captureApi: false,
@@ -395,7 +401,7 @@ function hashText(value) {
 }
 
 // Page lifecycle signals can repeat while the user has not performed another action.
-const DEDUPE_REASONS = new Set(['navigation', 'url-change']);
+const DEDUPE_REASONS = new Set(['navigation', 'url-change', 'devtools-update']);
 const PAGE_TRANSITION_REASONS = new Set(['navigation', 'url-change', 'title-change', 'refresh', 'history-navigation', 'typed-navigation']);
 const USER_ACTION_REASONS = new Set([
   'click',
@@ -515,6 +521,7 @@ async function closeScreenWindow() {
     await chrome.windows.remove(screenWindowId).catch(() => {});
     await setState({ screenWindowId: null });
   }
+  screenMemorySnapshot = null;
 }
 
 // getDisplayMedia needs a real user click in a real window; a service worker cannot host the picker.
@@ -562,6 +569,23 @@ async function openScreenWindow() {
 const CAPTURE_QUEUE_WATCHDOG_MS = 20000;
 const FULL_PAGE_CAPTURE_QUEUE_WATCHDOG_MS = 330000;
 const NEW_TAB_LINK_HANDOFF_MS = 800;
+const MAX_PENDING_VIEWPORT_BUFFERS = 10;
+const MAX_PREBUFFERED_CAPTURE_FRAMES = 10;
+
+function currentMemoryStatus() {
+  const runtimeMemory = readRuntimeMemory();
+  const screenMemory = screenMemorySnapshot;
+  const memorySamples = [runtimeMemory, screenMemory].filter(
+    (sample) => Number.isFinite(sample?.jsHeapUsedBytes) && Number.isFinite(sample?.jsHeapLimitBytes)
+  );
+  return getMemoryStatus({
+    memorySamples,
+    deviceMemoryGb: runtimeMemory.deviceMemoryGb ?? screenMemory?.deviceMemoryGb,
+    screenBufferedBytes: screenMemory?.screenBufferedBytes,
+    screenBufferedFrames: screenMemory?.screenBufferedFrames,
+    pendingCaptureCount
+  });
+}
 
 // However a single capture fails or hangs, the queue must keep moving - otherwise every capture
 // requested after it (including the popup's own manual capture buttons) would wait
@@ -702,6 +726,37 @@ function createCaptureRequest(reason, label, state, modal, target, actionAt, req
   };
 }
 
+function bufferActionViewport(captureState, captureTarget, reason) {
+  if (pendingViewportBufferCount >= MAX_PENDING_VIEWPORT_BUFFERS) return Promise.resolve(null);
+  pendingViewportBufferCount += 1;
+  const buffered = viewportBufferChain
+    .catch(() => {})
+    .then(async () => {
+      const state = await captureState;
+      if (
+        !state.recording ||
+        state.paused ||
+        !USER_ACTION_REASONS.has(reason) ||
+        isLinkCaptureReason(reason) ||
+        state.settings.fullPage && FULL_PAGE_REASONS.has(reason) ||
+        (state.settings.captureMode !== 'tab' && state.settings.captureMode !== 'api') ||
+        !Number.isSafeInteger(captureTarget.windowId)
+      ) return null;
+      const before = await chrome.tabs.get(captureTarget.tabId).catch(() => null);
+      if (!before) return null;
+      const dataUrl = await captureVisibleTabWithRetry(captureTarget.windowId).catch(() => null);
+      if (!dataUrl) return null;
+      const after = await chrome.tabs.get(captureTarget.tabId).catch(() => null);
+      if (!after || before.url !== after.url) return null;
+      return { dataUrl, url: after.url, title: after.title || '' };
+    })
+    .finally(() => {
+      pendingViewportBufferCount = Math.max(0, pendingViewportBufferCount - 1);
+    });
+  viewportBufferChain = buffered.then(() => {}, () => {});
+  return buffered;
+}
+
 function captureNow(reason, label, requestedState, modal, target, allowDuringDrain = false) {
   if (captureDrainInProgress && !allowDuringDrain) return captureChain;
   const captureTarget = target ? { ...target } : {};
@@ -710,19 +765,30 @@ function captureNow(reason, label, requestedState, modal, target, allowDuringDra
   if (ownsResultingNavigation) pendingUserActionCaptures.add(captureTarget);
   const actionAt = captureActionTime(captureTarget.actionAt);
   const requestSequence = ++captureRequestSequence;
+  const prebufferLimit = Math.min(
+    MAX_PREBUFFERED_CAPTURE_FRAMES,
+    currentMemoryStatus().maxPrebufferedCaptureFrames
+  );
+  const shouldPrebufferViewportCapture = pendingCaptureCount < MAX_PENDING_VIEWPORT_BUFFERS;
+  const shouldPrebufferScreenCapture = pendingCaptureCount < prebufferLimit;
   const captureState = requestedState
     ? Promise.resolve(requestedState)
     : recoverRecordingSession(captureTarget.tabId);
+  const bufferedViewportFrame = shouldPrebufferViewportCapture
+    ? bufferActionViewport(captureState, captureTarget, reason)
+    : Promise.resolve(null);
   const bufferedScreenFrame = captureTarget.bufferedScreenFrameId
     ? Promise.resolve({ frameId: captureTarget.bufferedScreenFrameId })
-    : captureState.then((state) => {
-      if (
-        state.settings.captureMode !== 'screen' ||
-        !state.streamActive ||
-        PAGE_TRANSITION_REASONS.has(reason)
-      ) return null;
-      return askScreen('SCREEN_BUFFER_CAPTURE');
-    });
+    : shouldPrebufferScreenCapture
+      ? captureState.then((state) => {
+        if (
+          state.settings.captureMode !== 'screen' ||
+          !state.streamActive ||
+          PAGE_TRANSITION_REASONS.has(reason)
+        ) return null;
+        return askScreen('SCREEN_BUFFER_CAPTURE');
+      })
+      : Promise.resolve(null);
   pendingCaptureCount += 1;
 
   // Add the task to the queue before any asynchronous state recovery. This preserves the order in
@@ -746,6 +812,10 @@ function captureNow(reason, label, requestedState, modal, target, allowDuringDra
         requestSequence
       );
       captureRequest.bufferedScreenFrameId = bufferedFrame?.frameId || null;
+      const bufferedViewport = await bufferedViewportFrame;
+      captureRequest.bufferedViewportDataUrl = bufferedViewport?.dataUrl || null;
+      captureRequest.bufferedViewportUrl = bufferedViewport?.url || '';
+      captureRequest.bufferedViewportTitle = bufferedViewport?.title || '';
       const longCaptureLikely = captureRequest.settings.fullPage && FULL_PAGE_REASONS.has(reason);
       const captureWatchdogMs =
         longCaptureLikely
@@ -792,14 +862,22 @@ function captureNow(reason, label, requestedState, modal, target, allowDuringDra
         }
         return;
       }
-      logLine(`ERROR ${reason}${label ? ` "${label}"` : ''}: ${error.message}`);
+      const errorName = error?.name || 'Error';
+      const errorMessage = error?.message || String(error || 'Unknown capture error');
+      const errorStack = typeof error?.stack === 'string'
+        ? error.stack.split(/\r?\n/).slice(0, 4).join(' <- ').slice(0, 1200)
+        : '';
+      logLine(
+        `ERROR ${reason}${label ? ` "${label}"` : ''}: ${errorName}: ${errorMessage}` +
+          `${errorStack ? ` stack=${errorStack}` : ''}`
+      );
       await flushLog();
-      console.error('Capture failed:', error);
+      console.error('Capture failed:', errorName, errorMessage, errorStack || error);
       const state = await getState();
       await clearFullPageProgress(captureTarget.tabId ?? state.tabId);
       await setState({
         folderAccessNeeded: needsFolderReconnect(error),
-        lastError: `Capture failed: ${error.message}`
+        lastError: `Capture failed: ${errorMessage}`
       });
     })
     .finally(() => {
@@ -808,18 +886,35 @@ function captureNow(reason, label, requestedState, modal, target, allowDuringDra
       if (captureTarget.bufferedScreenFrameId) {
         askScreen('SCREEN_FRAME_PROCESSED', { frameId: captureTarget.bufferedScreenFrameId });
       }
+      if (pendingCaptureCount === 0 && queuedInterimOutputRequest && !interimOutputRunning) {
+        startInterimOutputWorker();
+      }
     });
   return captureChain;
 }
 
-function captureDevToolsAfterPopupCloses(state) {
-  delay(DEVTOOLS_POPUP_CLOSE_GRACE_MS).then(() =>
-    captureNow('devtools-panel', undefined, state, undefined, {
+async function captureDevToolsAfterPopupCloses(state) {
+  const returnToStandby = state.settings.captureMode !== 'screen';
+  await askScreen('SCREEN_SET_ACTIVE', { active: true });
+  try {
+    const buffered = await askScreen('SCREEN_BUFFER_CAPTURE_DELAYED', {
+      delayMs: DEVTOOLS_POPUP_CLOSE_GRACE_MS
+    });
+    if (!buffered?.frameId) {
+      return setState({
+        lastError: buffered?.error || 'Screen + DevTools capture is no longer available.'
+      });
+    }
+    await captureNow('devtools-panel', undefined, { ...state, streamActive: true }, undefined, {
       tabId: state.tabId,
       windowId: state.windowId,
-      actionAt: Date.now()
-    })
-  );
+      actionAt: Date.now(),
+      bufferedScreenFrameId: buffered.frameId
+    });
+    return getState();
+  } finally {
+    if (returnToStandby) await askScreen('SCREEN_SET_ACTIVE', { active: false });
+  }
 }
 
 // "Failed to capture tab: image readback failed" is a transient compositor/GPU error - the frame
@@ -854,19 +949,34 @@ async function captureVisibleTabWithRetry(windowId) {
 }
 
 async function grabPngDataUrl(captureRequest, tab) {
+  if (
+    captureRequest.bufferedViewportDataUrl &&
+    captureRequest.bufferedViewportUrl === tab.url
+  ) return captureRequest.bufferedViewportDataUrl;
+  let bufferedScreenError = '';
   if (captureRequest.bufferedScreenFrameId) {
     const buffered = await askScreen('SCREEN_TAKE_BUFFERED', {
       frameId: captureRequest.bufferedScreenFrameId
     });
     if (buffered?.dataUrl) return buffered.dataUrl;
+    bufferedScreenError = buffered?.error || '';
     console.warn('Buffered screen frame unavailable, using the live capture:', buffered?.error);
   }
   if (captureRequest.settings.captureMode === 'screen' && captureRequest.streamActive) {
     const result = await askScreen('SCREEN_CAPTURE');
     if (result?.dataUrl) return result.dataUrl;
+    const screenError = result?.error || bufferedScreenError || 'the shared frame is unavailable';
+    if (/blank or unavailable/i.test(screenError)) {
+      await markScreenUnavailable(
+        `The shared screen stopped producing usable frames. Select Entire Screen again to resume evidence capture.`
+      );
+      throw new Error(
+        `The shared screen remained blank after automatic recovery attempts. Select Entire Screen again; the action was not saved as incomplete evidence.`
+      );
+    }
     console.warn('Screen capture unavailable, falling back to tab capture:', result?.error);
     await markScreenUnavailable(
-      `Screen sharing stopped (${result?.error || 'the shared frame is unavailable'}). Select a screen or window again to resume DevTools capture.`
+      `Screen sharing stopped (${screenError}). Select a screen or window again to resume DevTools capture.`
     );
   }
   return captureVisibleTabWithRetry(tab.windowId);
@@ -874,9 +984,13 @@ async function grabPngDataUrl(captureRequest, tab) {
 
 async function markScreenUnavailable(message) {
   const state = await getState();
-  if (!state.recording || state.settings.captureMode !== 'screen') return state;
-  const next = await setState({ streamActive: false, lastError: message });
-  if (Number.isSafeInteger(state.screenWindowId)) {
+  if (!state.recording) return state;
+  const activeScreenMode = state.settings.captureMode === 'screen';
+  const next = await setState({
+    streamActive: false,
+    lastError: activeScreenMode ? message : state.lastError
+  });
+  if (activeScreenMode && Number.isSafeInteger(state.screenWindowId)) {
     await chrome.windows.update(state.screenWindowId, { state: 'normal', focused: true }).catch(() => {});
   }
   return next;
@@ -1085,16 +1199,102 @@ const SCROLLER_SETTLE_MAX_MS = 600;
 // Full-document work is deliberately limited to manual capture actions.
 const FULL_PAGE_REASONS = new Set(['manual-hotkey', 'manual']);
 let debuggerTabId = null;
+const devToolsPortsByTab = new Map();
+const devToolsLastSeenByTab = new Map();
+const devToolsExpiryTimersByTab = new Map();
+const DEVTOOLS_PRESENCE_LEASE_MS = 3500;
 
-async function canCaptureDevTools(state) {
+function isDevToolsOpenForTab(tabId) {
   return Boolean(
-    state.settings?.captureMode === 'screen' &&
-      state.streamActive
+    Number.isSafeInteger(tabId) && (
+      devToolsPortsByTab.get(tabId)?.size ||
+      Date.now() - (devToolsLastSeenByTab.get(tabId) || 0) <= DEVTOOLS_PRESENCE_LEASE_MS
+    )
   );
 }
 
+async function markDevToolsPresence(tabId, open) {
+  if (!Number.isSafeInteger(tabId)) return;
+  clearTimeout(devToolsExpiryTimersByTab.get(tabId));
+  devToolsExpiryTimersByTab.delete(tabId);
+  if (open) devToolsLastSeenByTab.set(tabId, Date.now());
+  else devToolsLastSeenByTab.delete(tabId);
+  await applyDevToolsPresence(tabId, open);
+  if (open) {
+    const state = await getState();
+    if (!state.recording && /Open DevTools before enabling/.test(state.lastError || '')) {
+      await setState({ lastError: null });
+    }
+  }
+}
+
+async function applyDevToolsPresence(tabId, open) {
+  const state = await getState();
+  if (!state.recording || state.tabId !== tabId || !state.settings.devToolsCaptureRequested) return;
+  const captureMode = open && state.streamActive ? 'screen' : 'tab';
+  if (state.settings.captureMode === captureMode) return;
+  const next = await setState({
+    lastError: open && !state.streamActive
+      ? 'DevTools reopened, but screen sharing is unavailable. Select Screen / window again.'
+      : null,
+    settings: { ...state.settings, captureMode, captureApi: false }
+  });
+  if (next.streamActive) {
+    await askScreen('SCREEN_SET_ACTIVE', { active: captureMode === 'screen' });
+  }
+  await configureApiHooks(next.trackedTabIds, false);
+  await updateBadge(next);
+  logLine(`DEVTOOLS_${open ? 'OPENED' : 'CLOSED'} mode=${captureMode}`);
+  await flushLog();
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  const match = /^jshotz-devtools:(\d+)$/.exec(port.name || '');
+  if (!match) return;
+  const tabId = Number(match[1]);
+  let ports = devToolsPortsByTab.get(tabId);
+  if (!ports) {
+    ports = new Set();
+    devToolsPortsByTab.set(tabId, ports);
+  }
+  ports.add(port);
+  markDevToolsPresence(tabId, true).catch(console.error);
+  port.onDisconnect.addListener(() => {
+    ports.delete(port);
+    if (ports.size) return;
+    devToolsPortsByTab.delete(tabId);
+    clearTimeout(devToolsExpiryTimersByTab.get(tabId));
+    devToolsExpiryTimersByTab.set(tabId, setTimeout(() => {
+      devToolsExpiryTimersByTab.delete(tabId);
+      if (!isDevToolsOpenForTab(tabId)) applyDevToolsPresence(tabId, false).catch(console.error);
+    }, DEVTOOLS_PRESENCE_LEASE_MS + 100));
+  });
+});
+
+async function canCaptureSharedScreen(state) {
+  if (!state.recording) return false;
+  const screen = await askScreen('SCREEN_PING').catch(() => null);
+  if (!screen?.ok) return false;
+  if (!state.streamActive) await setState({ streamActive: true });
+  return true;
+}
+
 async function withDevToolsStatus(state) {
-  return { ...state, devToolsOpen: await canCaptureDevTools(state) };
+  let tabId = state.tabId;
+  if (!state.recording) {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    tabId = activeTab?.id;
+  }
+  const devToolsOpen = isDevToolsOpenForTab(tabId);
+  if (!devToolsOpen && state.recording && state.settings.devToolsCaptureRequested) {
+    await applyDevToolsPresence(tabId, false);
+    state = await getState();
+  }
+  return {
+    ...state,
+    devToolsOpen,
+    screenCaptureAvailable: await canCaptureSharedScreen(state)
+  };
 }
 
 if (HAS_DEBUGGER) {
@@ -2667,7 +2867,8 @@ async function performCapture(captureRequest) {
 
   // Let the page settle (navigation paint, click-driven UI updates) before grabbing the frame.
   const settle =
-    captureRequest.bufferedScreenFrameId || reason === 'toggle' || reason === 'modal-toggle'
+    captureRequest.bufferedScreenFrameId || reason === 'toggle' ||
+    reason === 'modal-toggle'
       ? 0
       : reason === 'navigation'
         ? 600
@@ -2684,6 +2885,10 @@ async function performCapture(captureRequest) {
   await waitForRenderedPage(tabId, reason);
   const latest = await getState();
   if (!isActiveCapture(latest, sessionId, captureGeneration)) return;
+  if (reason === 'devtools-update' && latest.settings.captureMode !== 'screen') {
+    logLine('CAPTURE_SKIPPED devtools-update: screen mode is no longer active.');
+    return;
+  }
 
   // Refresh the tab after waiting. Its old title and URL may describe the page before the action.
   const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -2727,9 +2932,15 @@ async function performCapture(captureRequest) {
           ? 'ok'
           : 'fell back to visible frame'
       : 'n/a';
+    const usesBufferedViewport = Boolean(
+      captureRequest.bufferedViewportDataUrl &&
+      captureRequest.bufferedViewportUrl === page.url
+    );
     const capture = {
-      title: page.title,
-      url: page.url,
+      title: usesBufferedViewport && captureRequest.bufferedViewportTitle
+        ? captureRequest.bufferedViewportTitle
+        : page.title,
+      url: usesBufferedViewport ? captureRequest.bufferedViewportUrl : page.url,
       reason,
       label,
       startedAt,
@@ -2967,6 +3178,24 @@ async function persistCapture({
     filename: settings.savePng ? filename : null
   };
 
+  if (entry.filename && savesToSelectedFolder(state)) {
+    try {
+      await writeCaptureFolderManifest(
+        await writableSelectedCaptureFolder(state),
+        state.sessionId,
+        [...state.captures, entry],
+        {
+          startedAt: state.captures[0]?.actionAt || entry.actionAt,
+          endedAt: null,
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          captureMode: state.settings.captureMode
+        }
+      );
+    } catch (error) {
+      logLine(`CAPTURE_MANIFEST_CHECKPOINT_FAILED #${sequence} error=${error.message}`);
+    }
+  }
+
   const next = await setState({
     sequence,
     captures: [...state.captures, entry].slice(-300),
@@ -3071,13 +3300,13 @@ async function exportOutputsInWindow(outputFiles, excludedSequences) {
     params.set('excluded', normalizeSequenceList(excludedSequences).join(','));
   }
 
-  let outputWindowId = null;
+  let outputTabId = null;
   let completeOutputRequest;
   const resultPromise = new Promise((resolve) => {
     const finish = (value) => {
       clearTimeout(timer);
       chrome.runtime.onMessage.removeListener(onMessage);
-      chrome.windows.onRemoved.removeListener(onRemoved);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
       resolve(value);
     };
     const onMessage = (message) => {
@@ -3092,29 +3321,26 @@ async function exportOutputsInWindow(outputFiles, excludedSequences) {
       finish(message.error ? { error: message.error } : { ok: true, downloadIds });
     };
     const onRemoved = (windowId) => {
-      if (windowId === outputWindowId) finish({ error: 'The output window was closed early.' });
+      if (windowId === outputTabId) finish({ error: 'The background output task was closed early.' });
     };
     const timer = setTimeout(() => finish({ error: 'Timed out while writing output files.' }), 120000);
 
     chrome.runtime.onMessage.addListener(onMessage);
-    chrome.windows.onRemoved.addListener(onRemoved);
+    chrome.tabs.onRemoved.addListener(onRemoved);
     completeOutputRequest = finish;
   });
 
   try {
-    const win = await chrome.windows.create({
+    const tab = await chrome.tabs.create({
       url: `exporter.html?${params}`,
-      type: 'popup',
-      width: 420,
-      height: 200,
-      focused: false
+      active: false
     });
-    outputWindowId = win?.id;
-    if (!Number.isSafeInteger(outputWindowId)) {
-      completeOutputRequest({ error: 'The output window could not be opened.' });
+    outputTabId = tab?.id;
+    if (!Number.isSafeInteger(outputTabId)) {
+      completeOutputRequest({ error: 'The background output task could not be opened.' });
     }
   } catch (error) {
-    completeOutputRequest({ error: `Could not open the output window: ${error.message}` });
+    completeOutputRequest({ error: `Could not start the background output task: ${error.message}` });
   }
 
   const result = await resultPromise;
@@ -3123,8 +3349,8 @@ async function exportOutputsInWindow(outputFiles, excludedSequences) {
     for (const output of outputFiles) {
       logFileSave('completed', output.format, output.filename, 'downloads');
     }
-    if (Number.isSafeInteger(outputWindowId)) {
-      await chrome.windows.remove(outputWindowId).catch(() => {});
+    if (Number.isSafeInteger(outputTabId)) {
+      await chrome.tabs.remove(outputTabId).catch(() => {});
     }
   } else {
     for (const output of outputFiles) {
@@ -3211,16 +3437,20 @@ async function setCaptureNote(sessionId, sequence, value) {
 }
 
 function outputPages(frames) {
-  return frames.map((frame) => ({
-    title: frame.title,
-    note: frame.note,
-    url: frame.url || '(URL not recorded)',
-    time: frame.time || '(time not recorded)',
-    apiRows: frame.apiRows || [],
-    width: frame.width,
-    height: frame.height,
-    jpeg: base64ToBytes(frame.base64)
-  }));
+  return frames.map((frame) => {
+    const jpeg = base64ToBytes(frame.base64);
+    frame.base64 = '';
+    return {
+      title: frame.title,
+      note: frame.note,
+      url: frame.url || '(URL not recorded)',
+      time: frame.time || '(time not recorded)',
+      apiRows: frame.apiRows || [],
+      width: frame.width,
+      height: frame.height,
+      jpeg
+    };
+  });
 }
 
 function outputBytes(format, pages) {
@@ -3254,8 +3484,13 @@ function queueInterimOutput(sessionId, requestedSequence) {
   } else {
     queuedInterimOutputRequest = { sessionId, requestedSequence };
   }
-  if (interimOutputRunning) return interimOutputChain;
+  if (interimOutputRunning || pendingCaptureCount > 1) return interimOutputChain;
 
+  return startInterimOutputWorker();
+}
+
+function startInterimOutputWorker() {
+  if (interimOutputRunning || !queuedInterimOutputRequest) return interimOutputChain;
   interimOutputRunning = true;
   interimOutputChain = interimOutputChain
     .catch(() => {})
@@ -3281,10 +3516,7 @@ async function writeInterimOutput(sessionId, requestedSequence) {
   const state = await getState();
   if (!state.recording || state.sessionId !== sessionId || state.sequence < requestedSequence) return null;
 
-  const frames = await storedFrames();
-  if (!frames.length) return null;
-
-  const latestFrameSequence = Math.max(...frames.map(captureSequence));
+  let latestFrameSequence = state.sequence;
   const previousSequence = Number(state.interimOutput?.captureSequence) || 0;
   if (state.interimOutput?.sessionId === sessionId && previousSequence >= latestFrameSequence) {
     return state.interimOutput;
@@ -3294,11 +3526,19 @@ async function writeInterimOutput(sessionId, requestedSequence) {
     ? await writableSelectedCaptureFolder(state)
     : null;
   const filename = selectedFolder ? INTERIM_OUTPUT_FILENAME : interimDownloadFilename(state);
+  let captureCount = latestFrameSequence;
   logFileSave('requested', 'interim-pdf', filename, selectedFolder ? 'selected-folder' : 'downloads');
   try {
-    const result = selectedFolder
-      ? await writeCaptureFolderFile(selectedFolder, filename, outputBytes('pdf', outputPages(frames)))
-      : await exportOutputsInWindow([{ format: 'pdf', filename, overwrite: true }]);
+    let result;
+    if (selectedFolder) {
+      const frames = await storedFrames();
+      if (!frames.length) return null;
+      latestFrameSequence = Math.max(...frames.map(captureSequence));
+      captureCount = frames.length;
+      result = await writeCaptureFolderFile(selectedFolder, filename, outputBytes('pdf', outputPages(frames)));
+    } else {
+      result = await exportOutputsInWindow([{ format: 'pdf', filename, overwrite: true }]);
+    }
     if (result?.error) throw new Error(result.error);
 
     const latest = await getState();
@@ -3310,7 +3550,7 @@ async function writeInterimOutput(sessionId, requestedSequence) {
         destination: selectedFolder ? 'selected-folder' : 'downloads',
         downloadFilename: selectedFolder ? null : filename,
         downloadId: selectedFolder ? null : result.downloadIds?.at(-1) ?? null,
-        captureCount: frames.length,
+        captureCount,
         captureSequence: latestFrameSequence,
         updatedAt: new Date().toISOString()
       },
@@ -3354,23 +3594,40 @@ async function exportOutputsToSelectedFolder(directoryHandle, outputFiles, exclu
 // finishing it later could silently overwrite settings changed in the meantime. Opening the share
 // window happens afterwards, best-effort; until (or unless) it succeeds, captures already fall back
 // to the visible tab automatically because streamActive stays false.
+let modeSwitchGeneration = 0;
+let settingsUpdateChain = Promise.resolve();
+
 async function switchCaptureMode(newMode) {
+  const switchGeneration = ++modeSwitchGeneration;
   const state = await getState();
   const previousMode = state.settings.captureMode;
+  const reusableScreenStream = Boolean(
+    state.streamActive && Number.isSafeInteger(state.screenWindowId)
+  );
   logLine(`MODE_SWITCH ${previousMode} -> ${newMode}`);
   // Persist immediately so a mode switch followed by a crash still leaves diagnostics available.
   await flushLog();
-  if (previousMode === 'screen' && newMode !== 'screen') {
-    await closeScreenWindow();
-  }
-
   const next = await setState({
-    streamActive: newMode === 'screen' ? false : state.streamActive,
-    settings: { ...state.settings, captureMode: newMode, captureApi: newMode === 'api' }
+    streamActive: reusableScreenStream,
+    lastError: null,
+    settings: {
+      ...state.settings,
+      captureMode: newMode,
+      captureApi: newMode === 'api',
+      devToolsCaptureRequested: newMode === 'screen'
+    }
   });
   await configureApiHooks(next.trackedTabIds, next.settings.captureApi);
 
+  if (reusableScreenStream) {
+    await askScreen('SCREEN_SET_ACTIVE', { active: newMode === 'screen' });
+  }
+
   if (newMode === 'screen') {
+    if (reusableScreenStream) {
+      await chrome.windows.update(state.screenWindowId, { state: 'minimized' }).catch(() => {});
+      return next;
+    }
     // The switch may have been triggered from a different tab (one the recording opened, DevTools,
     // etc.) - bring the recorded tab and its window back into focus first, since the share picker
     // needs a real click and someone looking at the wrong tab could easily miss that it appeared.
@@ -3378,8 +3635,15 @@ async function switchCaptureMode(newMode) {
     await chrome.tabs.update(state.tabId, { active: true }).catch(() => {});
 
     ensureOffscreen()
-      .then(() => openScreenWindow())
+      .then(async () => {
+        const latest = await getState();
+        if (switchGeneration !== modeSwitchGeneration || latest.settings.captureMode !== 'screen') {
+          return { stale: true };
+        }
+        return openScreenWindow();
+      })
       .then(async (result) => {
+        if (result.stale || switchGeneration !== modeSwitchGeneration) return;
         if (result.error) {
           logLine(`MODE_SWITCH ${previousMode} -> screen failed: ${result.error}`);
           await flushLog();
@@ -3395,6 +3659,7 @@ async function switchCaptureMode(newMode) {
         }
       })
       .catch(async (error) => {
+        if (switchGeneration !== modeSwitchGeneration) return;
         logLine(`MODE_SWITCH ${previousMode} -> screen failed: ${error.message}`);
         await flushLog();
         await setState({ lastError: `Could not switch to Screen/window mode: ${error.message}` });
@@ -3550,6 +3815,7 @@ async function startRecording(tab, settings, outputFolderName = null, requestedS
   lastTabTitles.set(tab.id, tab.title || '');
 
   const merged = { ...defaultState.settings, ...(await getState()).settings, ...settings };
+  merged.devToolsCaptureRequested = merged.captureMode === 'screen';
   merged.captureApi = merged.captureMode === 'api';
   let streamActive = false;
 
@@ -3557,6 +3823,9 @@ async function startRecording(tab, settings, outputFolderName = null, requestedS
     await ensureOffscreen();
 
     if (merged.captureMode === 'screen') {
+      if (!isDevToolsOpenForTab(tab.id)) {
+        throw new Error('Open DevTools before enabling Screen / window capture.');
+      }
       const result = await openScreenWindow();
       if (result.error) throw new Error(result.error);
       streamActive = true;
@@ -3659,13 +3928,90 @@ async function restoreFolderFrames(captures) {
   return { captures: restoredCaptures, skippedFiles };
 }
 
+function captureFileIdentity(capture) {
+  const sequence = Number(capture?.sequence);
+  const filename = String(capture?.filename || '').split(/[\\/]/).pop()?.toLowerCase();
+  return Number.isSafeInteger(sequence) && sequence > 0 && filename
+    ? `${sequence}:${filename}`
+    : null;
+}
+
+async function mergeStoredFolderCaptureMetadata(folder, restored, sourceState) {
+  if (!restored.sessionId || sourceState?.sessionId !== restored.sessionId) return restored;
+
+  const storedCaptures = new Map(
+    (sourceState.captures || [])
+      .map((capture) => [captureFileIdentity(capture), capture])
+      .filter(([identity]) => Boolean(identity))
+  );
+  if (!storedCaptures.size) return restored;
+
+  const metadataFields = [
+    'reason', 'label', 'url', 'title', 'note', 'mode', 'apiCalls',
+    'capturedAt', 'actionAt', 'requestSequence'
+  ];
+  let changed = false;
+  const captures = restored.captures.map((capture) => {
+    const stored = storedCaptures.get(captureFileIdentity(capture.entry));
+    if (!stored) return capture;
+
+    const entry = { ...capture.entry };
+    for (const field of metadataFields) {
+      const value = stored[field];
+      if (value === undefined || value === null || value === '') continue;
+      if (field === 'reason' && value === 'resumed' && entry.reason !== 'resumed') continue;
+      if (entry[field] !== value) {
+        entry[field] = value;
+        changed = true;
+      }
+    }
+    return { ...capture, entry };
+  });
+
+  if (changed) {
+    try {
+      await writeCaptureFolderManifest(
+        folder,
+        restored.sessionId,
+        captures.map(({ entry }) => entry)
+      );
+    } catch (error) {
+      logLine(`FOLDER_METADATA_REPAIR_FAILED error=${error.message}`);
+    }
+  }
+  return { ...restored, captures };
+}
+
 async function prepareResumeFromFolder() {
   const state = await recoverRecordingSession(undefined, true);
   if (state.recording) return setState({ lastError: 'Stop the current recording before selecting a resume folder.' });
 
   const folder = await writableCaptureFolder();
+  const restored = await mergeStoredFolderCaptureMetadata(folder, await scanCaptureFolder(folder), state);
+  const pendingResumeFolder = { name: restored.folderName };
+  if (!restored.captures.length) {
+    return setState({ pendingResumeFolder, lastError: null });
+  }
+
+  const sessionId = restored.sessionId || `folder_${fileTimestamp(new Date())}`;
+  await clearStoredFrames();
   return setState({
-    pendingResumeFolder: { name: folder.name || 'selected folder' },
+    recording: false,
+    outputFolder: null,
+    pendingResumeFolder,
+    sessionId,
+    sequence: restored.nextSequence - 1,
+    captures: restored.captures.map(({ entry }) => entry).slice(-300),
+    pdfExcludedSequences: [],
+    completedEvidence: {
+      sessionId,
+      captureCount: restored.captures.length,
+      outputFolderName: restored.folderName,
+      downloadDirectory: null,
+      completedAt: new Date().toISOString()
+    },
+    interruptedRecording: null,
+    folderAccessNeeded: false,
     lastError: null
   });
 }
@@ -3673,7 +4019,12 @@ async function prepareResumeFromFolder() {
 async function resumeRecordingFromFolder(tab, settings) {
   await interimOutputChain.catch(() => {});
   const folder = await writableCaptureFolder();
-  const restored = await scanCaptureFolder(folder);
+  const previousState = await getState();
+  const restored = await mergeStoredFolderCaptureMetadata(
+    folder,
+    await scanCaptureFolder(folder),
+    previousState
+  );
   if (!restored.captures.length) {
     const started = await startRecording(tab, { ...settings, savePng: true }, restored.folderName);
     return started.recording ? { ...started, notice: EMPTY_CAPTURE_FOLDER_NOTICE } : started;
@@ -3682,12 +4033,13 @@ async function resumeRecordingFromFolder(tab, settings) {
   const sessionId = String(restored.sessionId || '').trim() || `resumed_${fileTimestamp(new Date())}`;
   const merged = {
     ...defaultState.settings,
-    ...(await getState()).settings,
+    ...previousState.settings,
     ...settings,
     captureMode: settings?.captureMode || 'tab',
     savePng: true,
     savePdf: true
   };
+  merged.devToolsCaptureRequested = merged.captureMode === 'screen';
   merged.captureApi = merged.captureMode === 'api';
   let streamActive = false;
   let restoredFrames;
@@ -3713,6 +4065,9 @@ async function resumeRecordingFromFolder(tab, settings) {
   try {
     await ensureOffscreen();
     if (merged.captureMode === 'screen') {
+      if (!isDevToolsOpenForTab(tab.id)) {
+        throw new Error('Open DevTools before enabling Screen / window capture.');
+      }
       const result = await openScreenWindow();
       if (result.error) throw new Error(result.error);
       streamActive = true;
@@ -3915,28 +4270,33 @@ function evidenceDownloadDirectory(evidence) {
   return evidence.downloadDirectory || sessionDownloadDirectory(evidence);
 }
 
-async function evidenceOutputFiles(requestedOutputFilename, evidence, formats, directoryHandle) {
-  const fallback = `${evidence.sessionId}_evidence`;
-  const base = outputFilenameBase(requestedOutputFilename, fallback);
-  const downloadDirectory = evidenceDownloadDirectory(evidence);
-  const hasNameConflict = async (outputFiles) => {
-    const checks = outputFiles.map((output) => (
+function evidenceFolderName(directory) {
+  return String(directory || '').replace(/\\/g, '/').split('/').filter(Boolean).at(-1) || 'evidence';
+}
+
+async function timestampedOutputFiles(folderName, formats, directoryHandle, downloadDirectory) {
+  const base = sanitize(folderName, 100);
+  const timestamp = fileTimestamp(new Date());
+  for (let index = 0; index < 100; index += 1) {
+    const outputFiles = outputFilesFor(versionedEvidenceBase(base, timestamp, index), base, formats);
+    const exists = await Promise.all(outputFiles.map((output) => (
       directoryHandle
         ? folderOutputFileExists(directoryHandle, output.filename)
         : downloadedOutputFileExists(`${downloadDirectory}/${output.filename}`)
-    ));
-    return (await Promise.all(checks)).some(Boolean);
-  };
-
-  let outputFiles = outputFilesFor(base, fallback, formats);
-  if (!(await hasNameConflict(outputFiles))) return outputFiles;
-
-  const timestamp = fileTimestamp(new Date());
-  for (let index = 0; index < 100; index += 1) {
-    outputFiles = outputFilesFor(versionedEvidenceBase(base, timestamp, index), fallback, formats);
-    if (!(await hasNameConflict(outputFiles))) return outputFiles;
+    )));
+    if (!exists.some(Boolean)) return outputFiles;
   }
   throw new Error('Could not choose an unused evidence document name.');
+}
+
+async function evidenceOutputFiles(evidence, formats, directoryHandle) {
+  const downloadDirectory = evidenceDownloadDirectory(evidence);
+  return timestampedOutputFiles(
+    directoryHandle?.name || evidence.outputFolderName || evidenceFolderName(downloadDirectory),
+    formats,
+    directoryHandle,
+    downloadDirectory
+  );
 }
 
 function savedOutputFields(outputFiles) {
@@ -4026,20 +4386,22 @@ async function exportOutputNow(requestedOutputFilename, outputFormats, excludedS
   }
   logLine(`OUTPUT_EXPORT checkpoint formats=${Object.entries(formats).filter(([, enabled]) => enabled).map(([format]) => format).join(',')} excluded=${excluded.length} captures=${state.captures.length}`);
 
-  const outputFiles = outputFilesFor(
-    requestedOutputFilename,
-    `${state.sessionId}_checkpoint`,
-    formats
-  );
   const selectedFolder = hasSelectedCaptureFolder(state)
     ? await writableSelectedCaptureFolder(state)
     : null;
+  const downloadDirectory = sessionDownloadDirectory(state);
+  const outputFiles = await timestampedOutputFiles(
+    selectedFolder?.name || evidenceFolderName(downloadDirectory),
+    formats,
+    selectedFolder,
+    downloadDirectory
+  );
   const result = selectedFolder
     ? await exportOutputsToSelectedFolder(selectedFolder, outputFiles, excluded)
     : await exportOutputsInWindow(
       outputFiles.map((output) => ({
         ...output,
-        filename: `${sessionDownloadDirectory(state)}/${output.filename}`
+        filename: `${downloadDirectory}/${output.filename}`
       })),
       excluded
     );
@@ -4076,10 +4438,6 @@ async function generateEvidence(requestedOutputFilename, excludedSequences, outp
   if (!evidence) {
     return setState({ lastError: 'There is no completed recording available for evidence generation.' });
   }
-  if (!(await storedFrames()).length) {
-    return setState({ lastError: 'The completed screenshots are no longer available for evidence generation.' });
-  }
-
   const formats = normalizeOutputFormats(outputFormats, state.settings);
   if (!hasOutputFormat(formats)) {
     return setState({ lastError: 'Choose PDF, Word, or both before generating evidence.' });
@@ -4090,12 +4448,37 @@ async function generateEvidence(requestedOutputFilename, excludedSequences, outp
   const selectedFolder = evidence.outputFolderName
     ? await writableCompletedEvidenceFolder(evidence)
     : null;
-  const outputFiles = await evidenceOutputFiles(
-    requestedOutputFilename,
-    evidence,
-    formats,
-    selectedFolder
-  );
+  let frames = await storedFrames();
+  if (selectedFolder) {
+    const restored = await mergeStoredFolderCaptureMetadata(
+      selectedFolder,
+      await scanCaptureFolder(selectedFolder),
+      state
+    );
+    const folderSequences = restored.captures.map(({ entry }) => entry.sequence);
+    const storedSequences = frames.map((frame) => frame.sequence);
+    const framesMatchFolder =
+      folderSequences.length === storedSequences.length &&
+      folderSequences.every((sequence, index) => sequence === storedSequences[index]);
+    if (restored.captures.length && !framesMatchFolder) {
+      await clearStoredFrames();
+      await ensureOffscreen();
+      const restoredFrames = await restoreFolderFrames(restored.captures);
+      frames = await storedFrames();
+      const captures = restoredFrames.captures.map(({ entry }) => entry);
+      const nextEvidence = { ...evidence, captureCount: captures.length };
+      await setState({
+        sequence: restored.nextSequence - 1,
+        captures: captures.slice(-300),
+        completedEvidence: nextEvidence
+      });
+    }
+  }
+  if (!frames.length) {
+    return setState({ lastError: 'The completed screenshots are no longer available for evidence generation.' });
+  }
+
+  const outputFiles = await evidenceOutputFiles(evidence, formats, selectedFolder);
   logLine(`EVIDENCE_EXPORT formats=${Object.entries(formats).filter(([, enabled]) => enabled).map(([format]) => format).join(',')} excluded=${excluded.length}`);
 
   // Evidence is generated after the recording ended, when the normal recording-level download
@@ -4272,13 +4655,20 @@ async function stopRecording(
     const formats = normalizeOutputFormats(outputFormats, state.settings);
     if (createPdf && hasOutputFormat(formats) && state.captures.length) {
       logLine(`OUTPUT_EXPORT final formats=${Object.entries(formats).filter(([, enabled]) => enabled).map(([format]) => format).join(',')} excluded=${excluded.length} captures=${state.captures.length}`);
-      outputFiles = outputFilesFor(requestedOutputFilename, state.sessionId, formats);
-      const result = savedToFolder
-        ? await exportOutputsToSelectedFolder(await writableSelectedCaptureFolder(state), outputFiles, excluded)
+      const selectedFolder = savedToFolder ? await writableSelectedCaptureFolder(state) : null;
+      const downloadDirectory = sessionDownloadDirectory(state);
+      outputFiles = await timestampedOutputFiles(
+        selectedFolder?.name || evidenceFolderName(downloadDirectory),
+        formats,
+        selectedFolder,
+        downloadDirectory
+      );
+      const result = selectedFolder
+        ? await exportOutputsToSelectedFolder(selectedFolder, outputFiles, excluded)
         : await exportOutputsInWindow(
           outputFiles.map((output) => ({
             ...output,
-            filename: `${sessionDownloadDirectory(state)}/${output.filename}`
+            filename: `${downloadDirectory}/${output.filename}`
           })),
           excluded
         );
@@ -4313,10 +4703,11 @@ async function stopRecording(
         btoa(unescape(encodeURIComponent(JSON.stringify(manifest, null, 2))));
       if (savedToFolder) {
         try {
-          await writeCaptureFolderFile(
+          await writeCaptureFolderManifest(
             await writableSelectedCaptureFolder(state),
-            manifestFilename,
-            JSON.stringify(manifest, null, 2)
+            state.sessionId,
+            manifestCaptures,
+            manifest
           );
           logFileSave('completed', 'manifest', manifestFilename, manifestDestination);
         } catch (error) {
@@ -4429,9 +4820,9 @@ async function openOutputDialog(mode) {
 
 /* ---------------------------------------------------------------- listeners */
 
-async function isRecordedTab(tabId) {
-  const state = await recoverRecordingSession(tabId);
-  return state.recording && state.trackedTabIds.includes(tabId);
+function isTrackableFlowTab(tab) {
+  const url = String(tab?.url || '');
+  return !url || /^(?:https?:|chrome:\/\/newtab|edge:\/\/newtab|about:(?:blank|newtab))/i.test(url);
 }
 
 // Whichever of the session's tabs the user is actually looking at is the one background-driven
@@ -4442,10 +4833,23 @@ async function adoptActiveTab(tabId) {
   const state = await getState();
   if (!state.recording || tabId === state.tabId) return;
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab) return;
+  if (!tab || !isTrackableFlowTab(tab)) return;
   logLine(`ACTIVE_TAB now tabId=${tabId} url=${shortUrl(tab.url || '')}`);
   await trackSessionTab(state, tab);
-  await setState({ tabId, windowId: tab.windowId });
+  const next = await setState({ tabId, windowId: tab.windowId });
+  if (next.settings.devToolsCaptureRequested) {
+    await applyDevToolsPresence(tabId, isDevToolsOpenForTab(tabId));
+  }
+}
+
+async function getActiveRecordingState() {
+  let state = await recoverRecordingSession(undefined, true);
+  const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+  if (state.recording && isTrackableFlowTab(activeTab)) {
+    await adoptActiveTab(activeTab.id);
+    state = await getState();
+  }
+  return state;
 }
 
 async function trackAndFocusNewTab(state, tab) {
@@ -4456,6 +4860,7 @@ async function trackAndFocusNewTab(state, tab) {
 }
 
 async function captureRecordedPageEvent(details, reason, label, expectedTitle = '') {
+  await trackingUpdateChain.catch(() => {});
   const state = await recoverRecordingSession(details.tabId);
   if (!state.recording || !state.trackedTabIds.includes(details.tabId)) return;
   const capture = captureNow(reason, label, state, undefined, {
@@ -4526,7 +4931,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 // tab it opened) should resume capturing there too, not leave the recording pointed at whichever one
 // last had activity.
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  if (await isRecordedTab(tabId)) await adoptActiveTab(tabId);
+  await adoptActiveTab(tabId);
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
@@ -4556,8 +4961,13 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   try {
     const sourceTabId = linkTarget?.sourceTabId ?? tab.openerTabId;
     const state = await recoverRecordingSession(sourceTabId);
-    if (!state.recording || !state.trackedTabIds.includes(sourceTabId)) return;
-    await trackAndFocusNewTab(state, tab);
+    if (!state.recording) return;
+    if (state.trackedTabIds.includes(sourceTabId)) {
+      await trackAndFocusNewTab(state, tab);
+    } else if (tab.active && isTrackableFlowTab(tab)) {
+      await adoptActiveTab(tab.id);
+      logLine(`NEW_ACTIVE_TAB now tabId=${tab.id} url=${shortUrl(tab.url || '')}`);
+    }
   } finally {
     completeNewTabLinkHandoff(linkTarget);
   }
@@ -4569,19 +4979,20 @@ chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
   await trackSessionTab(state, { id: tabId, windowId: attachInfo.newWindowId });
 });
 
-// DevTools panel changes are not observable, so the user triggers those captures by hotkey.
+// Browser APIs do not expose DevTools panel content. The retained shared-screen helper handles
+// automatic pixel changes, while these commands provide explicit instant and Screen + DevTools shots.
 chrome.commands.onCommand.addListener(async (command) => {
-  const state = await recoverRecordingSession(undefined, true);
+  const state = await getActiveRecordingState();
   if (!state.recording || state.paused) return;
 
   const target = { tabId: state.tabId, windowId: state.windowId };
-  if (command === 'capture-panel') await captureNow('devtools-panel', undefined, state, undefined, target);
+  if (command === 'capture-panel') await captureNow('instant-screenshot', undefined, state, undefined, target);
   if (command === 'capture-whole-page') {
     await chrome.action.openPopup?.().catch(() => {});
     await captureNow('manual-hotkey', undefined, state, undefined, target);
   }
-  if (command === 'capture-later' && (await canCaptureDevTools(state))) {
-    await captureNow('devtools-panel', undefined, state, undefined, target);
+  if (command === 'capture-later' && (await canCaptureSharedScreen(state))) {
+    await captureDevToolsAfterPopupCloses(await getState());
   }
 });
 
@@ -4625,7 +5036,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message.type) {
       case 'GET_STATE':
-        sendResponse(await withDevToolsStatus(await recoverRecordingSession()));
+        {
+          const state = await withDevToolsStatus(await recoverRecordingSession());
+          sendResponse({ ...state, pendingCaptureCount, memoryStatus: currentMemoryStatus() });
+        }
+        break;
+
+      case 'DEVTOOLS_HEARTBEAT':
+        if (message.source === 'devtools-page') {
+          await markDevToolsPresence(Number(message.tabId), true);
+        }
+        sendResponse({ ok: true });
+        break;
+
+      case 'DEVTOOLS_CLOSED':
+        if (message.source === 'devtools-page') {
+          const tabId = Number(message.tabId);
+          devToolsPortsByTab.delete(tabId);
+          await markDevToolsPresence(tabId, false);
+        }
+        sendResponse({ ok: true });
         break;
 
       case 'CHECK_SESSION_FOLDER':
@@ -4636,11 +5066,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const state = await getState();
         const accepted = Boolean(
           message.source === 'screen-window' &&
-          state.recording &&
-          state.settings.captureMode === 'screen'
+          state.recording
         );
         if (accepted) {
           await setState({ streamActive: true, lastError: null });
+          await askScreen('SCREEN_SET_ACTIVE', {
+            active: state.settings.captureMode === 'screen'
+          });
           if (Number.isSafeInteger(state.screenWindowId)) {
             await chrome.windows.update(state.screenWindowId, { state: 'minimized' }).catch(() => {});
           }
@@ -4654,7 +5086,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const accepted = Boolean(
           message.source === 'screen-window' &&
           state.recording &&
-          state.settings.captureMode === 'screen'
+          state.streamActive
         );
         if (accepted) {
           await markScreenUnavailable(
@@ -4662,6 +5094,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           );
         }
         sendResponse({ ok: true, accepted });
+        break;
+      }
+
+      case 'SCREEN_UNHEALTHY': {
+        const state = await getState();
+        const accepted = Boolean(
+          message.source === 'screen-window' &&
+          state.recording &&
+          state.streamActive
+        );
+        if (accepted) {
+          await markScreenUnavailable(
+            'Screen evidence is blank or incomplete. Select Entire Screen again; captures are paused until the shared screen is healthy.'
+          );
+        }
+        sendResponse({ ok: true, accepted });
+        break;
+      }
+
+      case 'SCREEN_MEMORY_STATUS': {
+        if (message.source === 'screen-window') {
+          screenMemorySnapshot = {
+            jsHeapUsedBytes: message.jsHeapUsedBytes,
+            jsHeapLimitBytes: message.jsHeapLimitBytes,
+            deviceMemoryGb: message.deviceMemoryGb,
+            screenBufferedBytes: message.screenBufferedBytes,
+            screenBufferedFrames: message.screenBufferedFrames
+          };
+        }
+        sendResponse({ ok: true });
         break;
       }
 
@@ -4674,6 +5136,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           !state.paused &&
           state.settings.captureMode === 'screen' &&
           state.streamActive &&
+          !hasPendingUserActionCapture(state.tabId) &&
           message.frameId
         );
         if (accepted) {
@@ -4714,11 +5177,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
         try {
-          sendResponse(
-            current.pendingResumeFolder?.name
-              ? await resumeRecordingFromFolder(tab, message.settings)
-              : await startRecording(tab, message.settings, null, message.sessionFolderName)
-          );
+          sendResponse(await startRecording(tab, message.settings, null, message.sessionFolderName));
         } catch (error) {
           sendResponse(await setState({
             recording: false,
@@ -4870,26 +5329,89 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
 
       case 'CAPTURE_NOW':
-        await captureNow('manual', undefined, await recoverRecordingSession(undefined, true));
+        await captureNow('manual', undefined, await getActiveRecordingState());
         sendResponse(await getState());
         break;
 
+      case 'CAPTURE_PANEL':
+        await captureNow('instant-screenshot', undefined, await getActiveRecordingState());
+        sendResponse(await getState());
+        break;
+
+      case 'CAPTURE_WHOLE_PAGE': {
+        const state = await getActiveRecordingState();
+        if (state.recording && !state.paused) {
+          const queuedState = await setState({
+            fullPageProgress: {
+              active: true,
+              label: 'Preparing full-page screenshot',
+              percent: 0,
+              tabId: state.tabId
+            }
+          });
+          const wholePageState = {
+            ...queuedState,
+            settings: { ...queuedState.settings, fullPage: true }
+          };
+          captureNow('manual-hotkey', undefined, wholePageState, undefined, {
+            tabId: state.tabId,
+            windowId: state.windowId,
+            actionAt: Date.now()
+          });
+          sendResponse(queuedState);
+          break;
+        }
+        sendResponse(state);
+        break;
+      }
+
       case 'CAPTURE_LATER': {
-        const state = await recoverRecordingSession(undefined, true);
-        const devToolsOpen = await canCaptureDevTools(state);
-        sendResponse({ ...state, devToolsOpen });
-        if (!state.paused && devToolsOpen) captureDevToolsAfterPopupCloses(state);
+        const state = await getActiveRecordingState();
+        const screenCaptureAvailable = !state.paused && await canCaptureSharedScreen(state);
+        if (!screenCaptureAvailable) {
+          sendResponse({ ...state, screenCaptureAvailable: false });
+          break;
+        }
+        sendResponse({
+          ...await captureDevToolsAfterPopupCloses(await getState()),
+          screenCaptureAvailable: true
+        });
         break;
       }
 
       case 'SET_SETTINGS': {
-        const state = await recoverRecordingSession();
-        const { captureMode, ...rest } = message.settings;
-        const next =
-          state.recording && captureMode && captureMode !== state.settings.captureMode
-            ? await switchCaptureMode(captureMode)
-            : state;
-        sendResponse(await setState({ settings: { ...next.settings, ...(state.recording ? rest : message.settings) } }));
+        settingsUpdateChain = settingsUpdateChain
+          .catch(() => {})
+          .then(async () => {
+            const state = await recoverRecordingSession();
+            const { captureMode, ...rest } = message.settings;
+            let targetTabId = state.tabId;
+            if (!state.recording) {
+              const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+              targetTabId = activeTab?.id;
+            }
+            if (captureMode === 'screen' && !isDevToolsOpenForTab(targetTabId)) {
+              return setState({
+                lastError: 'Open DevTools before enabling Screen / window capture.',
+                settings: {
+                  ...state.settings,
+                  ...rest,
+                  captureMode: 'tab',
+                  captureApi: false,
+                  devToolsCaptureRequested: false
+                }
+              });
+            }
+            const next =
+              state.recording && captureMode && (
+                captureMode !== state.settings.captureMode ||
+                (captureMode !== 'screen' && state.settings.devToolsCaptureRequested)
+              )
+                ? await switchCaptureMode(captureMode)
+                : state;
+            return setState({ settings: { ...next.settings, ...(state.recording ? rest : message.settings) } });
+          });
+        sendResponse(await settingsUpdateChain);
         break;
       }
 

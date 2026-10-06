@@ -5,10 +5,13 @@ import {
 } from './capture-folder.js';
 
 const statusEl = document.getElementById('status');
+const memoryStatusEl = document.getElementById('memoryStatus');
 const extensionVersionEl = document.getElementById('extensionVersion');
 const toastEl = document.getElementById('toast');
 const toggleEl = document.getElementById('toggle');
+const continueRecordingEl = document.getElementById('continueRecording');
 const pauseResumeEl = document.getElementById('pauseResume');
+const captureInstantEl = document.getElementById('captureInstant');
 const captureNowEl = document.getElementById('captureNow');
 const captureLaterEl = document.getElementById('captureLater');
 const saveFlowEl = document.getElementById('saveFlow');
@@ -47,6 +50,9 @@ const extensionOnlyButtons = [...document.querySelectorAll('button')];
 const CAPTURE_LIST_PAGE_SIZE = 50;
 
 let awaitingChoice = false;
+let stoppingRecording = false;
+let stoppingKeepsFiles = false;
+let stoppingStatusText = '';
 let pendingOutputAction = null;
 let returnToStopChoice = false;
 let standalonePopup = false;
@@ -63,6 +69,8 @@ let renderedState = null;
 let toastTimer = 0;
 let selectedCaptureFolderHandle = null;
 let selectedCaptureFolderHandleLoad = null;
+let captureModeChosenByUser = false;
+let settingsChangeChain = Promise.resolve();
 
 const controls = {
   captureMode: document.getElementById('captureMode'),
@@ -245,6 +253,15 @@ function readSettings() {
   };
 }
 
+function requireAvailableCaptureMode() {
+  const option = controls.captureMode.selectedOptions[0];
+  if (controls.captureMode.value && option && !option.disabled) return true;
+  statusEl.textContent = 'Choose an available capture source before starting.';
+  statusEl.className = 'status error';
+  controls.captureMode.focus();
+  return false;
+}
+
 function suggestedSessionFolderName(date = new Date()) {
   const pad = (value, width = 2) => String(value).padStart(width, '0');
   return (
@@ -283,22 +300,51 @@ function updateCaptureOptionsSummary() {
 }
 
 async function beginRecording(sessionFolderName) {
-  const state = await getPopupState();
-  const startsFromResumeFolder = Boolean(state.pendingResumeFolder?.name);
+  if (!requireAvailableCaptureMode()) return false;
   const started = await send('START', {
     settings: readSettings(),
-    ...(startsFromResumeFolder ? {} : { sessionFolderName })
+    sessionFolderName
   });
   sessionFolderPromptEl.hidden = true;
+  mainActionsEl.classList.remove('awaiting-session-folder');
   awaitingChoice = false;
-  if (startsFromResumeFolder && started.recording) {
-    captureSelectionSessionId = null;
-    knownCaptureSequences = new Set();
-    selectedCaptureSequences = new Set();
-  }
+  captureSelectionSessionId = null;
+  knownCaptureSequences = new Set();
+  selectedCaptureSequences = new Set();
   render(started);
   if (started.notice) showToast(started.notice);
   else if (started.lastError) showToast(started.lastError, 'error');
+  return Boolean(started.recording);
+}
+
+async function continueFromAttachedFolder() {
+  if (!requireAvailableCaptureMode()) return false;
+  const directoryHandle = selectedCaptureFolderHandle;
+  if (directoryHandle?.kind !== 'directory') {
+    showToast('Choose the folder containing earlier screenshots to continue.');
+    const selectedFolder = await selectResumeCaptureFolder();
+    if (!selectedFolder) return false;
+    return continueFromAttachedFolder();
+  }
+
+  continueRecordingEl.disabled = true;
+  try {
+    await renewSelectedCaptureFolderWritePermission(directoryHandle.name);
+    const resumed = await send('RESUME_FROM_FOLDER', { settings: readSettings() });
+    awaitingChoice = false;
+    captureSelectionSessionId = null;
+    knownCaptureSequences = new Set();
+    selectedCaptureSequences = new Set();
+    render(resumed);
+    if (resumed.notice) showToast(resumed.notice);
+    else if (resumed.lastError) showToast(resumed.lastError, 'error');
+    return Boolean(resumed.recording);
+  } catch (error) {
+    showActionError('Continue recording', error);
+    return false;
+  } finally {
+    updateResumeCaptureButton(renderedState);
+  }
 }
 
 function captureSequences(captures = currentCaptures) {
@@ -545,13 +591,13 @@ function isFolderReconnectNotice(state) {
 
 function updateResumeCaptureButton(state) {
   const reconnecting = canReconnectCaptureFolder(state);
-  const pendingFolderName = !state?.recording ? state?.pendingResumeFolder?.name : null;
-  resumeCaptureFromFolderEl.textContent = reconnecting
-    ? 'Reconnect capture folder'
-    : pendingFolderName
-      ? 'Change resume capture folder'
-      : 'Resume capture from folder';
+  const folderAttached = selectedCaptureFolderHandle?.kind === 'directory';
+  resumeCaptureFromFolderEl.hidden = !reconnecting && folderAttached;
+  resumeCaptureFromFolderEl.textContent = reconnecting ? 'Reconnect capture folder' : 'Resume capture from folder';
   resumeCaptureFromFolderEl.disabled = Boolean(state?.recording) && !reconnecting;
+  continueRecordingEl.hidden = Boolean(state?.recording || state?.recordingElsewhere);
+  continueRecordingEl.disabled =
+    standalonePopup || Boolean(state?.recording || state?.recordingElsewhere);
 }
 
 function hasCompletedEvidence(state) {
@@ -583,6 +629,42 @@ function interruptedRecordingMessage(state) {
     : 'Recording ended after the browser restarted.';
 }
 
+function formatMemoryBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return 'unknown';
+  const units = ['B', 'KiB', 'MiB', 'GiB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function renderMemoryStatus(state) {
+  if (!state?.recording && !(Number(state?.pendingCaptureCount) > 0)) {
+    memoryStatusEl.hidden = true;
+    return;
+  }
+
+  const memory = state?.memoryStatus;
+  const level = memory?.level || 'unavailable';
+  const label = { normal: 'Normal', elevated: 'Elevated', high: 'High' }[level] || 'Limited visibility';
+  const details = memory?.memoryApiAvailable
+    ? `JS heap headroom ~${formatMemoryBytes(memory.estimatedHeapHeadroomBytes)}`
+    : 'JS heap unavailable';
+  const bufferedFrames = Number(memory?.screenBufferedFrames) || 0;
+  const bufferedBytes = Number(memory?.screenBufferedBytes) || 0;
+  const prebufferLimit = Number(memory?.maxPrebufferedCaptureFrames) || 0;
+
+  memoryStatusEl.textContent =
+    `Memory estimate: ${label} · ${details} · free system RAM unavailable · ` +
+    `screen buffer ${bufferedFrames} frame(s) / ` +
+    `${formatMemoryBytes(bufferedBytes)} · prebuffer cap ${prebufferLimit}`;
+  memoryStatusEl.className = `memory-status pressure-${level}`;
+  memoryStatusEl.hidden = false;
+}
+
 function render(state) {
   renderedState = state ?? null;
   const sessionRecording = Boolean(state?.recording);
@@ -593,19 +675,34 @@ function render(state) {
   currentSettings = settings;
   syncCaptureSelection(state?.sessionId ?? null, state?.captures ?? [], state?.pdfExcludedSequences);
   renderFullPageProgress(state?.fullPageProgress);
+  renderMemoryStatus(state);
 
   // Polling must not steal a control the user is currently interacting with.
   const apply = (control, assign) => {
     if (document.activeElement !== control) assign();
   };
-  apply(controls.captureMode, () => (controls.captureMode.value = settings.captureMode ?? 'tab'));
+  const screenOption = controls.captureMode.querySelector('option[value="screen"]');
+  const screenAvailable = Boolean(state?.devToolsOpen);
+  if (screenOption) screenOption.disabled = !screenAvailable;
+  apply(controls.captureMode, () => {
+    const selectedOption = controls.captureMode.selectedOptions[0];
+    if (captureModeChosenByUser && controls.captureMode.value && !selectedOption?.disabled) return;
+    const preferredMode = settings.devToolsCaptureRequested ? 'screen' : settings.captureMode ?? 'tab';
+    const preferredOption = controls.captureMode.querySelector(`option[value="${preferredMode}"]`);
+    if (!sessionRecording && preferredOption?.disabled) {
+      controls.captureMode.value = '';
+      captureModeChosenByUser = false;
+      return;
+    }
+    controls.captureMode.value = preferredMode;
+  });
   apply(controls.captureOnClick, () => (controls.captureOnClick.checked = settings.captureOnClick !== false));
   apply(controls.captureOnScroll, () => (controls.captureOnScroll.checked = settings.captureOnScroll !== false));
   apply(controls.fullPage, () => (controls.fullPage.checked = settings.fullPage !== false));
   apply(controls.savePng, () => (controls.savePng.checked = settings.savePng !== false));
   apply(controls.savePdf, () => (controls.savePdf.checked = settings.savePdf !== false));
   updateCaptureOptionsSummary();
-  settingsEl.classList.toggle('locked', sessionRecording);
+  settingsEl.classList.toggle('locked', recordingElsewhere);
   for (const control of Object.values(controls)) {
     control.disabled = standalonePopup || recordingElsewhere;
   }
@@ -614,19 +711,25 @@ function render(state) {
   const reconnectingFolder = canReconnectCaptureFolder(state);
   const problem = state?.error || state?.interimOutputError || (isFolderReconnectNotice(state) ? null : state?.lastError);
   const interruptedMessage = interruptedRecordingMessage(state);
-  if (problem) {
+  const bufferedCount = Math.max(0, Number(state?.pendingCaptureCount) || 0);
+  const bufferedStatus = bufferedCount ? ` \u00b7 ${bufferedCount} buffered` : '';
+  const captureModeSelectionNeeded = !sessionRecording && !controls.captureMode.value;
+  if (captureModeSelectionNeeded) {
+    statusEl.textContent = 'Choose an available capture source before starting.';
+    statusEl.className = 'status error';
+  } else if (problem) {
     statusEl.textContent = problem;
     statusEl.className = 'status error';
   } else if (recordingElsewhere) {
     statusEl.textContent = 'This tab is not being recorded.';
     statusEl.className = 'status idle';
   } else if (paused) {
-    statusEl.textContent = `Paused \u00b7 ${state.sequence} screenshot(s)`;
+    statusEl.textContent = `Paused \u00b7 ${state.sequence} screenshot(s)${bufferedStatus}`;
     statusEl.className = 'status paused';
   } else if (recording) {
     const api = settings.captureApi ? ` \u00b7 ${state.apiSeen} API call(s)` : '';
     const folderFallback = reconnectingFolder ? ' \u00b7 saving in Downloads' : '';
-    statusEl.textContent = `Recording \u00b7 ${state.sequence} screenshot(s)${api}${folderFallback}`;
+    statusEl.textContent = `Recording \u00b7 ${state.sequence} screenshot(s)${bufferedStatus}${api}${folderFallback}`;
     statusEl.className = 'status recording';
   } else if (interruptedMessage) {
     statusEl.textContent = interruptedMessage;
@@ -643,14 +746,15 @@ function render(state) {
     ? 'Recording on another tab'
     : recording
       ? 'Stop recording'
-      : 'Start recording';
+      : 'Start new recording';
   toggleEl.classList.toggle('stop', recording);
   if (!awaitingChoice) toggleEl.disabled = standalonePopup || recordingElsewhere;
   pauseResumeEl.hidden = !recording;
   pauseResumeEl.disabled = !recording;
   pauseResumeEl.textContent = paused ? 'Continue recording' : 'Pause recording';
+  captureInstantEl.disabled = !recording || paused;
   captureNowEl.disabled = !recording || paused || Boolean(state?.fullPageProgress?.active);
-  captureLaterEl.disabled = !recording || paused || !state?.devToolsOpen;
+  captureLaterEl.disabled = !recording || paused || !state?.screenCaptureAvailable;
   saveFlowEl.disabled = !recording || !state?.captures?.length;
   updateResumeCaptureButton(state);
   updateCompletedEvidenceButton(state);
@@ -660,9 +764,19 @@ function render(state) {
 
 async function refresh() {
   // Polling must not dismiss the keep-or-delete prompt out from under the user.
-  if (awaitingChoice || standalonePopup) return;
+  if ((awaitingChoice && (!stoppingRecording || !stoppingKeepsFiles)) || standalonePopup) return;
   try {
-    render(await getPopupState());
+    const state = await getPopupState();
+    if (stoppingRecording) {
+      renderMemoryStatus(state);
+      const bufferedCount = Math.max(0, Number(state?.pendingCaptureCount) || 0);
+      statusEl.textContent = bufferedCount
+        ? `${stoppingStatusText} \u00b7 ${bufferedCount} buffered`
+        : stoppingStatusText;
+      statusEl.className = 'status recording';
+      return;
+    }
+    render(state);
   } catch {
     showRuntimeError();
   }
@@ -684,11 +798,9 @@ toggleEl.addEventListener('click', async () => {
       deleteConfirmEl.hidden = true;
       return;
     }
-    if (state.pendingResumeFolder?.name) {
-      await beginRecording();
-      return;
-    }
+    if (!requireAvailableCaptureMode()) return;
     awaitingChoice = true;
+    mainActionsEl.classList.add('awaiting-session-folder');
     toggleEl.disabled = true;
     resetSessionFolderConflict();
     sessionFolderNameEl.value = suggestedSessionFolderName();
@@ -698,6 +810,10 @@ toggleEl.addEventListener('click', async () => {
   } catch {
     showRuntimeError();
   }
+});
+
+continueRecordingEl.addEventListener('click', () => {
+  continueFromAttachedFolder().catch(showRuntimeError);
 });
 
 sessionFolderStartEl.addEventListener('click', async () => {
@@ -755,6 +871,7 @@ sessionFolderStartEl.addEventListener('click', async () => {
 
 sessionFolderCancelEl.addEventListener('click', () => {
   sessionFolderPromptEl.hidden = true;
+  mainActionsEl.classList.remove('awaiting-session-folder');
   resetSessionFolderConflict();
   awaitingChoice = false;
   toggleEl.disabled = false;
@@ -803,6 +920,8 @@ async function finishRecording(
   filenamePromptEl.hidden = true;
   deleteConfirmEl.hidden = true;
   awaitingChoice = true;
+  stoppingRecording = true;
+  stoppingKeepsFiles = keepFiles;
   toggleEl.disabled = true;
   const selectedFolderName = renderedState?.outputFolder?.name || null;
   const opensDownloadLocation = reveal && !selectedFolderName;
@@ -812,6 +931,7 @@ async function finishRecording(
   if (keepFiles && opensDownloadLocation) {
     statusEl.textContent = 'The document is being created. Please wait. The folder will open when ready...';
   }
+  stoppingStatusText = statusEl.textContent;
   const payload = {
     keepFiles,
     outputFilename,
@@ -837,6 +957,9 @@ async function finishRecording(
     showActionError('Could not stop recording', error);
   } finally {
     awaitingChoice = false;
+    stoppingRecording = false;
+    stoppingKeepsFiles = false;
+    stoppingStatusText = '';
     mainActionsEl.classList.remove('awaiting-stop-choice');
     mainActionsEl.hidden = false;
     toggleEl.disabled = false;
@@ -956,11 +1079,12 @@ function openOutputPrompt(action, state, restoreStopChoice = false) {
   returnToStopChoice = restoreStopChoice;
   awaitingChoice = true;
   const sessionId = state?.sessionId || 'JShotz-session';
-  outputFilenameEl.value = prompt.checkpoint
-    ? `${sessionId}_checkpoint`
-    : prompt.evidence
-      ? `${sessionId}_evidence`
-      : sessionId;
+  const downloadDirectory = state?.completedEvidence?.downloadDirectory || `Jshotz/${state?.sessionFolderName || sessionId}`;
+  outputFilenameEl.value =
+    state?.outputFolder?.name ||
+    state?.completedEvidence?.outputFolderName ||
+    downloadDirectory.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) ||
+    sessionId;
   outputPdfEl.checked = currentSettings.savePdf !== false;
   outputDocxEl.checked = false;
   outputPromptTitleEl.textContent = prompt.title;
@@ -972,8 +1096,6 @@ function openOutputPrompt(action, state, restoreStopChoice = false) {
   completedEvidenceActionsEl.hidden = true;
   filenamePromptEl.hidden = false;
   updateCaptureSelectionControls();
-  outputFilenameEl.focus();
-  outputFilenameEl.select();
 }
 
 async function beginOutputAction(action) {
@@ -1056,11 +1178,11 @@ document.getElementById('deleteConfirmNo').addEventListener('click', () => {
   confirmEl.hidden = false;
 });
 
-resumeCaptureFromFolderEl.addEventListener('click', async () => {
+async function selectResumeCaptureFolder() {
   if (typeof window.showDirectoryPicker !== 'function') {
     statusEl.textContent = 'Resume from a folder is available in Chrome or Edge.';
     statusEl.className = 'status error';
-    return;
+    return null;
   }
 
   resumeCaptureFromFolderEl.disabled = true;
@@ -1091,6 +1213,7 @@ resumeCaptureFromFolderEl.addEventListener('click', async () => {
     } else if (state.pendingResumeFolder?.name) {
       showToast(`Capture folder selected: ${state.pendingResumeFolder.name}.`);
     }
+    return directoryHandle;
   } catch (error) {
     if (error?.name === 'AbortError') {
       statusEl.textContent = 'Folder selection cancelled.';
@@ -1100,6 +1223,7 @@ resumeCaptureFromFolderEl.addEventListener('click', async () => {
       statusEl.className = 'status error';
       showToast(statusEl.textContent, 'error');
     }
+    return null;
   } finally {
     if (!standalonePopup) {
       const state = await getPopupState().catch(() => null);
@@ -1107,10 +1231,30 @@ resumeCaptureFromFolderEl.addEventListener('click', async () => {
       updateResumeCaptureButton(state);
     }
   }
+}
+
+resumeCaptureFromFolderEl.addEventListener('click', () => {
+  selectResumeCaptureFolder().catch(showRuntimeError);
+});
+
+captureInstantEl.addEventListener('click', async () => {
+  captureInstantEl.disabled = true;
+  try {
+    render(await send('CAPTURE_PANEL'));
+  } catch (error) {
+    captureInstantEl.disabled = false;
+    showActionError('Instant capture', error);
+  }
 });
 
 captureNowEl.addEventListener('click', async () => {
-  render(await send('CAPTURE_NOW'));
+  captureNowEl.disabled = true;
+  try {
+    render(await send('CAPTURE_WHOLE_PAGE'));
+  } catch (error) {
+    captureNowEl.disabled = false;
+    showActionError('Whole-page capture', error);
+  }
 });
 
 saveFlowEl.addEventListener('click', () => beginOutputAction('checkpoint').catch(showRuntimeError));
@@ -1127,7 +1271,7 @@ outputPdfEl.addEventListener('change', updateCaptureSelectionControls);
 outputDocxEl.addEventListener('change', updateCaptureSelectionControls);
 
 captureLaterEl.addEventListener('click', async () => {
-  await send('CAPTURE_LATER');
+  send('CAPTURE_LATER').catch(() => {});
   window.close();
 });
 
@@ -1207,10 +1351,17 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
-for (const control of Object.values(controls)) {
+for (const [setting, control] of Object.entries(controls)) {
   control.addEventListener('change', () => {
-    shortcutHintEl.hidden = controls.captureMode.value !== 'screen';
-    send('SET_SETTINGS', { settings: readSettings() }).catch(showRuntimeError);
+    const value = control.type === 'checkbox' ? control.checked : control.value;
+    if (setting === 'captureMode') {
+      captureModeChosenByUser = true;
+      shortcutHintEl.hidden = value !== 'screen';
+    }
+    settingsChangeChain = settingsChangeChain
+      .catch(() => {})
+      .then(() => send('SET_SETTINGS', { settings: { [setting]: value } }))
+      .catch(showRuntimeError);
   });
 }
 
@@ -1218,7 +1369,7 @@ for (const control of Object.values(controls)) {
 showExtensionVersion();
 render(null);
 if (hasExtensionRuntime()) {
-  preloadSelectedCaptureFolder();
+  preloadSelectedCaptureFolder().then(() => refresh());
   refresh();
   setInterval(refresh, 1000);
 } else {

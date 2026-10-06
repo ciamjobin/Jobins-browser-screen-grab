@@ -28,15 +28,24 @@ async function runExporter(search, frames = [
   const stateEl = { textContent: '', className: '' };
   const downloadOptions = [];
   const downloadUiOptions = [];
+  const downloadEvents = [];
+  const objectUrls = [];
+  const revokedObjectUrls = [];
   const builtPages = [];
   let complete;
   const completed = new Promise((resolve) => {
     complete = resolve;
   });
   const sandbox = {
+    Blob,
     URL: {
-      createObjectURL() {
-        throw new Error('Blob URLs are not available in a service worker.');
+      createObjectURL(blob) {
+        const url = `blob:output-${objectUrls.length + 1}`;
+        objectUrls.push({ url, blob });
+        return url;
+      },
+      revokeObjectURL(url) {
+        revokedObjectUrls.push(url);
       }
     },
     URLSearchParams,
@@ -59,9 +68,11 @@ async function runExporter(search, frames = [
       downloads: {
         async setUiOptions(options) {
           downloadUiOptions.push(options);
+          downloadEvents.push(`ui:${options.enabled}`);
         },
         async download(options) {
           downloadOptions.push(options);
+          downloadEvents.push(`download:${options.filename}`);
           return downloadOptions.length;
         },
         onChanged: {
@@ -82,18 +93,29 @@ async function runExporter(search, frames = [
 
   runInNewContext(executable, sandbox);
   const result = await completed;
-  return { result, downloadOptions, downloadUiOptions, builtPages };
+  return {
+    result,
+    downloadOptions,
+    downloadUiOptions,
+    downloadEvents,
+    objectUrls,
+    revokedObjectUrls,
+    builtPages
+  };
 }
 
-test('exports fallback PDFs as data URLs without calling createObjectURL', async () => {
-  const { result, downloadOptions } = await runExporter('?filename=flow.pdf&requestId=checkpoint-123');
+test('exports fallback PDFs with a revoked Blob URL', async () => {
+  const { result, downloadOptions, objectUrls, revokedObjectUrls } =
+    await runExporter('?filename=flow.pdf&requestId=checkpoint-123');
 
   assert.equal(result.type, 'OUTPUT_DONE');
   assert.equal(result.requestId, 'checkpoint-123');
   assert.equal(result.pageCount, 1);
   assert.deepEqual(Array.from(result.downloadIds), [1]);
   assert.equal(downloadOptions[0].filename, 'flow.pdf');
-  assert.equal(downloadOptions[0].url, 'data:application/pdf;base64,AAECAw==');
+  assert.equal(downloadOptions[0].url, 'blob:output-1');
+  assert.equal(objectUrls[0].blob.type, 'application/pdf');
+  assert.deepEqual(revokedObjectUrls, ['blob:output-1']);
 });
 
 test('exports fallback PDF and Word files from one stored capture', async () => {
@@ -103,16 +125,22 @@ test('exports fallback PDF and Word files from one stored capture', async () => 
       { format: 'docx', filename: 'review.docx' }
     ])
   );
-  const { result, downloadOptions } = await runExporter(`?outputs=${outputs}`);
+  const { result, downloadOptions, downloadUiOptions, downloadEvents, revokedObjectUrls } =
+    await runExporter(`?outputs=${outputs}`);
 
   assert.equal(result.type, 'OUTPUT_DONE');
   assert.deepEqual(Array.from(result.downloadIds), [1, 2]);
   assert.deepEqual(Array.from(result.savedOutputFilenames), ['review.pdf', 'review.docx']);
-  assert.equal(downloadOptions[0].url, 'data:application/pdf;base64,AAECAw==');
-  assert.equal(
-    downloadOptions[1].url,
-    'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,BAUGBw=='
-  );
+  assert.equal(downloadOptions[0].url, 'blob:output-1');
+  assert.equal(downloadOptions[1].url, 'blob:output-2');
+  assert.deepEqual(revokedObjectUrls, ['blob:output-1', 'blob:output-2']);
+  assert.deepEqual(Array.from(downloadUiOptions, ({ enabled }) => enabled), [false, false]);
+  assert.deepEqual(Array.from(downloadEvents), [
+    'ui:false',
+    'download:review.pdf',
+    'ui:false',
+    'download:review.docx'
+  ]);
 });
 
 test('overwrites an explicitly designated interim output file', async () => {

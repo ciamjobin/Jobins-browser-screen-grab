@@ -32,6 +32,7 @@
     "scripts": ["background.js"],
     "type": "module"
   },
+  "devtools_page": "devtools.html",
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
@@ -62,7 +63,7 @@
     },
     "capture-panel": {
       "suggested_key": { "default": "Alt+Shift+K" },
-      "description": "Capture now (e.g. a DevTools Headers / Payload / Response panel)"
+      "description": "Capture an instant screenshot"
     },
     "capture-later": {
       "suggested_key": { "default": "Alt+Shift+D" },

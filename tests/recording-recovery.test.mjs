@@ -28,6 +28,15 @@ function createEvent() {
   };
 }
 
+async function waitForCondition(check, message, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  throw new Error(message);
+}
+
 function createStorage(values) {
   const data = structuredClone(values);
   return {
@@ -254,11 +263,24 @@ function createChrome() {
     flowRecorderSessionControl: { sessionId, paused: false, captureGeneration: 4 },
     flowRecorderSessionTracking: { sessionId, tabIds: [99], windowIds: [100] }
   });
+  const createDevToolsPort = () => ({
+    name: `jshotz-devtools:${liveTab.id}`,
+    onDisconnect: createEvent()
+  });
+  let devToolsPort = createDevToolsPort();
+  const runtimeOnConnect = createEvent();
+  const addRuntimeConnectListener = runtimeOnConnect.addListener.bind(runtimeOnConnect);
+  runtimeOnConnect.addListener = (listener) => {
+    addRuntimeConnectListener(listener);
+    queueMicrotask(() => listener(devToolsPort));
+  };
   const injectedFiles = [];
   const downloadRequests = [];
   const offscreenMessages = [];
   const screenMessages = [];
   const exportRequests = [];
+  const outputDialogRequests = [];
+  const screenWindowRequests = [];
   const revealedDownloads = [];
   const revealRecordingStates = [];
   const downloadUiEvents = [];
@@ -272,6 +294,7 @@ function createChrome() {
   const existingDownloadFilenames = new Set();
   const downloadSearchQueries = [];
   let captureError = null;
+  let screenFrameError = null;
   let downloadShowError = null;
   let offscreenProcessFailure = null;
   let offscreenProcessGate = null;
@@ -357,22 +380,34 @@ function createChrome() {
     },
     runtime: {
       onMessage: createEvent(),
+      onConnect: runtimeOnConnect,
       onStartup: createEvent(),
       onInstalled: createEvent(),
       async sendMessage(message) {
         if (message.target === 'screen') {
           screenMessages.push(message);
           if (message.type === 'SCREEN_BUFFER_CAPTURE') return { frameId: `frame-${screenMessages.length}` };
+          if (message.type === 'SCREEN_BUFFER_CAPTURE_DELAYED') {
+            return { frameId: `delayed-frame-${screenMessages.length}` };
+          }
           if (message.type === 'SCREEN_CAPTURE') {
+            if (screenFrameError) return { error: screenFrameError };
             return { dataUrl: `data:image/png;base64,${Buffer.from(`live-${screenMessages.length}`).toString('base64')}` };
           }
-          if (message.type === 'SCREEN_PING') return { ok: true };
+          if (message.type === 'SCREEN_PING') {
+            return { ok: Boolean(storage.snapshot().flowRecorderState?.streamActive) };
+          }
           if (message.type === 'SCREEN_TAKE_BUFFERED') {
+            if (screenFrameError) return { error: screenFrameError };
             return { dataUrl: `data:image/png;base64,${Buffer.from(message.frameId).toString('base64')}` };
           }
           if (message.type === 'SCREEN_SUPPRESS_MONITOR') return { ok: true };
+          if (message.type === 'SCREEN_SET_ACTIVE') return { ok: true, active: Boolean(message.active) };
           if (message.type === 'SCREEN_FRAME_PROCESSED') return { ok: true };
-          if (message.type === 'SCREEN_STOP') return { ok: true };
+          if (message.type === 'SCREEN_STOP') {
+            downloadLifecycleEvents.push('screen-stop');
+            return { ok: true };
+          }
           throw new Error(`Unexpected screen message: ${message.type}`);
         }
         if (message.target !== 'offscreen') throw new Error(`Unexpected runtime message: ${message.type}`);
@@ -406,6 +441,44 @@ function createChrome() {
       async query() {
         return [{ ...liveTab }];
       },
+      async create(options) {
+        const tab = { id: nextExportWindowId++, active: false };
+        exportRequests.push(options);
+        const requestId = new URL(options.url, 'https://extension.test').searchParams.get('requestId');
+        const complete = () => {
+          for (const listener of chrome.runtime.onMessage.listeners) {
+            listener({
+              type: 'OUTPUT_DONE',
+              requestId,
+              downloadId: 5000 + exportRequests.length
+            }, {}, () => {});
+          }
+        };
+        const completeUnrelated = () => {
+          for (const listener of chrome.runtime.onMessage.listeners) {
+            listener({
+              type: 'OUTPUT_DONE',
+              requestId: 'unrelated-output-request',
+              error: 'An unrelated output task failed.'
+            }, {}, () => {});
+          }
+        };
+        const sendCompletion = () => {
+          if (sendUnrelatedOutputBeforeCompletion) completeUnrelated();
+          complete();
+        };
+        if (completeOutputDuringWindowCreate) sendCompletion();
+        else setTimeout(sendCompletion, 0);
+        return tab;
+      },
+      async remove(tabId) {
+        await Promise.all(chrome.tabs.onRemoved.listeners.map((listener) => listener(tabId)));
+      },
+      async update(tabId, changes) {
+        assert.equal(tabId, liveTab.id);
+        Object.assign(liveTab, changes);
+        return { ...liveTab };
+      },
       async sendMessage(tabId, message) {
         tabMessages.push({ tabId, message });
         return {};
@@ -426,35 +499,28 @@ function createChrome() {
       },
       async create(options) {
         const win = { id: nextExportWindowId++ };
-        exportRequests.push(options);
-        const requestId = new URL(options.url, 'https://extension.test').searchParams.get('requestId');
-        const complete = () => {
-          for (const listener of chrome.runtime.onMessage.listeners) {
-            listener({
-              type: 'OUTPUT_DONE',
-              requestId,
-              downloadId: 5000 + exportRequests.length
-            }, {}, () => {});
-          }
-        };
-        const completeUnrelated = () => {
-          for (const listener of chrome.runtime.onMessage.listeners) {
-            listener({
-              type: 'OUTPUT_DONE',
-              requestId: 'unrelated-output-request',
-              error: 'An unrelated output window failed.'
-            }, {}, () => {});
-          }
-        };
-        const sendCompletion = () => {
-          if (sendUnrelatedOutputBeforeCompletion) completeUnrelated();
-          complete();
-        };
-        if (completeOutputDuringWindowCreate) sendCompletion();
-        else setTimeout(sendCompletion, 0);
-        return win;
+        if (options.url === 'capture-window.html') {
+          screenWindowRequests.push({ ...options, id: win.id });
+          setTimeout(() => {
+            for (const listener of chrome.runtime.onMessage.listeners) {
+              listener(
+                { type: 'SCREEN_READY', source: 'screen-window', displaySurface: 'monitor' },
+                {},
+                () => {}
+              );
+            }
+          }, 0);
+          return win;
+        }
+        if (String(options.url).startsWith('output-dialog.html?')) {
+          outputDialogRequests.push(options);
+          return win;
+        }
+        throw new Error(`Unexpected window: ${options.url}`);
       },
-      async remove() {}
+      async remove(windowId) {
+        await Promise.all(chrome.windows.onRemoved.listeners.map((listener) => listener(windowId)));
+      }
     },
     webNavigation: {
       onCommitted: createEvent(),
@@ -498,9 +564,11 @@ function createChrome() {
     downloadUiEvents,
     erasedDownloads,
     exportRequests,
+    screenWindowRequests,
     injectedFiles,
     liveTab,
     offscreenMessages,
+    outputDialogRequests,
     screenMessages,
     storage,
     revealRecordingStates,
@@ -510,8 +578,37 @@ function createChrome() {
     tabMessages,
     windowUpdates,
     badgeTexts,
+    connectDevTools() {
+      devToolsPort = createDevToolsPort();
+      for (const listener of runtimeOnConnect.listeners) listener(devToolsPort);
+    },
+    dropDevToolsPort() {
+      for (const listener of devToolsPort.onDisconnect.listeners) listener();
+    },
+    disconnectDevTools() {
+      for (const listener of devToolsPort.onDisconnect.listeners) listener();
+      for (const listener of chrome.runtime.onMessage.listeners) {
+        listener(
+          { type: 'DEVTOOLS_CLOSED', tabId: liveTab.id, source: 'devtools-page' },
+          {},
+          () => {}
+        );
+      }
+    },
+    heartbeatDevTools() {
+      for (const listener of chrome.runtime.onMessage.listeners) {
+        listener(
+          { type: 'DEVTOOLS_HEARTBEAT', tabId: liveTab.id, source: 'devtools-page' },
+          {},
+          () => {}
+        );
+      }
+    },
     setCaptureError(error) {
       captureError = error;
+    },
+    setScreenFrameError(error) {
+      screenFrameError = error;
     },
     setRenderSettlePending(value) {
       renderSettlePending = value;
@@ -564,7 +661,7 @@ function createChrome() {
 
 function sendMessage(listener, message, sender = {}) {
   return new Promise((resolveMessage, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`No response for ${message.type}`)), 3000);
+    const timeout = setTimeout(() => reject(new Error(`No response for ${message.type}`)), 10000);
     const keepChannelOpen = listener(message, sender, (response) => {
       clearTimeout(timeout);
       resolveMessage(response);
@@ -687,6 +784,235 @@ test('recovers a recording after stale tab IDs, then pauses, continues, and capt
   }
 });
 
+test('captures after every combination of tab, API, and screen mode changes', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    let state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    let expectedSequence = state.sequence;
+    let screenStreamStarted = false;
+    const transitions = [
+      ['tab', 'api'],
+      ['api', 'screen'],
+      ['screen', 'tab'],
+      ['tab', 'screen'],
+      ['screen', 'api'],
+      ['api', 'tab']
+    ];
+
+    for (const [fromMode, toMode] of transitions) {
+      assert.equal(state.settings.captureMode, fromMode);
+      state = await sendMessage(messageListener, {
+        type: 'SET_SETTINGS',
+        settings: { captureMode: toMode }
+      });
+      assert.equal(state.settings.captureMode, toMode);
+      assert.equal(state.settings.captureApi, toMode === 'api');
+
+      if (toMode === 'screen') {
+        await waitForCondition(
+          async () => (await sendMessage(messageListener, { type: 'GET_STATE' })).streamActive,
+          `Screen sharing did not become active after ${fromMode} -> ${toMode}`
+        );
+        screenStreamStarted = true;
+      } else {
+        assert.equal(state.streamActive, screenStreamStarted);
+      }
+
+      state = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+      expectedSequence += 1;
+      assert.equal(state.sequence, expectedSequence, `Capture failed after ${fromMode} -> ${toMode}`);
+      assert.equal(state.lastError, null);
+    }
+
+    assert.equal(fixture.screenWindowRequests.length, 1);
+    assert.equal(fixture.captureCount(), 4);
+    assert.equal(
+      fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length,
+      2
+    );
+    assert.equal(
+      fixture.screenMessages.filter(({ type }) => type === 'SCREEN_TAKE_BUFFERED').length,
+      2
+    );
+
+    const rapidSwitches = [
+      sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { captureMode: 'screen' } }),
+      sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { captureMode: 'tab' } }),
+      sendMessage(messageListener, { type: 'SET_SETTINGS', settings: { captureMode: 'api' } })
+    ];
+    await Promise.all(rapidSwitches);
+    state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.settings.captureMode, 'api');
+    assert.equal(state.settings.captureApi, true);
+    assert.equal(state.streamActive, true);
+
+    state = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    expectedSequence += 1;
+    assert.equal(state.sequence, expectedSequence, 'Capture failed after overlapping mode changes');
+    assert.equal(state.lastError, null);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('uses tab capture while DevTools is closed and restores screen capture when it reopens', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, {
+      type: 'SET_SETTINGS',
+      settings: { captureMode: 'screen' }
+    });
+    await waitForCondition(
+      async () => (await sendMessage(messageListener, { type: 'GET_STATE' })).streamActive,
+      'Screen sharing did not become active'
+    );
+    const screenWindowCount = fixture.screenWindowRequests.length;
+
+    fixture.dropDevToolsPort();
+    let state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.devToolsOpen, true);
+    assert.equal(state.settings.captureMode, 'screen');
+    fixture.heartbeatDevTools();
+    await waitForCondition(
+      async () => (await sendMessage(messageListener, { type: 'GET_STATE' })).devToolsOpen,
+      'DevTools heartbeat did not restore presence after its port dropped'
+    );
+
+    fixture.disconnectDevTools();
+    await waitForCondition(
+      async () => (await sendMessage(messageListener, { type: 'GET_STATE' })).settings.captureMode === 'tab',
+      'Capture mode did not return to tab after DevTools closed'
+    );
+    state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.streamActive, true);
+    assert.equal(state.settings.devToolsCaptureRequested, true);
+    assert.equal(state.devToolsOpen, false);
+
+    fixture.connectDevTools();
+    await waitForCondition(
+      async () => (await sendMessage(messageListener, { type: 'GET_STATE' })).settings.captureMode === 'screen',
+      'Capture mode did not return to screen after DevTools reopened'
+    );
+    state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.streamActive, true);
+    assert.equal(state.devToolsOpen, true);
+    assert.equal(fixture.screenWindowRequests.length, screenWindowCount);
+
+    fixture.disconnectDevTools();
+    await waitForCondition(
+      async () => (await sendMessage(messageListener, { type: 'GET_STATE' })).settings.captureMode === 'tab',
+      'Capture mode did not return to tab before opting out'
+    );
+    state = await sendMessage(messageListener, {
+      type: 'SET_SETTINGS',
+      settings: { captureMode: 'tab' }
+    });
+    assert.equal(state.streamActive, true);
+    assert.equal(state.settings.devToolsCaptureRequested, false);
+    fixture.connectDevTools();
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.settings.captureMode, 'tab');
+
+    fixture.disconnectDevTools();
+    await waitForCondition(
+      async () => !(await sendMessage(messageListener, { type: 'GET_STATE' })).devToolsOpen,
+      'DevTools did not close before testing a rejected screen request'
+    );
+    state = await sendMessage(messageListener, {
+      type: 'SET_SETTINGS',
+      settings: { captureMode: 'screen' }
+    });
+    assert.equal(state.settings.captureMode, 'tab');
+    assert.equal(state.settings.devToolsCaptureRequested, false);
+    assert.match(state.lastError, /Open DevTools/);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('switches to tab after a dropped DevTools lease without popup polling', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, {
+      type: 'SET_SETTINGS',
+      settings: { captureMode: 'screen' }
+    });
+    await waitForCondition(
+      async () => fixture.storageSnapshot().flowRecorderState?.streamActive,
+      'Screen sharing did not become active'
+    );
+
+    fixture.dropDevToolsPort();
+    await waitForCondition(
+      () => fixture.storageSnapshot().flowRecorderState?.settings?.captureMode === 'tab',
+      'Background did not switch to tab when the DevTools lease expired',
+      5000
+    );
+    const state = fixture.storageSnapshot().flowRecorderState;
+    assert.equal(state.streamActive, true);
+    assert.equal(state.settings.devToolsCaptureRequested, true);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('persists all live capture-option permutations without reconfiguring capture sources', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const initial = await sendMessage(messageListener, { type: 'GET_STATE' });
+    const initialHookMessages = fixture.tabMessages.filter(
+      ({ message }) => message.type === 'API_HOOK_CONFIG'
+    ).length;
+
+    for (let mask = 0; mask < 32; mask += 1) {
+      const settings = {
+        captureOnClick: Boolean(mask & 1),
+        captureOnScroll: Boolean(mask & 2),
+        fullPage: Boolean(mask & 4),
+        savePng: Boolean(mask & 8),
+        savePdf: Boolean(mask & 16)
+      };
+      const state = await sendMessage(messageListener, { type: 'SET_SETTINGS', settings });
+      assert.equal(state.recording, true);
+      assert.equal(state.captureGeneration, initial.captureGeneration);
+      assert.deepEqual(
+        Object.fromEntries(Object.keys(settings).map((key) => [key, state.settings[key]])),
+        settings
+      );
+    }
+
+    assert.equal(
+      fixture.tabMessages.filter(({ message }) => message.type === 'API_HOOK_CONFIG').length,
+      initialHookMessages
+    );
+    assert.equal(fixture.screenWindowRequests.length, 0);
+    assert.equal(fixture.captureCount(), 0);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
 test('stores a newly named session under Downloads Jshotz', async () => {
   const originalChrome = globalThis.chrome;
   const fixture = createChrome();
@@ -768,7 +1094,8 @@ test('buffers screen frames before earlier screenshots finish processing', async
         settings: {
           ...fixture.storageSnapshot().flowRecorderState.settings,
           captureMode: 'screen',
-          savePng: false
+          savePng: false,
+          savePdf: false
         }
       }
     });
@@ -785,7 +1112,12 @@ test('buffers screen frames before earlier screenshots finish processing', async
       { type: 'CLICK_CAPTURE', reason: 'click', label: 'Payload' },
       { tab: fixture.liveTab }
     );
-    await new Promise((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const buffered = fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length;
+      const taken = fixture.screenMessages.filter(({ type }) => type === 'SCREEN_TAKE_BUFFERED').length;
+      if (buffered === 2 && taken === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
 
     assert.equal(fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length, 2);
     assert.equal(fixture.screenMessages.filter(({ type }) => type === 'SCREEN_TAKE_BUFFERED').length, 1);
@@ -802,18 +1134,17 @@ test('buffers screen frames before earlier screenshots finish processing', async
   }
 });
 
-test('waits for queued screen captures before stopping and creating evidence', async () => {
+test('uses a conservative prebuffer ceiling when memory telemetry is unavailable', async () => {
   const originalChrome = globalThis.chrome;
   const fixture = createChrome();
   globalThis.chrome = fixture.chrome;
-  let first;
-  let second;
-  let stopping;
+  let captures = [];
 
   try {
     await loadBackground();
     const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
     await sendMessage(messageListener, { type: 'GET_STATE' });
+    const initialSequence = fixture.storageSnapshot().flowRecorderState.sequence;
     await fixture.setStorage({
       flowRecorderState: {
         ...fixture.storageSnapshot().flowRecorderState,
@@ -821,23 +1152,234 @@ test('waits for queued screen captures before stopping and creating evidence', a
         settings: {
           ...fixture.storageSnapshot().flowRecorderState.settings,
           captureMode: 'screen',
-          savePng: false
+          savePng: false,
+          savePdf: false
         }
       }
     });
     fixture.blockOffscreenProcessing();
+    captures = Array.from({ length: 15 }, (_, index) => sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: `Queued action ${index + 1}` },
+      { tab: fixture.liveTab }
+    ));
 
-    first = sendMessage(
-      messageListener,
-      { type: 'CLICK_CAPTURE', reason: 'click', label: 'First queued action' },
-      { tab: fixture.liveTab }
+    await waitForCondition(
+      () => fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length > 0,
+      'No screen frames were prebuffered for the pending capture queue.'
     );
-    second = sendMessage(
+    const prebufferedCount = fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length;
+    assert.ok(prebufferedCount <= 4);
+
+    fixture.releaseOffscreenProcessing();
+    await Promise.all(captures);
+    assert.equal(fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length, prebufferedCount);
+    assert.equal(fixture.storageSnapshot().flowRecorderState.sequence, initialSequence + 15);
+    await sendMessage(messageListener, { type: 'STOP', keepFiles: false, createPdf: false });
+  } finally {
+    fixture.releaseOffscreenProcessing();
+    await Promise.allSettled(captures);
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('reduces speculative screen prebuffering when heap pressure is high', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+  let captures = [];
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    const initialSequence = fixture.storageSnapshot().flowRecorderState.sequence;
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        streamActive: true,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'screen',
+          savePng: false,
+          savePdf: false
+        }
+      }
+    });
+    const report = await sendMessage(messageListener, {
+      type: 'SCREEN_MEMORY_STATUS',
+      source: 'screen-window',
+      jsHeapUsedBytes: 920 * 1024 * 1024,
+      jsHeapLimitBytes: 1000 * 1024 * 1024,
+      deviceMemoryGb: 8,
+      screenBufferedBytes: 0,
+      screenBufferedFrames: 0
+    });
+    assert.deepEqual(report, { ok: true });
+
+    const memoryState = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(memoryState.memoryStatus.level, 'high');
+    assert.equal(memoryState.memoryStatus.maxPrebufferedCaptureFrames, 1);
+    assert.equal(memoryState.memoryStatus.estimatedHeapHeadroomBytes, 80 * 1024 * 1024);
+
+    fixture.blockOffscreenProcessing();
+    captures = Array.from({ length: 2 }, (_, index) => sendMessage(
       messageListener,
-      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Second queued action' },
+      { type: 'CLICK_CAPTURE', reason: 'click', label: `High pressure ${index + 1}` },
       { tab: fixture.liveTab }
+    ));
+    await waitForCondition(
+      () => fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length === 1,
+      'The high-pressure capture policy did not limit prebuffering to one frame.'
     );
-    await new Promise((resolve) => setImmediate(resolve));
+
+    fixture.releaseOffscreenProcessing();
+    await Promise.all(captures);
+    const finalState = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(finalState.sequence, initialSequence + 2);
+    assert.equal(fixture.screenMessages.filter(({ type }) => type === 'SCREEN_BUFFER_CAPTURE').length, 1);
+    await sendMessage(messageListener, { type: 'STOP', keepFiles: false, createPdf: false });
+  } finally {
+    fixture.releaseOffscreenProcessing();
+    await Promise.allSettled(captures);
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('keeps rapid tab action labels paired with their request-time frames', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+  let visibleFrame = 0;
+  let captures = [];
+
+  try {
+    fixture.chrome.tabs.captureVisibleTab = async () => {
+      visibleFrame += 1;
+      return `data:image/png;base64,${Buffer.from(`action-frame-${visibleFrame}`).toString('base64')}`;
+    };
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    fixture.blockOffscreenProcessing();
+
+    captures = Array.from({ length: 10 }, (_, index) => sendMessage(
+      messageListener,
+      {
+        type: 'CLICK_CAPTURE',
+        reason: 'click',
+        label: `Action ${index + 1}`,
+        actionAt: (index + 1) * 1000
+      },
+      { tab: fixture.liveTab }
+    ));
+
+    await waitForCondition(() => visibleFrame === 10, 'Ten action-time viewport frames were not buffered.');
+    fixture.liveTab.title = 'Later page state';
+    await waitForCondition(() => fixture.offscreenMessages.length === 1, 'The first action did not begin processing.');
+    assert.equal(fixture.offscreenMessages.length, 1);
+    fixture.releaseOffscreenProcessing();
+    await Promise.all(captures);
+
+    assert.equal(fixture.offscreenMessages.length, 10);
+    assert.deepEqual(
+      fixture.offscreenMessages.map(({ dataUrl }) =>
+        Buffer.from(dataUrl.split(',')[1], 'base64').toString()
+      ),
+      Array.from({ length: 10 }, (_, index) => `action-frame-${index + 1}`)
+    );
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.deepEqual(
+      state.captures.slice(-10).map(({ label }) => label),
+      Array.from({ length: 10 }, (_, index) => `Action ${index + 1}`)
+    );
+    assert.deepEqual(state.captures.slice(-10).map(({ title }) => title), Array(10).fill('Recovered page'));
+    assert.deepEqual(
+      state.captures.slice(-10).map(({ actionAt }) => actionAt),
+      Array.from({ length: 10 }, (_, index) => new Date((index + 1) * 1000).toISOString())
+    );
+    await waitForCondition(async () => {
+      const latest = await sendMessage(messageListener, { type: 'GET_STATE' });
+      return latest.interimOutput?.captureSequence === 50;
+    }, 'Interim output did not finish after the ten-action burst.');
+  } finally {
+    fixture.releaseOffscreenProcessing();
+    await Promise.allSettled(captures);
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('starts popup whole-page capture without waiting for the popup lifecycle', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const initial = await sendMessage(messageListener, { type: 'GET_STATE' });
+    const accepted = await sendMessage(messageListener, { type: 'CAPTURE_WHOLE_PAGE' });
+    assert.equal(accepted.recording, true);
+    assert.equal(accepted.fullPageProgress.active, true);
+
+    await waitForCondition(async () => {
+      const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+      return state.sequence === initial.sequence + 1;
+    }, 'The popup whole-page command did not complete a capture.', 3000);
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.captures.at(-1).reason, 'manual-hotkey');
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('waits for queued screen captures before stopping and creating evidence', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+  let captures = [];
+  let stopping;
+  const totalCaptureCount = 300;
+  const queuedCaptureCount = 2;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const initialState = await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        streamActive: true,
+        screenWindowId: 71,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'screen',
+          savePng: false
+        }
+      }
+    });
+    for (let index = 0; index < totalCaptureCount - queuedCaptureCount; index += 1) {
+      await sendMessage(
+        messageListener,
+        { type: 'CLICK_CAPTURE', reason: 'click', label: `Queued action ${index + 1}` },
+        { tab: fixture.liveTab }
+      );
+    }
+
+    fixture.blockOffscreenProcessing();
+    captures = Array.from({ length: queuedCaptureCount }, (_, index) => sendMessage(
+      messageListener,
+      {
+        type: 'CLICK_CAPTURE',
+        reason: 'click',
+        label: `Queued action ${totalCaptureCount - queuedCaptureCount + index + 1}`
+      },
+      { tab: fixture.liveTab }
+    ));
+    await waitForCondition(async () => {
+      const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+      return state.pendingCaptureCount === queuedCaptureCount;
+    }, 'The complete screenshot backlog was not visible before stop.');
 
     let stopResolved = false;
     stopping = sendMessage(messageListener, {
@@ -852,16 +1394,70 @@ test('waits for queued screen captures before stopping and creating evidence', a
     assert.equal(stopResolved, false);
 
     fixture.releaseOffscreenProcessing();
-    const [stopped] = await Promise.all([stopping, first, second]);
+    const [stopped] = await Promise.all([stopping, ...captures]);
     assert.equal(stopped.recording, false);
-    assert.equal(stopped.captures.length, 42);
-    assert.deepEqual(stopped.captures.slice(-2).map(({ label }) => label), [
-      'First queued action',
-      'Second queued action'
-    ]);
+    assert.equal(stopped.sequence, initialState.sequence + totalCaptureCount);
+    assert.equal(stopped.captures.length, totalCaptureCount);
+    assert.deepEqual(
+      stopped.captures.map(({ label }) => label),
+      Array.from({ length: totalCaptureCount }, (_, index) => `Queued action ${index + 1}`)
+    );
+    assert.equal(stopped.completedEvidence.captureCount, totalCaptureCount);
+    const drained = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(drained.pendingCaptureCount, 0);
+    const manifestDownloadId = fixture.downloadRequests.length;
+    assert.ok(
+      fixture.downloadLifecycleEvents.indexOf(`complete:${manifestDownloadId}`) <
+        fixture.downloadLifecycleEvents.indexOf('screen-stop')
+    );
   } finally {
     fixture.releaseOffscreenProcessing();
-    await Promise.allSettled([first, second, stopping].filter(Boolean));
+    await Promise.allSettled([...captures, stopping].filter(Boolean));
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('defers interim PDF assembly until a capture burst drains', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    const initialState = fixture.storageSnapshot().flowRecorderState;
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...initialState,
+        sequence: 4,
+        captures: initialState.captures.slice(0, 4)
+      }
+    });
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    fixture.blockOffscreenProcessing();
+
+    const firstCapture = sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    const secondCapture = sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    await waitForCondition(
+      () => fixture.offscreenMessages.length === 1,
+      'The first capture did not begin processing.'
+    );
+    assert.equal(fixture.exportRequests.length, 0);
+
+    fixture.releaseOffscreenProcessing();
+    await Promise.all([firstCapture, secondCapture]);
+    await waitForCondition(
+      () => fixture.exportRequests.length === 1,
+      'The deferred interim PDF did not start after captures drained.'
+    );
+    assert.equal(fixture.exportRequests[0].active, false);
+    assert.equal(fixture.outputDialogRequests.length, 0);
+    await waitForCondition(async () => {
+      const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+      return state.interimOutput?.captureSequence === 6;
+    }, 'The deferred interim PDF did not finish.');
+  } finally {
+    fixture.releaseOffscreenProcessing();
     globalThis.chrome = originalChrome;
   }
 });
@@ -924,6 +1520,152 @@ test('queues an automatically buffered DevTools visual update', async () => {
     assert.equal(fixture.offscreenMessages.at(-1).dataUrl.includes('dmlzdWFsLWZyYW1lLTE='), true);
     assert.equal(state.captures.at(-1).reason, 'devtools-update');
     assert.equal(state.captures.at(-1).label, 'DevTools panel updated');
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('drops a queued DevTools update after switching to tab mode', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        streamActive: true,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'screen',
+          savePng: false
+        }
+      }
+    });
+
+    const existingProcessCount = fixture.offscreenMessages.length;
+    fixture.blockOffscreenProcessing();
+    const blockingCapture = sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    await waitForCondition(
+      () => fixture.offscreenMessages.length > existingProcessCount,
+      'Blocking capture did not reach image processing'
+    );
+
+    const buffered = await sendMessage(messageListener, {
+      type: 'SCREEN_FRAME_BUFFERED',
+      source: 'screen-window',
+      frameId: 'stale-visual-frame',
+      actionAt: 1234,
+      label: 'DevTools panel updated'
+    });
+    assert.deepEqual(buffered, { ok: true, accepted: true });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'tab'
+        }
+      }
+    });
+    fixture.releaseOffscreenProcessing();
+    await blockingCapture;
+    await waitForCondition(
+      () => fixture.screenMessages.some(
+        ({ type, frameId }) => type === 'SCREEN_FRAME_PROCESSED' && frameId === 'stale-visual-frame'
+      ),
+      'Stale buffered frame was not released'
+    );
+
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.notEqual(state.captures.at(-1)?.reason, 'devtools-update');
+    assert.equal(fixture.screenMessages.some(
+      ({ type, frameId }) => type === 'SCREEN_TAKE_BUFFERED' && frameId === 'stale-visual-frame'
+    ), false);
+  } finally {
+    fixture.releaseOffscreenProcessing();
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('requires re-sharing instead of saving incomplete tab evidence when the screen stays blank', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  fixture.setScreenFrameError('The shared screen frame is blank or unavailable.');
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.setStorage({
+      flowRecorderState: {
+        ...fixture.storageSnapshot().flowRecorderState,
+        streamActive: true,
+        settings: {
+          ...fixture.storageSnapshot().flowRecorderState.settings,
+          captureMode: 'screen',
+          savePng: false
+        }
+      }
+    });
+
+    await sendMessage(
+      messageListener,
+      { type: 'CLICK_CAPTURE', reason: 'click', label: 'Continue', actionAt: Date.now() },
+      { tab: fixture.liveTab }
+    );
+
+    const state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.streamActive, false);
+    assert.match(state.lastError, /remained blank.*action was not saved/i);
+    assert.equal(state.sequence, 40);
+    assert.equal(fixture.captureCount(), 0);
+    assert.equal(fixture.offscreenMessages.length, 0);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('records capture exception details in the debug log', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  fixture.setOffscreenProcessFailure(() => new Error('Injected image processing failure.'));
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    await fixture.setStorage({
+      flowRecorderState: {
+        recording: true,
+        tabId: fixture.liveTab.id,
+        windowId: fixture.liveTab.windowId,
+        sessionId: fixture.sessionId,
+        sequence: 0,
+        captures: [],
+        settings: {
+          captureMode: 'tab',
+          captureOnClick: true,
+          captureOnScroll: true,
+          captureApi: false,
+          fullPage: false,
+          savePng: false,
+          savePdf: false
+        }
+      }
+    });
+    await loadBackground();
+
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const state = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    assert.equal(state.lastError, 'Capture failed: Injected image processing failure.');
+    const log = fixture.storageSnapshot().flowRecorderLog || [];
+    assert.ok(log.some((line) =>
+      line.includes('ERROR manual: Error: Injected image processing failure.') &&
+      line.includes('stack=')
+    ));
   } finally {
     globalThis.chrome = originalChrome;
   }
@@ -1303,7 +2045,7 @@ test('queues a settled navigation follow-up for a pending regular click capture'
     await Promise.all([clickCapture, navigation]);
 
     const state = await sendMessage(messageListener, { type: 'GET_STATE' });
-    assert.equal(fixture.captureCount(), 3);
+    assert.equal(fixture.captureCount(), 4);
     assert.equal(state.sequence, 41);
     assert.equal(state.captures.at(-1).reason, 'click');
     assert.equal(state.captures.at(-1).url, 'https://example.test/confirmation');
@@ -1466,7 +2208,7 @@ test('captures only the final landing page in an API-mode redirect chain', async
   }
 });
 
-test('marks a lost screen stream unavailable and restores it after sharing resumes', async () => {
+test('marks unhealthy or lost screen streams unavailable and restores them after sharing resumes', async () => {
   const originalChrome = globalThis.chrome;
   const fixture = createChrome();
   globalThis.chrome = fixture.chrome;
@@ -1487,12 +2229,32 @@ test('marks a lost screen stream unavailable and restores it after sharing resum
       }
     });
 
+    const unhealthy = await sendMessage(messageListener, {
+      type: 'SCREEN_UNHEALTHY',
+      source: 'screen-window'
+    });
+    assert.deepEqual(unhealthy, { ok: true, accepted: true });
+    let state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.streamActive, false);
+    assert.match(state.lastError, /blank or incomplete/);
+    assert.deepEqual(fixture.windowUpdates.at(-1), {
+      windowId: 77,
+      changes: { state: 'normal', focused: true }
+    });
+
+    const readyAfterUnhealthy = await sendMessage(messageListener, {
+      type: 'SCREEN_READY',
+      source: 'screen-window',
+      displaySurface: 'monitor'
+    });
+    assert.deepEqual(readyAfterUnhealthy, { ok: true, accepted: true });
+
     const ended = await sendMessage(messageListener, {
       type: 'SCREEN_ENDED',
       source: 'screen-window'
     });
     assert.deepEqual(ended, { ok: true, accepted: true });
-    let state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    state = await sendMessage(messageListener, { type: 'GET_STATE' });
     assert.equal(state.streamActive, false);
     assert.match(state.lastError, /Screen sharing stopped/);
     assert.deepEqual(fixture.windowUpdates.at(-1), {
@@ -1502,7 +2264,8 @@ test('marks a lost screen stream unavailable and restores it after sharing resum
 
     const ready = await sendMessage(messageListener, {
       type: 'SCREEN_READY',
-      source: 'screen-window'
+      source: 'screen-window',
+      displaySurface: 'monitor'
     });
     assert.deepEqual(ready, { ok: true, accepted: true });
     state = await sendMessage(messageListener, { type: 'GET_STATE' });
@@ -2016,6 +2779,59 @@ test('captures a new-tab link from the page it opens', async () => {
   }
 });
 
+test('adopts a manually opened tab and captures typed navigation and the instant hotkey', async () => {
+  const originalChrome = globalThis.chrome;
+  const fixture = createChrome();
+  globalThis.chrome = fixture.chrome;
+
+  try {
+    const manualTab = {
+      id: 8,
+      windowId: fixture.liveTab.windowId,
+      active: true,
+      title: 'New tab',
+      url: 'chrome://newtab/'
+    };
+    fixture.liveTab.active = false;
+    const getTab = fixture.chrome.tabs.get;
+    fixture.chrome.tabs.get = async (tabId) =>
+      tabId === manualTab.id ? { ...manualTab } : getTab(tabId);
+    fixture.chrome.tabs.query = async (query = {}) =>
+      query.active ? [{ ...manualTab }] : [{ ...fixture.liveTab }, { ...manualTab }];
+
+    await loadBackground();
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const commandListener = fixture.chrome.commands.onCommand.listeners[0];
+    await sendMessage(messageListener, { type: 'GET_STATE' });
+    await fixture.chrome.tabs.onCreated.listeners[0](manualTab);
+
+    manualTab.url = 'https://example.test/manually-entered';
+    manualTab.title = 'Manually entered page';
+    await fixture.chrome.webNavigation.onCommitted.listeners[0]({
+      tabId: manualTab.id,
+      frameId: 0,
+      transitionType: 'typed',
+      transitionQualifiers: [],
+      url: manualTab.url
+    });
+
+    let state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.tabId, manualTab.id);
+    assert.ok(state.trackedTabIds.includes(manualTab.id));
+    assert.equal(state.captures.at(-1).reason, 'typed-navigation');
+    assert.equal(state.captures.at(-1).url, manualTab.url);
+
+    const sequenceAfterNavigation = state.sequence;
+    await commandListener('capture-panel');
+    state = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(state.sequence, sequenceAfterNavigation + 1);
+    assert.equal(state.captures.at(-1).reason, 'instant-screenshot');
+    assert.equal(state.captures.at(-1).url, manualTab.url);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
 test('captures and tracks a new-tab link without an opener tab ID in either event order', async () => {
   const originalChrome = globalThis.chrome;
   const fixture = createChrome();
@@ -2212,8 +3028,10 @@ test('saves a checkpoint without stopping and continues the same recording', asy
     );
     assert.equal(saved.recording, true);
     assert.equal(saved.sessionId, previousSessionId);
-    assert.match(saved.savedPdfFilename, new RegExp(`^${previousSessionId}_checkpoint_.*\\.pdf$`));
+    assert.match(saved.savedPdfFilename, /^.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.pdf$/);
     assert.equal(fixture.exportRequests.length, 1);
+    assert.equal(fixture.exportRequests[0].active, false);
+    assert.equal(fixture.outputDialogRequests.length, 0);
     assert.match(
       new URL(fixture.exportRequests[0].url, 'https://extension.test').searchParams.get('filename'),
       new RegExp(`Jshotz/${previousSessionId}/`)
@@ -2260,7 +3078,7 @@ test('does not miss a checkpoint completion sent while the output window opens',
 
     assert.equal(saved.recording, true);
     assert.equal(saved.lastError, null);
-    assert.equal(saved.savedPdfFilename, 'fast-checkpoint.pdf');
+    assert.match(saved.savedPdfFilename, /^.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.pdf$/);
     assert.equal(fixture.exportRequests.length, 1);
     assert.match(
       new URL(fixture.exportRequests[0].url, 'https://extension.test').searchParams.get('requestId'),
@@ -2291,7 +3109,7 @@ test('ignores another output window completion while saving a checkpoint', async
 
     assert.equal(saved.recording, true);
     assert.equal(saved.lastError, null);
-    assert.equal(saved.savedPdfFilename, 'isolated-checkpoint.pdf');
+    assert.match(saved.savedPdfFilename, /^.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.pdf$/);
   } finally {
     globalThis.chrome = originalChrome;
   }
@@ -2334,6 +3152,8 @@ test('keeps the interim PDF when stopping without a final document', async () =>
       captureSequence: 5
     });
     assert.equal(fixture.exportRequests.length, 1);
+    assert.equal(fixture.exportRequests[0].active, false);
+    assert.equal(fixture.outputDialogRequests.length, 0);
     assert.deepEqual(
       JSON.parse(new URL(fixture.exportRequests[0].url, 'https://extension.test').searchParams.get('outputs')),
       [{
@@ -2384,7 +3204,7 @@ test('removes the interim PDF after a successful final document save', async () 
     });
 
     assert.equal(stopped.recording, false);
-    assert.equal(stopped.savedPdfFilename, 'completed-flow.pdf');
+    assert.match(stopped.savedPdfFilename, /^.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.pdf$/);
     assert.equal(stopped.interimOutput, null);
     assert.equal(fixture.exportRequests.length, 2);
     assert.deepEqual(
@@ -2453,7 +3273,7 @@ test('reveals a final output location only after an explicit request and recordi
     });
 
     assert.equal(stopped.recording, false);
-    assert.equal(stopped.savedPdfFilename, 'completed-flow.pdf');
+    assert.match(stopped.savedPdfFilename, /^.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.pdf$/);
     assert.equal(stopped.fileLocationOpened, true);
     assert.equal(stopped.fileLocationFallback, false);
     assert.deepEqual(fixture.revealedDownloads, [5001]);
@@ -2796,7 +3616,7 @@ test('uses a prepared resume folder once, then starts fresh after stopping', asy
     assert.deepEqual(prepared.pendingResumeFolder, { name: folder.directoryHandle.name });
 
     const resumed = await sendMessage(messageListener, {
-      type: 'START',
+      type: 'RESUME_FROM_FOLDER',
       settings: { captureMode: 'tab', fullPage: false, savePng: false, savePdf: false }
     });
     assert.equal(resumed.recording, true);
@@ -2819,6 +3639,194 @@ test('uses a prepared resume folder once, then starts fresh after stopping', asy
     assert.equal(fresh.recording, true);
     assert.equal(fresh.outputFolder, null);
     assert.notEqual(fresh.sessionId, resumed.sessionId);
+  } finally {
+    globalThis.chrome = originalChrome;
+    globalThis.indexedDB = originalIndexedDb;
+  }
+});
+
+test('starts fresh instead of consuming a pending resume folder', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalIndexedDb = globalThis.indexedDB;
+  const fixture = createChrome();
+  const folder = createResumeFolder();
+  globalThis.chrome = fixture.chrome;
+  globalThis.indexedDB = createIndexedDb();
+
+  try {
+    await fixture.setStorage({
+      flowRecorderState: {
+        recording: false,
+        sessionId: fixture.sessionId,
+        sequence: 1,
+        captures: [{ sequence: 1, title: 'Old folder screenshot', url: 'https://example.test/old' }],
+        pendingResumeFolder: { name: folder.directoryHandle.name },
+        settings: {
+          captureMode: 'tab',
+          captureOnClick: true,
+          captureOnScroll: true,
+          captureApi: false,
+          fullPage: false,
+          savePng: false,
+          savePdf: false
+        }
+      }
+    });
+    await saveCaptureFolder(folder.directoryHandle);
+    await loadBackground();
+
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const fresh = await sendMessage(messageListener, {
+      type: 'START',
+      sessionFolderName: 'Fresh_flow',
+      settings: { captureMode: 'tab', fullPage: false, savePng: false, savePdf: false }
+    });
+
+    assert.equal(fresh.recording, true);
+    assert.notEqual(fresh.sessionId, fixture.sessionId);
+    assert.equal(fresh.sessionFolderName, 'Fresh_flow');
+    assert.equal(fresh.outputFolder, null);
+    assert.equal(fresh.pendingResumeFolder, null);
+    assert.equal(fresh.captures.some(({ title }) => title === 'Old folder screenshot'), false);
+    assert.equal(fresh.captures.length, 1);
+    assert.equal(fresh.captures[0].title, fixture.liveTab.title);
+    assert.equal(folder.written.has('flow-manifest.json'), false);
+  } finally {
+    globalThis.chrome = originalChrome;
+    globalThis.indexedDB = originalIndexedDb;
+  }
+});
+
+test('strips the complete filename timestamp from inferred screenshot titles', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalIndexedDb = globalThis.indexedDB;
+  const fixture = createChrome();
+  const folder = createResumeFolder({ withPreviousCapture: false });
+  const imageName = '004_2026-10-03_08-52-16-926_Register_your_retirement_account.png';
+  folder.addFile(imageName, Uint8Array.from([112, 114, 111, 98, 101]), 'image/png');
+  folder.addFile('flow-manifest.json', JSON.stringify({
+    sessionId: fixture.sessionId,
+    screenshots: [{
+      sequence: 4,
+      filename: `flow-captures/${fixture.sessionId}/${imageName}`
+    }]
+  }), 'application/json');
+  globalThis.chrome = fixture.chrome;
+  globalThis.indexedDB = createIndexedDb();
+
+  try {
+    await fixture.setStorage({
+      flowRecorderState: {
+        recording: false,
+        sessionId: fixture.sessionId,
+        sequence: 4,
+        captures: [],
+        settings: {
+          captureMode: 'tab',
+          captureOnClick: true,
+          captureOnScroll: true,
+          captureApi: false,
+          fullPage: false,
+          savePng: true,
+          savePdf: true
+        }
+      }
+    });
+    await saveCaptureFolder(folder.directoryHandle);
+    await loadBackground();
+
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const restored = await sendMessage(messageListener, { type: 'PREPARE_RESUME_FROM_FOLDER' });
+    assert.equal(restored.captures[0].title, 'Register your retirement account');
+  } finally {
+    globalThis.chrome = originalChrome;
+    globalThis.indexedDB = originalIndexedDb;
+  }
+});
+
+test('reattaches a populated folder with retained metadata and completed evidence', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalIndexedDb = globalThis.indexedDB;
+  const fixture = createChrome();
+  const folder = createResumeFolder();
+  const imageName = '001_2026-09-12_10-00-00-000_Previous_step.png';
+  const storedCapture = {
+    sequence: 1,
+    filename: `flow-captures/${fixture.sessionId}/${imageName}`,
+    reason: 'click',
+    label: 'Open invoice',
+    title: 'Billing confirmation',
+    note: 'Verified retained metadata',
+    url: 'https://example.test/billing',
+    mode: 'tab',
+    apiCalls: 3,
+    capturedAt: '2026-09-12T10:00:01.000Z',
+    actionAt: '2026-09-12T10:00:00.000Z',
+    requestSequence: 9
+  };
+  folder.addFile('flow-manifest.json', JSON.stringify({
+    sessionId: fixture.sessionId,
+    screenshots: [{
+      sequence: 1,
+      reason: 'resumed',
+      title: 'Inferred screenshot title',
+      url: '',
+      filename: `flow-captures/${fixture.sessionId}/${imageName}`
+    }]
+  }), 'application/json');
+  globalThis.chrome = fixture.chrome;
+  globalThis.indexedDB = createIndexedDb();
+
+  try {
+    await fixture.setStorage({
+      flowRecorderState: {
+        recording: false,
+        sessionId: fixture.sessionId,
+        sequence: 1,
+        captures: [storedCapture],
+        settings: {
+          captureMode: 'tab',
+          captureOnClick: true,
+          captureOnScroll: true,
+          captureApi: false,
+          fullPage: false,
+          savePng: true,
+          savePdf: true
+        }
+      }
+    });
+    await saveCaptureFolder(folder.directoryHandle);
+    await loadBackground();
+
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const prepared = await sendMessage(messageListener, { type: 'PREPARE_RESUME_FROM_FOLDER' });
+    assert.equal(prepared.recording, false);
+    assert.deepEqual(prepared.pendingResumeFolder, { name: folder.directoryHandle.name });
+    assert.deepEqual(prepared.completedEvidence && {
+      sessionId: prepared.completedEvidence.sessionId,
+      captureCount: prepared.completedEvidence.captureCount,
+      outputFolderName: prepared.completedEvidence.outputFolderName
+    }, {
+      sessionId: fixture.sessionId,
+      captureCount: 1,
+      outputFolderName: folder.directoryHandle.name
+    });
+    assert.equal(prepared.captures[0].title, storedCapture.title);
+    assert.equal(prepared.captures[0].url, storedCapture.url);
+    assert.equal(prepared.captures[0].actionAt, storedCapture.actionAt);
+    assert.equal(prepared.captures[0].reason, storedCapture.reason);
+
+    const evidence = await sendMessage(messageListener, {
+      type: 'GENERATE_EVIDENCE',
+      outputFormats: ['pdf'],
+      excludedSequences: []
+    });
+    assert.equal(evidence.lastError, null);
+    assert.equal(evidence.completedEvidence.sessionId, fixture.sessionId);
+    assert.ok(folder.written.has(evidence.savedPdfFilename));
+    const repairedManifest = JSON.parse(folder.written.get('flow-manifest.json'));
+    assert.equal(repairedManifest.screenshots[0].url, storedCapture.url);
+    assert.equal(repairedManifest.screenshots[0].actionAt, storedCapture.actionAt);
   } finally {
     globalThis.chrome = originalChrome;
     globalThis.indexedDB = originalIndexedDb;
@@ -2864,7 +3872,7 @@ test('accepts capture and checkpoint shortcuts in a second recording on the same
     });
     assert.equal(checkpoint.recording, true);
     assert.match(
-      new URL(fixture.exportRequests.at(-1).url, 'https://extension.test').pathname,
+      new URL(fixture.outputDialogRequests.at(-1).url, 'https://extension.test').pathname,
       /output-dialog\.html$/
     );
   } finally {
@@ -2872,7 +3880,7 @@ test('accepts capture and checkpoint shortcuts in a second recording on the same
   }
 });
 
-test('captures Alt+Shift+D when DevTools was open before the screen recording started', async () => {
+test('captures Alt+Shift+D with or without DevTools from a retained screen stream in tab mode', async () => {
   const originalChrome = globalThis.chrome;
   const fixture = createChrome();
   let devToolsAttached = false;
@@ -2894,25 +3902,45 @@ test('captures Alt+Shift+D when DevTools was open before the screen recording st
     const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
     const commandListener = fixture.chrome.commands.onCommand.listeners[0];
     const recovered = await sendMessage(messageListener, { type: 'GET_STATE' });
+    await commandListener('capture-later');
+    let unavailable = await sendMessage(messageListener, { type: 'GET_STATE' });
+    assert.equal(unavailable.sequence, recovered.sequence);
+
+    const unavailableFromPopup = await sendMessage(messageListener, { type: 'CAPTURE_LATER' });
+    assert.equal(unavailableFromPopup.screenCaptureAvailable, false);
+    assert.equal(unavailableFromPopup.sequence, recovered.sequence);
+
     await fixture.storage.set({
       flowRecorderState: {
         ...fixture.storage.snapshot().flowRecorderState,
-        settings: { ...recovered.settings, captureMode: 'screen' },
+        settings: { ...recovered.settings, captureMode: 'tab' },
         streamActive: true
       }
     });
+    await sendMessage(messageListener, {
+      type: 'DEVTOOLS_CLOSED',
+      source: 'devtools-page',
+      tabId: fixture.liveTab.id
+    });
 
     const available = await sendMessage(messageListener, { type: 'GET_STATE' });
-    assert.equal(available.devToolsOpen, true);
+    assert.equal(available.devToolsOpen, false);
+    assert.equal(available.screenCaptureAvailable, true);
     await commandListener('capture-later');
-    const captured = await sendMessage(messageListener, { type: 'GET_STATE' });
+    let captured = await sendMessage(messageListener, { type: 'GET_STATE' });
     assert.equal(captured.sequence, recovered.sequence + 1);
 
     const popupResponse = await sendMessage(messageListener, { type: 'CAPTURE_LATER' });
-    assert.equal(popupResponse.devToolsOpen, true);
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(popupResponse.screenCaptureAvailable, true);
     const capturedFromPopup = await sendMessage(messageListener, { type: 'GET_STATE' });
     assert.equal(capturedFromPopup.sequence, recovered.sequence + 2);
+    assert.deepEqual(
+      fixture.screenMessages
+        .filter(({ type }) => type === 'SCREEN_SET_ACTIVE')
+        .slice(-4)
+        .map(({ active }) => active),
+      [true, false, true, false]
+    );
   } finally {
     globalThis.chrome = originalChrome;
   }
@@ -2955,6 +3983,53 @@ test('starts fresh after browser startup when a resume folder was only selected'
     assert.equal(started.outputFolder, null);
   } finally {
     globalThis.chrome = originalChrome;
+  }
+});
+
+test('checkpoints capture metadata to the selected folder before stop', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalIndexedDb = globalThis.indexedDB;
+  const fixture = createChrome();
+  const folder = createResumeFolder({ withPreviousCapture: false });
+  globalThis.chrome = fixture.chrome;
+  globalThis.indexedDB = createIndexedDb();
+
+  try {
+    await fixture.setStorage({
+      flowRecorderState: {
+        recording: true,
+        tabId: fixture.liveTab.id,
+        windowId: fixture.liveTab.windowId,
+        sessionId: fixture.sessionId,
+        sequence: 0,
+        captures: [],
+        outputFolder: { name: folder.directoryHandle.name },
+        settings: {
+          captureMode: 'tab',
+          captureOnClick: true,
+          captureOnScroll: true,
+          captureApi: false,
+          fullPage: false,
+          savePng: true,
+          savePdf: false
+        }
+      }
+    });
+    await saveCaptureFolder(folder.directoryHandle);
+    await loadBackground();
+
+    const messageListener = fixture.chrome.runtime.onMessage.listeners[0];
+    const captured = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
+    const manifest = JSON.parse(folder.written.get('flow-manifest.json'));
+
+    assert.equal(captured.recording, true);
+    assert.equal(manifest.screenshotCount, 1);
+    assert.equal(manifest.screenshots[0].url, fixture.liveTab.url);
+    assert.equal(manifest.screenshots[0].title, fixture.liveTab.title);
+    assert.equal(manifest.screenshots[0].reason, 'manual');
+  } finally {
+    globalThis.chrome = originalChrome;
+    globalThis.indexedDB = originalIndexedDb;
   }
 });
 
@@ -3011,8 +4086,8 @@ test('reconnects an active recording to an empty selected capture folder', async
     const saved = await sendMessage(messageListener, { type: 'SAVE_FLOW' });
     assert.equal(saved.lastError, null);
     assert.equal(saved.folderAccessNeeded, false);
-    assert.match(saved.savedPdfFilename, /^session_before_crash_checkpoint_.*\.pdf$/);
-    assert.ok([...folder.written.keys()].some((name) => /_checkpoint_.*\.pdf$/.test(name)));
+    assert.match(saved.savedPdfFilename, /^session_before_crash_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.pdf$/);
+    assert.ok([...folder.written.keys()].includes(saved.savedPdfFilename));
     assert.equal(fixture.exportRequests.length, 0);
 
     const continued = await sendMessage(messageListener, { type: 'CAPTURE_NOW' });
@@ -3038,7 +4113,7 @@ test('reconnects an active recording to an empty selected capture folder', async
   }
 });
 
-test('stops and saves custom-named PDF and Word documents together in the selected folder', async () => {
+test('stops and saves folder-named timestamped PDF and Word documents together', async () => {
   const originalChrome = globalThis.chrome;
   const originalIndexedDb = globalThis.indexedDB;
   const fixture = createChrome();
@@ -3093,21 +4168,26 @@ test('stops and saves custom-named PDF and Word documents together in the select
     assert.equal(saved.recording, false);
     assert.equal(saved.fileLocationOpened, true);
     assert.equal(saved.fileLocationFallback, true);
-    assert.deepEqual(saved.savedOutputFilenames, ['review-package.pdf', 'review-package.docx']);
-    assert.equal(saved.savedPdfFilename, 'review-package.pdf');
-    assert.ok(folder.written.has('review-package.pdf'));
-    assert.ok(folder.written.has('review-package.docx'));
+    assert.equal(saved.savedOutputFilenames.length, 2);
+    const sharedBase = /^session_before_crash_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}$/;
+    const pdfBase = saved.savedOutputFilenames[0].replace(/\.pdf$/, '');
+    const docxBase = saved.savedOutputFilenames[1].replace(/\.docx$/, '');
+    assert.match(pdfBase, sharedBase);
+    assert.equal(docxBase, pdfBase);
+    assert.equal(saved.savedPdfFilename, `${pdfBase}.pdf`);
+    assert.ok(folder.written.has(`${pdfBase}.pdf`));
+    assert.ok(folder.written.has(`${pdfBase}.docx`));
     assert.equal(fixture.exportRequests.length, 0);
     assert.deepEqual(fixture.revealedDownloads, ['default-folder']);
     const manifest = JSON.parse(folder.written.get('flow-manifest.json'));
     assert.ok(
       manifest.debugLog.some((line) =>
-        line.includes('FILE_SAVE status=completed type=pdf destination=selected-folder filename=review-package.pdf')
+        line.includes(`FILE_SAVE status=completed type=pdf destination=selected-folder filename=${pdfBase}.pdf`)
       )
     );
     assert.ok(
       manifest.debugLog.some((line) =>
-        line.includes('FILE_SAVE status=completed type=docx destination=selected-folder filename=review-package.docx')
+        line.includes(`FILE_SAVE status=completed type=docx destination=selected-folder filename=${pdfBase}.docx`)
       )
     );
   } finally {
@@ -3177,7 +4257,7 @@ test('generates versioned evidence documents from a stopped selected-folder reco
       captureCount: 1,
       outputFolderName: folder.directoryHandle.name
     });
-    assert.ok(folder.written.has('review-package.pdf'));
+    assert.ok(folder.written.has(stopped.savedPdfFilename));
 
     const evidence = await sendMessage(messageListener, {
       type: 'GENERATE_EVIDENCE',
@@ -3190,8 +4270,9 @@ test('generates versioned evidence documents from a stopped selected-folder reco
     assert.equal(evidence.lastError, null);
     assert.equal(evidence.completedEvidence.sessionId, fixture.sessionId);
     assert.equal(evidence.savedOutputFilenames.length, 2);
-    assert.match(evidence.savedOutputFilenames[0], /^review-package_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.pdf$/);
-    assert.match(evidence.savedOutputFilenames[1], /^review-package_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.docx$/);
+    assert.match(evidence.savedOutputFilenames[0], /^session_before_crash_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}(?:_\d+)?\.pdf$/);
+    assert.match(evidence.savedOutputFilenames[1], /^session_before_crash_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}(?:_\d+)?\.docx$/);
+    assert.equal(evidence.savedOutputFilenames[0].replace(/\.pdf$/, ''), evidence.savedOutputFilenames[1].replace(/\.docx$/, ''));
     assert.ok(folder.written.has(evidence.savedOutputFilenames[0]));
     assert.ok(folder.written.has(evidence.savedOutputFilenames[1]));
     assert.deepEqual(
@@ -3256,7 +4337,7 @@ test('versions evidence documents in the prior Downloads session directory', asy
     });
 
     assert.equal(evidence.lastError, null);
-    assert.match(evidence.savedPdfFilename, /^review-package_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.pdf$/);
+    assert.match(evidence.savedPdfFilename, new RegExp(`^${fixture.sessionId}_\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}-\\d{3}\\.pdf$`));
     const outputRequest = fixture.exportRequests.at(-1);
     const output = JSON.parse(new URL(outputRequest.url, 'https://extension.test').searchParams.get('outputs'))[0];
     assert.equal(output.filename, `flow-captures/${fixture.sessionId}/${evidence.savedPdfFilename}`);
@@ -3285,15 +4366,15 @@ test('opens a non-revealing final-save output dialog without ending the recordin
 
     assert.equal(state.recording, true);
     assert.match(
-      new URL(fixture.exportRequests.at(-1).url, 'https://extension.test').pathname,
+      new URL(fixture.outputDialogRequests.at(-1).url, 'https://extension.test').pathname,
       /output-dialog\.html$/
     );
     assert.equal(
-      new URL(fixture.exportRequests.at(-1).url, 'https://extension.test').searchParams.get('mode'),
+      new URL(fixture.outputDialogRequests.at(-1).url, 'https://extension.test').searchParams.get('mode'),
       'final'
     );
     assert.equal(
-      new URL(fixture.exportRequests.at(-1).url, 'https://extension.test').searchParams.has('reveal'), false
+      new URL(fixture.outputDialogRequests.at(-1).url, 'https://extension.test').searchParams.has('reveal'), false
     );
   } finally {
     globalThis.chrome = originalChrome;

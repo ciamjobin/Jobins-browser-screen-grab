@@ -68,15 +68,15 @@ test('builds a Word document with screenshot headings, bracketed notes, and embe
   assert.match(documentXml, /Sign in \[Use the shared account\]/);
   assert.match(documentXml, /https:\/\/example\.test\/login\?team=QA/);
   assert.match(documentXml, /r:embed="rId3"/);
-  assert.match(documentXml, /w:headerReference w:type="default" r:id="rId98"/);
-  assert.match(documentXml, /w:footerReference w:type="default" r:id="rId99"/);
+  assert.match(documentXml, /w:headerReference w:type="default" r:id="rId4"/);
+  assert.match(documentXml, /w:footerReference w:type="default" r:id="rId5"/);
   assert.match(documentXml, /Time of action: 2026-09-13 10:00 UTC/);
   assert.match(documentXml, /w:spacing w:after="20"/);
   const relationships = new TextDecoder().decode(entries.get('word/_rels/document.xml.rels'));
   assert.match(relationships, /styles\.xml/);
   assert.match(relationships, /settings\.xml/);
-  assert.match(relationships, /rId98.*header1\.xml/);
-  assert.match(relationships, /rId99.*footer1\.xml/);
+  assert.match(relationships, /rId4.*header1\.xml/);
+  assert.match(relationships, /rId5.*footer1\.xml/);
   const headerXml = new TextDecoder().decode(entries.get('word/header1.xml'));
   assert.match(headerXml, /w:jc w:val="right"/);
   assert.match(headerXml, /w:instr=" PAGE "/);
@@ -90,6 +90,31 @@ test('builds a Word document with screenshot headings, bracketed notes, and embe
     new TextDecoder().decode(entries.get('docProps/custom.xml')),
     /name="Classification"><vt:lpwstr>Internal<\/vt:lpwstr>/
   );
+});
+
+test('keeps relationship IDs unique in large screenshot documents', () => {
+  const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]);
+  const pages = Array.from({ length: 300 }, (_, index) => ({
+    title: `Screenshot ${index + 1}`,
+    url: `https://example.test/${index + 1}`,
+    time: '2026-10-03 06:10 UTC',
+    width: 1,
+    height: 1,
+    jpeg
+  }));
+  const entries = zipEntries(buildDocx(pages));
+  const decoder = new TextDecoder();
+  const documentXml = decoder.decode(entries.get('word/document.xml'));
+  const relationshipsXml = decoder.decode(entries.get('word/_rels/document.xml.rels'));
+  const relationshipIds = [...relationshipsXml.matchAll(/<Relationship Id="(rId\d+)"/g)]
+    .map((match) => match[1]);
+  const referencedIds = [...documentXml.matchAll(/(?:r:embed|r:id)="(rId\d+)"/g)]
+    .map((match) => match[1]);
+
+  assert.equal(new Set(relationshipIds).size, relationshipIds.length);
+  for (const relationshipId of referencedIds) {
+    assert.equal(relationshipIds.filter((id) => id === relationshipId).length, 1);
+  }
 });
 
 test('removes characters that are illegal in Office Open XML text', () => {
@@ -125,6 +150,23 @@ test('renders screenshot notes in PDF headings', () => {
   assert.match(pdfText, /Sign in \[Use the shared account\]/);
   assert.match(pdfText, /Captured by Jobin's Screenshots/);
   assert.match(pdfText, /Page 1 of 1/);
+});
+
+test('builds a 300-page PDF without dropping buffered screenshots', () => {
+  const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]);
+  const pages = Array.from({ length: 300 }, (_, index) => ({
+    title: `Screenshot ${index + 1}`,
+    url: `https://example.test/${index + 1}`,
+    time: '2026-10-05 10:00 UTC',
+    width: 1,
+    height: 1,
+    jpeg,
+    apiRows: []
+  }));
+  const pdfText = Buffer.from(buildPdf(pages)).toString('latin1');
+
+  assert.match(pdfText, /\/Count 300\b/);
+  assert.equal((pdfText.match(/\/Subtype \/Image/g) || []).length, 300);
 });
 
 test('numbers every physical PDF sheet including API continuation pages', () => {

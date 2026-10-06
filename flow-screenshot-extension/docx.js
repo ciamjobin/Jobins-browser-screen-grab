@@ -189,7 +189,7 @@ function apiParagraphs(rows) {
   return paragraphs.join('');
 }
 
-function documentXml(pages) {
+function documentXml(pages, headerRelationshipId, footerRelationshipId) {
   const sections = pages.map(({ page, image }, index) => {
     const content = [
       textParagraph(heading(page), { bold: true, size: 30 }),
@@ -210,7 +210,7 @@ function documentXml(pages) {
     'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">',
     '<w:body>',
     sections.join(''),
-    '<w:sectPr><w:headerReference w:type="default" r:id="rId98"/><w:footerReference w:type="default" r:id="rId99"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="360" w:footer="360"/></w:sectPr>',
+    `<w:sectPr><w:headerReference w:type="default" r:id="rId${headerRelationshipId}"/><w:footerReference w:type="default" r:id="rId${footerRelationshipId}"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="360" w:footer="360"/></w:sectPr>`,
     '</w:body></w:document>'
   ].join('');
 }
@@ -246,14 +246,14 @@ function rootRelationships() {
   ].join('');
 }
 
-function documentRelationships(images) {
+function documentRelationships(images, headerRelationshipId, footerRelationshipId) {
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>',
     '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>',
-    '<Relationship Id="rId98" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>',
-    '<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>',
+    `<Relationship Id="rId${headerRelationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>`,
+    `<Relationship Id="rId${footerRelationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>`,
     ...images.map((image) =>
       `<Relationship Id="rId${image.relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image${image.id}.jpg"/>`
     ),
@@ -364,6 +364,8 @@ export function buildDocx(pages) {
     if (image) images.push(image);
     return { page: page || {}, image };
   });
+  const headerRelationshipId = images.length + 3;
+  const footerRelationshipId = headerRelationshipId + 1;
 
   const entries = [
     ['[Content_Types].xml', contentTypes()],
@@ -371,12 +373,12 @@ export function buildDocx(pages) {
     ['docProps/core.xml', coreProperties(documentPages.map(({ page }) => page))],
     ['docProps/app.xml', appProperties()],
     ['docProps/custom.xml', customProperties()],
-    ['word/document.xml', documentXml(documentPages)],
+    ['word/document.xml', documentXml(documentPages, headerRelationshipId, footerRelationshipId)],
     ['word/header1.xml', headerXml()],
     ['word/footer1.xml', footerXml()],
     ['word/styles.xml', stylesXml()],
     ['word/settings.xml', settingsXml()],
-    ['word/_rels/document.xml.rels', documentRelationships(images)]
+    ['word/_rels/document.xml.rels', documentRelationships(images, headerRelationshipId, footerRelationshipId)]
   ];
   for (const image of images) entries.push([`word/media/image${image.id}.jpg`, image.jpeg]);
   return zip(entries);

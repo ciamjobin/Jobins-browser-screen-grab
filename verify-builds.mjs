@@ -59,6 +59,8 @@ for (const [name, manifest] of [['chrome-edge', chromium], ['firefox', firefox]]
   const refs = [
     ...(manifest.background?.scripts || []),
     manifest.background?.service_worker,
+    manifest.devtools_page,
+    ...(manifest.devtools_page ? ['devtools.js'] : []),
     manifest.action?.default_popup,
     'capture-folder.js',
     'docx.js',
@@ -78,6 +80,29 @@ for (const [name, manifest] of [['chrome-edge', chromium], ['firefox', firefox]]
     const ok = await readFile(`dist/${name}/${ref}`).then(() => true, () => false);
     check(`${name}: ${ref} exists`, ok);
   }
+
+  const background = await readFile(`dist/${name}/background.js`, 'utf8');
+  const captureWindow = await readFile(`dist/${name}/capture-window.js`, 'utf8');
+  const devtools = await readFile(`dist/${name}/devtools.js`, 'utf8');
+  const exporter = await readFile(`dist/${name}/exporter.js`, 'utf8');
+  check(`${name}: output worker opens in an inactive tab`, /active:\s*false/.test(background));
+  check(`${name}: output worker avoids popup windows`, !/windows\.create\(\{\s*url:\s*`exporter\.html/.test(background));
+  check(
+    `${name}: output downloads suppress browser UI`,
+    /setUiOptions\(\{\s*enabled:\s*false\s*\}\)/.test(exporter)
+  );
+  check(`${name}: output downloads use Blob URLs`, /URL\.createObjectURL\(/.test(exporter));
+  check(`${name}: output Blob URLs are revoked`, /URL\.revokeObjectURL\(/.test(exporter));
+  check(
+    `${name}: screen sharing accepts monitor or window sources`,
+    /displaySurface\s*!==\s*['"]monitor['"]\s*&&\s*displaySurface\s*!==\s*['"]window['"]/.test(captureWindow)
+  );
+  check(`${name}: screen sharing rejects source dimension changes`, /hasStableMonitorDimensions\(\)/.test(captureWindow));
+  check(`${name}: screen helper supports active and standby reuse`, /SCREEN_SET_ACTIVE/.test(captureWindow));
+  check(`${name}: DevTools lifecycle controls capture mode`, /jshotz-devtools/.test(background));
+  check(`${name}: DevTools closure expires without popup polling`, /devToolsExpiryTimersByTab/.test(background));
+  check(`${name}: DevTools presence survives focus loss`, /DEVTOOLS_HEARTBEAT/.test(devtools));
+  check(`${name}: DevTools port reconnects after worker suspension`, /setTimeout\(connect,\s*250\)/.test(devtools));
 }
 
 // The Firefox package must not ship or reference the offscreen document.

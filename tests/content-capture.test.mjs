@@ -467,6 +467,20 @@ test('captures nested and aria-expanded links immediately before navigation', ()
   assert.equal(environment.captures().at(-1).opensNewTab, true);
 });
 
+test('captures logout controls immediately before page unload', () => {
+  const environment = createContentEnvironment();
+  const logout = new FakeElement('button', {
+    parent: environment.body,
+    text: 'Sign out'
+  });
+
+  environment.window.dispatch('click', { target: logout });
+
+  assert.equal(environment.captures().length, 1);
+  assert.equal(environment.captures()[0].reason, 'click');
+  assert.equal(environment.captures()[0].label, 'Sign out');
+});
+
 test('preserves action time through delayed capture paths', async () => {
   const clickEnvironment = createContentEnvironment({ now: 1000 });
   const clickTrigger = new FakeElement('button', { parent: clickEnvironment.body, text: 'Continue' });

@@ -59,8 +59,8 @@ Click the JShotz icon to open the popup. It has three parts:
 - **Settings** — capture source and a compact **Capture options** list. Expand the list to check or
   clear behavior options. Settings lock once recording starts, except the capture source, which can
   be changed mid-recording.
-- **Actions** — Start/Stop, Pause/Continue, Capture now, Capture DevTools, Save checkpoint, and
-  Resume capture from folder.
+- **Actions** — Start/Stop, Pause/Continue, Instant screenshot, Capture whole page,
+  Capture Screen + DevTools, Save checkpoint, and Resume capture from folder.
 - **Screenshots list** — a live list of what's been captured so far in the current session and
   checkboxes that choose the screenshots included in output, plus an optional 50-character note
   for each screenshot.
@@ -184,10 +184,9 @@ available until you start a new recording.
 
 | Action | How | Notes |
 |---|---|---|
-| Capture now | Click **Capture now** in the popup | Whole-page when enabled and direct capture is available; otherwise one visible frame |
-| Whole-page hotkey | Press **Alt+Shift+J** while the page has focus | Same whole-page function as **Capture now**; otherwise one visible frame when direct capture is unavailable |
-| DevTools panel capture | Press **Alt+Shift+K** while a DevTools panel is open | Captures exactly what's on screen, including the DevTools panel |
-| Capture DevTools | In **Screen / window** mode with DevTools open, click **Capture DevTools**, or press **Alt+Shift+D** | Captures the shared screen immediately; the button and shortcut do nothing until DevTools and screen sharing are both active |
+| Instant screenshot | Press **Alt+Shift+K**, or click **Instant screenshot** | Captures one visible browser frame immediately |
+| Whole-page capture | Press **Alt+Shift+J** while the page has focus, or click **Capture whole page** | Captures the whole page when direct capture is available; otherwise saves one visible frame |
+| Capture shared screen | When screen sharing is live, click **Capture shared screen**, or press **Alt+Shift+D** | Captures the shared screen whether or not DevTools is open. The retained helper is temporarily activated and returned to standby if normal flow capture is in Tab or API mode |
 
 Manual captures are available only while recording is active and not paused.
 
@@ -266,7 +265,7 @@ When **"Whole-page shots for manual captures"** is enabled, the following explic
 capture the *entire* scrollable page instead of just the visible area when direct capture is available:
 
 - **Alt+Shift+J**
-- **Capture now**
+- **Capture whole page**
 
 Automatic captures (clicks, scrolling, field edits, and navigation) always remain one ordinary
 viewport shot, including narrow responsive layouts and DevTools Device Mode.
@@ -295,8 +294,8 @@ viewport shot, including narrow responsive layouts and DevTools Device Mode.
 | Shortcut | Action |
 |---|---|
 | `Alt+Shift+J` | Whole-page capture (page must have focus) |
-| `Alt+Shift+K` | Capture the current DevTools panel |
-| `Alt+Shift+D` | Capture in 5 seconds |
+| `Alt+Shift+K` | Instant screenshot of the current browser view |
+| `Alt+Shift+D` | Capture the retained shared-screen source; DevTools is included if visible |
 | `Shift+Ctrl+S` | Open a named checkpoint save dialog and continue recording after saving |
 | `Ctrl+S` | Open the final save dialog, save the chosen output, and stop recording without opening the file location |
 | `Ctrl+Alt+S` | Open the final save dialog, save the chosen output, stop recording, and open its browser-download location |
@@ -349,7 +348,7 @@ captured page. API tables appear only on screenshots captured in **API + Screens
 - If the Screen/window share picker is cancelled or the shared source closes, recording continues
   with Tab viewport captures. Select Screen/window again when you are ready to share a surface.
 - During a whole-page capture, wait for the progress bar to complete before capturing again.
-  **Capture now** is temporarily disabled while that work is in progress.
+  **Capture whole page** is temporarily disabled while that work is in progress.
 - If a page does not record clicks or scrolling, confirm that it is an ordinary website rather
   than a browser-protected page, then refresh the tab and start a new recording.
 - If JShotz says **Capture skipped: JShotz needs access to the current page**, Chrome has revoked

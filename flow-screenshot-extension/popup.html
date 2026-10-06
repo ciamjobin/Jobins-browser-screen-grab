@@ -12,6 +12,7 @@
     </header>
 
     <p id="status" class="status idle">Idle</p>
+    <p id="memoryStatus" class="memory-status" aria-live="polite" hidden></p>
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
     <div id="fullPageProgress" class="full-page-progress" hidden aria-live="polite">
@@ -27,7 +28,8 @@
     <div class="settings">
       <label class="field mode-switch">
         <span>Capture source (can be changed mid-recording)</span>
-        <select id="captureMode">
+        <select id="captureMode" required>
+          <option value="" disabled>Choose an available capture source</option>
           <option value="tab">Tab viewport only</option>
           <option value="api">API + Screenshot</option>
           <option value="screen">Screen / window (DevTools + taskbar)</option>
@@ -36,7 +38,7 @@
 
       <p class="note" id="shortcutHint" hidden>
         JShotz automatically buffers settled DevTools changes, including opened API requests, detail tabs,
-        and scrolling. Use <strong>Alt+Shift+K</strong> for an extra capture, or <strong>Alt+Shift+D</strong>
+        and scrolling. Use <strong>Alt+Shift+K</strong> for an instant screenshot, or <strong>Alt+Shift+D</strong>
         when the DevTools window has focus and Chrome blocks extension shortcuts.
       </p>
 
@@ -44,8 +46,8 @@
         <strong>Available shortcuts</strong>
         <ul class="shortcut-list">
           <li><strong>Alt+Shift+J</strong> Whole page</li>
-          <li><strong>Alt+Shift+K</strong> DevTools</li>
-          <li><strong>Alt+Shift+D</strong> Delayed DevTools</li>
+          <li><strong>Alt+Shift+K</strong> Instant screenshot</li>
+          <li><strong>Alt+Shift+D</strong> Shared screen (includes DevTools when visible)</li>
           <li><strong>Ctrl+Shift+S</strong> Save checkpoint</li>
           <li><strong>Ctrl+S</strong> Save and stop</li>
           <li><strong>Ctrl+Alt+S</strong> Save, stop, and open location</li>
@@ -68,7 +70,8 @@
     </div>
 
     <div class="actions" id="mainActions">
-      <button id="toggle" class="primary">Start recording</button>
+      <button id="toggle" class="primary">Start new recording</button>
+      <button id="continueRecording">Continue recording</button>
       <div class="confirm session-folder-prompt" id="sessionFolderPrompt" hidden>
         <p>Name this evidence folder</p>
         <label class="field">
@@ -96,8 +99,9 @@
         </div>
       </div>
       <button id="pauseResume" hidden>Pause recording</button>
+      <button id="captureInstant" disabled>Instant screenshot (Alt+Shift+K)</button>
       <button id="captureNow" disabled>Capture whole page (Alt+Shift+J)</button>
-      <button id="captureLater" disabled>Capture DevTools (Alt+Shift+D)</button>
+      <button id="captureLater" disabled>Capture shared screen (Alt+Shift+D)</button>
       <button id="saveFlow" class="primary" disabled>Save checkpoint (Ctrl+Shift+S)</button>
     </div>
 
@@ -108,8 +112,8 @@
     <div class="confirm" id="filenamePrompt" hidden>
       <p id="outputPromptTitle" class="output-prompt-title"></p>
       <label class="field">
-        <span>File name</span>
-        <input id="outputFilename" type="text" autocomplete="off" />
+        <span>Evidence folder</span>
+        <input id="outputFilename" type="text" autocomplete="off" readonly />
       </label>
       <fieldset class="output-formats">
         <legend>Output formats</legend>

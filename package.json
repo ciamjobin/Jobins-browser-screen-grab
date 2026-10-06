@@ -6,7 +6,8 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test tests/capture-window.test.mjs tests/content-capture.test.mjs tests/docx.test.mjs tests/exporter.test.mjs tests/image-worker.test.mjs tests/page-hook.test.mjs tests/recording-recovery.test.mjs",
-    "test:popup": "playwright test tests/popup-output.spec.js"
+    "test:popup": "playwright test tests/popup-output.spec.js",
+    "release:check": "npm test && npm run test:popup && node build.mjs && node verify-builds.mjs"
   },
   "keywords": [],
   "author": "",
